@@ -39,12 +39,6 @@ export function createAgentTools(
           ? toolCallId
           : undefined;
       const toolArgumentsAttribute = serializeGenAiAttribute(params);
-      const traceToolContext = {
-        ...spanContext,
-        conversationId: spanContext.conversationId,
-        turnId: spanContext.turnId,
-        agentId: spanContext.agentId,
-      };
       if (toolName === "reportProgress") {
         const status = buildReportedProgressStatus(params);
         if (status) {
@@ -115,9 +109,16 @@ export function createAgentTools(
                 details: normalized.details,
               });
             }
-            const toolResultAttribute = serializeGenAiAttribute(
-              normalized.details,
-            );
+            const resultAttributeValue =
+              normalized.details &&
+              typeof normalized.details === "object" &&
+              "rawResult" in normalized.details &&
+              (normalized.details as { rawResult?: unknown }).rawResult !==
+                undefined
+                ? (normalized.details as { rawResult: unknown }).rawResult
+                : normalized.details;
+            const toolResultAttribute =
+              serializeGenAiAttribute(resultAttributeValue);
             if (toolResultAttribute) {
               setSpanAttributes({
                 "gen_ai.tool.call.result": toolResultAttribute,
@@ -133,7 +134,7 @@ export function createAgentTools(
               toolName,
               normalizedToolCallId,
               shouldTrace,
-              traceToolContext,
+              spanContext,
             );
           }
         },
