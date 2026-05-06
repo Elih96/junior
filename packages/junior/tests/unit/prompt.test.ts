@@ -48,8 +48,25 @@ describe("prompt builders", () => {
     });
 
     expect(buildSystemPrompt.length).toBe(0);
+    expect(firstSystemPrompt).toContain("<identity>");
+    expect(firstSystemPrompt).toContain("Your Slack username is");
     expect(buildSystemPrompt()).toBe(firstSystemPrompt);
     expect(firstTurnContext).not.toBe(secondTurnContext);
+    expect(firstTurnContext).not.toContain("<assistant>");
+    expect(firstTurnContext).not.toContain("<thread-participants>");
+    expect(firstTurnContext).toContain("<requester>");
     expect(buildSystemPrompt()).toBe(firstSystemPrompt);
+  });
+
+  it("omits requester context when requester metadata is unavailable", () => {
+    const turnContext = buildTurnContextPrompt({
+      availableSkills: [],
+      activeSkills: [],
+      activeMcpCatalogs: [],
+      invocation: null,
+      turnState: "fresh",
+    });
+
+    expect(turnContext).not.toContain("<requester>");
   });
 });
