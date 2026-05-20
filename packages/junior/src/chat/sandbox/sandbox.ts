@@ -36,6 +36,7 @@ import {
   missingFileResult,
   sliceFileContent,
 } from "@/chat/tools/sandbox/read-file";
+import { ToolInputError } from "@/chat/tools/execution/tool-input-error";
 
 // Spec: specs/security-policy.md (sandbox isolation, network policy, credential lifecycle)
 // Spec: specs/logging/tracing-spec.md (required sandbox span semantics)
@@ -248,7 +249,7 @@ export function createSandboxExecutor(options?: {
   ): Promise<SandboxExecutionEnvelope<T>> => {
     const filePath = String(rawInput.path ?? "").trim();
     if (!filePath) {
-      throw new Error("path is required");
+      throw new ToolInputError("path is required");
     }
     const offset = positiveInteger(rawInput.offset);
     const limit = positiveInteger(rawInput.limit);
@@ -330,7 +331,7 @@ export function createSandboxExecutor(options?: {
   ): Promise<SandboxExecutionEnvelope<T>> => {
     const filePath = String(rawInput.path ?? "").trim();
     if (!filePath) {
-      throw new Error("path is required");
+      throw new ToolInputError("path is required");
     }
 
     const content = String(rawInput.content ?? "");
@@ -370,10 +371,10 @@ export function createSandboxExecutor(options?: {
   ): Promise<SandboxExecutionEnvelope<T>> => {
     const filePath = String(rawInput.path ?? "").trim();
     if (!filePath) {
-      throw new Error("path is required");
+      throw new ToolInputError("path is required");
     }
     if (!Array.isArray(rawInput.edits)) {
-      throw new Error("edits is required");
+      throw new ToolInputError("edits is required");
     }
 
     logSandboxBootRequest("tool.editFile", {
@@ -406,7 +407,7 @@ export function createSandboxExecutor(options?: {
   ): Promise<SandboxExecutionEnvelope<T>> => {
     const pattern = String(rawInput.pattern ?? "");
     if (!pattern) {
-      throw new Error("pattern is required");
+      throw new ToolInputError("pattern is required");
     }
 
     logSandboxBootRequest("tool.grep");
@@ -447,7 +448,7 @@ export function createSandboxExecutor(options?: {
   ): Promise<SandboxExecutionEnvelope<T>> => {
     const pattern = String(rawInput.pattern ?? "");
     if (!pattern) {
-      throw new Error("pattern is required");
+      throw new ToolInputError("pattern is required");
     }
 
     logSandboxBootRequest("tool.findFiles");
@@ -509,7 +510,7 @@ export function createSandboxExecutor(options?: {
 
     if (params.toolName === "bash") {
       if (!bashCommand) {
-        throw new Error("command is required");
+        throw new ToolInputError("command is required");
       }
       if (options?.runBashCustomCommand) {
         const custom = await options.runBashCustomCommand(bashCommand);
