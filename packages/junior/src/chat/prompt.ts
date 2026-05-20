@@ -153,27 +153,57 @@ function renderTagBlock(tag: string, content: string): string {
   return [`<${tag}>`, content, `</${tag}>`].join("\n");
 }
 
+function formatSkillEntry(skill: SkillMetadata): string[] {
+  const skillLocation = `${workspaceSkillDir(skill.name)}/SKILL.md`;
+  const lines: string[] = [];
+  lines.push("  <skill>");
+  lines.push(`    <name>${escapeXml(skill.name)}</name>`);
+  lines.push(`    <description>${escapeXml(skill.description)}</description>`);
+  lines.push(`    <location>${escapeXml(skillLocation)}</location>`);
+  if (skill.pluginProvider) {
+    lines.push(`    <provider>${escapeXml(skill.pluginProvider)}</provider>`);
+  }
+  lines.push("  </skill>");
+  return lines;
+}
+
 function formatAvailableSkillsForPrompt(skills: SkillMetadata[]): string {
-  if (skills.length === 0) {
-    return "<available-skills>\n</available-skills>";
+  const autoSelectable = skills.filter(
+    (s) => s.disableModelInvocation !== true,
+  );
+  const explicitOnly = skills.filter((s) => s.disableModelInvocation === true);
+
+  const sections: string[] = [];
+
+  // Available skills: model may load these when they match the request.
+  const available = [
+    "<available-skills>",
+    ...(autoSelectable.length > 0
+      ? [
+          "Scan before answering. Load the most specific matching skill; do not answer from memory when a skill fits. If none fits, do not load a skill.",
+        ]
+      : []),
+  ];
+  for (const skill of autoSelectable) {
+    available.push(...formatSkillEntry(skill));
+  }
+  available.push("</available-skills>");
+  sections.push(available.join("\n"));
+
+  // User-callable skills: model must not auto-select these.
+  if (explicitOnly.length > 0) {
+    const userCallable = [
+      "<user-callable-skills>",
+      "Do not load based on context match or semantic relevance. Only load when the user's current message explicitly references the skill by name.",
+    ];
+    for (const skill of explicitOnly) {
+      userCallable.push(...formatSkillEntry(skill));
+    }
+    userCallable.push("</user-callable-skills>");
+    sections.push(userCallable.join("\n"));
   }
 
-  const lines = ["<available-skills>"];
-  for (const skill of skills) {
-    const skillLocation = `${workspaceSkillDir(skill.name)}/SKILL.md`;
-    lines.push("  <skill>");
-    lines.push(`    <name>${escapeXml(skill.name)}</name>`);
-    lines.push(
-      `    <description>${escapeXml(skill.description)}</description>`,
-    );
-    lines.push(`    <location>${escapeXml(skillLocation)}</location>`);
-    if (skill.pluginProvider) {
-      lines.push(`    <provider>${escapeXml(skill.pluginProvider)}</provider>`);
-    }
-    lines.push("  </skill>");
-  }
-  lines.push("</available-skills>");
-  return lines.join("\n");
+  return sections.join("\n");
 }
 
 function formatLoadedSkillsForPrompt(skills: Skill[]): string {
@@ -205,7 +235,7 @@ function formatProviderCatalogForPrompt(): string | null {
   }
 
   const lines = [
-    "Config keys and default targets per provider; use after a skill is loaded.",
+    "Config keys and default targets per provider; use after a skill is loaded. Run authenticated provider commands directly after resolving target defaults; let the runtime handle auth pauses/resumes.",
   ];
   for (const provider of providers) {
     lines.push(`- provider: ${escapeXml(provider.name)}`);
@@ -237,7 +267,7 @@ function formatActiveMcpCatalogsForPrompt(
   }
 
   const lines = [
-    "Active MCP provider catalogs are available through `searchMcpTools`. Call it with provider to list descriptors or with query to narrow results, then pass the exact returned `tool_name` to `callMcpTool`.",
+    "Active MCP provider catalogs are available through `searchMcpTools`. Call it with provider to list descriptors or with query to narrow results, then pass the exact returned `tool_name` to `callMcpTool`. Put provider fields inside `arguments`.",
   ];
   for (const catalog of catalogs) {
     lines.push("  <catalog>");
@@ -384,12 +414,8 @@ const TOOL_CALL_STYLE_RULES = [
 ];
 
 const SKILL_POLICY_RULES = [
-  "- Before answering, scan `<available-skills>`. For matching operational or conceptual provider/repository workflow questions, load the most specific skill; do not answer from memory first. If none fits, do not load a skill.",
-  "- Never load multiple skills up front. After `loadSkill`, follow `<loaded-skills>` and resolve relative references under that skill's location.",
-  "- For explicit `/skill` triggers, treat that skill as selected unless the tool says it is unavailable.",
-  "- For active MCP catalogs, use `searchMcpTools` to inspect descriptors before `callMcpTool`; pass exact returned `tool_name` values and put provider fields inside `arguments`.",
-  "- Run authenticated provider commands directly after resolving target defaults; let the runtime handle auth pauses/resumes.",
-  "- Run `jr-rpc config get|set|unset|list` as standalone bash commands for conversation-scoped provider defaults; do not chain them with `cd`, `&&`, pipes, or provider commands.",
+  "- Only load skills listed in `<available-skills>`, `<user-callable-skills>`, or named by `<explicit-skill-trigger>`. Never guess or invent a skill name.",
+  "- Load one skill at a time. After `loadSkill`, follow the instructions in `<loaded-skills>`.",
 ];
 
 const EXECUTION_CONTRACT_RULES = [
@@ -536,7 +562,7 @@ function buildContextSection(params: {
   if (configLines) {
     blocks.push(
       renderTag("configuration", [
-        "Ambient provider defaults; explicit targets win.",
+        "Ambient provider defaults; explicit targets win. Run `jr-rpc config get|set|unset|list` as standalone bash commands; do not chain with `cd`, `&&`, pipes, or provider commands.",
         ...configLines,
       ]),
     );
@@ -550,9 +576,12 @@ function buildContextSection(params: {
   }
 
   if (params.invocation) {
-    blocks.push([
-      `<explicit-skill-trigger>/${escapeXml(params.invocation.skillName)}</explicit-skill-trigger>`,
-    ]);
+    blocks.push(
+      renderTag("explicit-skill-trigger", [
+        "Treat this skill as selected. Load it unless the tool says it is unavailable.",
+        `/${escapeXml(params.invocation.skillName)}`,
+      ]),
+    );
   }
 
   const body = blocks.map((block) => block.join("\n")).join("\n\n");
