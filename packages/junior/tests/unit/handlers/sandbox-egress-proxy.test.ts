@@ -51,13 +51,18 @@ import {
   isSandboxEgressForwardedRequest,
   proxySandboxEgressRequest,
 } from "@/chat/sandbox/egress-proxy";
-import { upsertSandboxEgressSession } from "@/chat/sandbox/egress-session";
+import {
+  createSandboxEgressRequesterToken,
+  SANDBOX_EGRESS_PROXY_PATH,
+} from "@/chat/sandbox/egress-session";
 import { disconnectStateAdapter } from "@/chat/state/adapter";
 import { CredentialUnavailableError } from "@/chat/credentials/broker";
 import { ALL } from "@/handlers/sandbox-egress-proxy";
 
 const EGRESS_ID = "junior-sbx";
 const REQUESTER_ID = "U123";
+
+let activeRequesterToken: string | undefined;
 
 function sentryPlugin() {
   return {
@@ -104,12 +109,10 @@ function githubPlugin() {
   };
 }
 
-async function authorizeSandboxEgress(
-  requesterId = REQUESTER_ID,
-): Promise<void> {
-  await upsertSandboxEgressSession({
-    egressId: EGRESS_ID,
+function setSandboxEgressRequester(requesterId = REQUESTER_ID): void {
+  activeRequesterToken = createSandboxEgressRequesterToken({
     requesterId,
+    egressId: EGRESS_ID,
     ttlMs: 60_000,
   });
 }
@@ -134,28 +137,38 @@ function egressRequest(
     host?: string;
     method?: string;
     path?: string;
+    proxyPath?: string;
+    forwardedPath?: string | null;
     scheme?: string | null;
     port?: string;
     body?: BodyInit;
     headers?: Record<string, string>;
   } = {},
 ): Request {
-  return new Request(
-    `https://junior.example.com${input.path ?? "/api/0/issues/"}`,
-    {
-      method: input.method ?? "GET",
-      headers: {
-        "vercel-forwarded-host": input.host ?? "sentry.io",
-        ...(input.scheme === null
-          ? {}
-          : { "vercel-forwarded-scheme": input.scheme ?? "https" }),
-        "vercel-sandbox-oidc-token": "signed-token",
-        ...(input.port ? { "vercel-forwarded-port": input.port } : {}),
-        ...(input.headers ?? {}),
-      },
-      ...(input.body === undefined ? {} : { body: input.body }),
+  const upstreamPath = input.path ?? "/api/0/issues/";
+  const proxyPath =
+    input.proxyPath ??
+    (activeRequesterToken
+      ? `${SANDBOX_EGRESS_PROXY_PATH}/${activeRequesterToken}`
+      : upstreamPath);
+  const forwardedPath =
+    input.forwardedPath === undefined ? upstreamPath : input.forwardedPath;
+  return new Request(`https://junior.example.com${proxyPath}`, {
+    method: input.method ?? "GET",
+    headers: {
+      "vercel-forwarded-host": input.host ?? "sentry.io",
+      ...(input.scheme === null
+        ? {}
+        : { "vercel-forwarded-scheme": input.scheme ?? "https" }),
+      "vercel-sandbox-oidc-token": "signed-token",
+      ...(forwardedPath !== null
+        ? { "vercel-forwarded-path": forwardedPath }
+        : {}),
+      ...(input.port ? { "vercel-forwarded-port": input.port } : {}),
+      ...(input.headers ?? {}),
     },
-  );
+    ...(input.body === undefined ? {} : { body: input.body }),
+  });
 }
 
 function proxy(
@@ -174,6 +187,8 @@ describe("sandbox egress proxy", () => {
   beforeEach(async () => {
     process.env.JUNIOR_STATE_ADAPTER = "memory";
     process.env.JUNIOR_BASE_URL = "https://junior.example.com";
+    process.env.JUNIOR_SANDBOX_EGRESS_SECRET = "test-egress-secret";
+    activeRequesterToken = undefined;
     getPluginProvidersMock.mockReturnValue([sentryPlugin()]);
     createRemoteJWKSetMock.mockClear();
     createRemoteJWKSetMock.mockReturnValue(async () => null);
@@ -187,6 +202,7 @@ describe("sandbox egress proxy", () => {
     await disconnectStateAdapter();
     delete process.env.JUNIOR_STATE_ADAPTER;
     delete process.env.JUNIOR_BASE_URL;
+    delete process.env.JUNIOR_SANDBOX_EGRESS_SECRET;
     delete process.env.SENTRY_BOT_EMAIL;
     vi.restoreAllMocks();
   });
@@ -199,12 +215,31 @@ describe("sandbox egress proxy", () => {
         "*": [],
         "sentry.io": [
           {
-            forwardURL: "https://junior.example.com/",
+            forwardURL:
+              "https://junior.example.com/api/internal/sandbox-egress",
           },
         ],
         "us.sentry.io": [
           {
-            forwardURL: "https://junior.example.com/",
+            forwardURL:
+              "https://junior.example.com/api/internal/sandbox-egress",
+          },
+        ],
+      },
+    });
+
+    const token = createSandboxEgressRequesterToken({
+      requesterId: REQUESTER_ID,
+      egressId: EGRESS_ID,
+      ttlMs: 60_000,
+    });
+    expect(
+      buildSandboxEgressNetworkPolicy({ requesterToken: token }),
+    ).toMatchObject({
+      allow: {
+        "sentry.io": [
+          {
+            forwardURL: `https://junior.example.com/api/internal/sandbox-egress/${token}`,
           },
         ],
       },
@@ -213,11 +248,28 @@ describe("sandbox egress proxy", () => {
 
   it("fails sandbox egress policy setup without a public callback URL", () => {
     delete process.env.JUNIOR_BASE_URL;
+    delete process.env.JUNIOR_SANDBOX_EGRESS_SECRET;
     delete process.env.VERCEL_PROJECT_PRODUCTION_URL;
     delete process.env.VERCEL_URL;
 
     expect(() => buildSandboxEgressNetworkPolicy()).toThrow(
       "Cannot determine base URL for sandbox credential egress",
+    );
+  });
+
+  it("does not reuse Slack signing secret for sandbox egress tokens", () => {
+    delete process.env.JUNIOR_SANDBOX_EGRESS_SECRET;
+    delete process.env.JUNIOR_INTERNAL_RESUME_SECRET;
+    process.env.SLACK_SIGNING_SECRET = "test-slack-signing-secret";
+
+    expect(() =>
+      createSandboxEgressRequesterToken({
+        requesterId: REQUESTER_ID,
+        egressId: EGRESS_ID,
+        ttlMs: 60_000,
+      }),
+    ).toThrow(
+      "Cannot determine sandbox egress secret (set JUNIOR_SANDBOX_EGRESS_SECRET or JUNIOR_INTERNAL_RESUME_SECRET)",
     );
   });
 
@@ -261,7 +313,7 @@ describe("sandbox egress proxy", () => {
   });
 
   it("forwards repeated authorized sandbox requests with credential headers", async () => {
-    await authorizeSandboxEgress();
+    setSandboxEgressRequester();
     mockSentryLease();
 
     const fetchMock = vi.fn(async (url: URL | string, init?: RequestInit) => {
@@ -318,39 +370,8 @@ describe("sandbox egress proxy", () => {
     expect(issueProviderCredentialLeaseMock).toHaveBeenCalledTimes(1);
   });
 
-  it("forwards root-path sandbox proxy requests using the verified OIDC session", async () => {
-    await authorizeSandboxEgress();
-    mockSentryLease();
-
-    const fetchMock = vi.fn(async (url: URL | string, init?: RequestInit) => {
-      expect(String(url)).toBe(
-        "https://sentry.io/api/0/issues/?query=forwarded",
-      );
-      expect(new Headers(init?.headers).get("authorization")).toBe(
-        "Bearer sentry-token",
-      );
-      return new Response("ok", { status: 200 });
-    });
-
-    const response = await proxySandboxEgressRequest(
-      egressRequest({ path: "/api/0/issues/?query=forwarded" }),
-      {
-        fetch: fetchMock as typeof fetch,
-        verifyOidc: async () => ({ sandbox_id: EGRESS_ID }),
-      },
-    );
-
-    expect(response.status).toBe(200);
-    await expect(response.text()).resolves.toBe("ok");
-    expect(issueProviderCredentialLeaseMock).toHaveBeenCalledWith({
-      provider: "sentry",
-      requesterId: REQUESTER_ID,
-      reason: "sandbox-egress:sentry",
-    });
-  });
-
   it("prefers Vercel forwarded path over the normalized proxy URL path", async () => {
-    await authorizeSandboxEgress();
+    setSandboxEgressRequester();
     mockSentryLease();
 
     const fetchMock = vi.fn(async (url: URL | string, init?: RequestInit) => {
@@ -380,6 +401,26 @@ describe("sandbox egress proxy", () => {
     expect(issueProviderCredentialLeaseMock).toHaveBeenCalledTimes(1);
   });
 
+  it("rejects sandbox egress requests without a forwarded path", async () => {
+    setSandboxEgressRequester();
+
+    const fetchMock = vi.fn();
+    const response = await proxy(
+      egressRequest({
+        forwardedPath: null,
+        proxyPath: `${SANDBOX_EGRESS_PROXY_PATH}/${activeRequesterToken}`,
+      }),
+      fetchMock as typeof fetch,
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: "Missing forwarded path",
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(issueProviderCredentialLeaseMock).not.toHaveBeenCalled();
+  });
+
   it("recognizes root-path forwarded sandbox proxy requests", () => {
     expect(isSandboxEgressForwardedRequest(egressRequest())).toBe(true);
     expect(
@@ -395,7 +436,7 @@ describe("sandbox egress proxy", () => {
   });
 
   it("does not synthesize an empty body for bodyless methods", async () => {
-    await authorizeSandboxEgress();
+    setSandboxEgressRequester();
     mockSentryLease();
 
     const fetchMock = vi.fn(async (_url: URL | string, init?: RequestInit) => {
@@ -414,7 +455,7 @@ describe("sandbox egress proxy", () => {
   });
 
   it("scopes cached credential leases to the requester", async () => {
-    await authorizeSandboxEgress();
+    setSandboxEgressRequester();
     issueProviderCredentialLeaseMock
       .mockResolvedValueOnce({
         id: "lease-1",
@@ -451,7 +492,7 @@ describe("sandbox egress proxy", () => {
     );
     await expect(firstResponse.text()).resolves.toBe("Bearer token-u123");
 
-    await authorizeSandboxEgress("U456");
+    setSandboxEgressRequester("U456");
     const secondResponse = await proxy(
       egressRequest({
         path: "/api/0/issues/2",
@@ -473,8 +514,8 @@ describe("sandbox egress proxy", () => {
     });
   });
 
-  it("does not reuse cached credential leases across renewed egress sessions", async () => {
-    await authorizeSandboxEgress();
+  it("does not reuse cached credential leases across renewed requester contexts", async () => {
+    setSandboxEgressRequester();
     issueProviderCredentialLeaseMock
       .mockResolvedValueOnce({
         id: "lease-1",
@@ -513,7 +554,7 @@ describe("sandbox egress proxy", () => {
       "Bearer token-first-session",
     );
 
-    await authorizeSandboxEgress();
+    setSandboxEgressRequester();
     const secondResponse = await proxy(
       egressRequest({ path: "/api/0/issues/2" }),
       fetchMock as typeof fetch,
@@ -526,7 +567,7 @@ describe("sandbox egress proxy", () => {
   });
 
   it("clears cached credential leases after upstream auth rejection", async () => {
-    await authorizeSandboxEgress();
+    setSandboxEgressRequester();
     issueProviderCredentialLeaseMock
       .mockResolvedValueOnce({
         id: "lease-1",
@@ -577,7 +618,7 @@ describe("sandbox egress proxy", () => {
   });
 
   it("applies provider header transforms to matching upstream hosts", async () => {
-    await authorizeSandboxEgress();
+    setSandboxEgressRequester();
     mockSentryLease("us.sentry.io");
 
     const fetchMock = vi.fn(async (_url: URL | string, init?: RequestInit) => {
@@ -597,7 +638,7 @@ describe("sandbox egress proxy", () => {
   });
 
   it("does not apply subdomain transforms to the apex host", async () => {
-    await authorizeSandboxEgress();
+    setSandboxEgressRequester();
     mockSentryLease("us.sentry.io");
 
     const fetchMock = vi.fn();
@@ -612,7 +653,7 @@ describe("sandbox egress proxy", () => {
   });
 
   it("forwards upstream response headers to the sandbox", async () => {
-    await authorizeSandboxEgress();
+    setSandboxEgressRequester();
     mockSentryLease();
 
     const upstreamHeaders = new Headers();
@@ -632,7 +673,7 @@ describe("sandbox egress proxy", () => {
   });
 
   it("drops upstream encoding headers after host fetch decodes the body", async () => {
-    await authorizeSandboxEgress();
+    setSandboxEgressRequester();
     mockSentryLease();
 
     const response = await proxy(
@@ -754,7 +795,7 @@ describe("sandbox egress proxy", () => {
   });
 
   it("returns a command-readable auth marker when provider credentials are missing", async () => {
-    await authorizeSandboxEgress();
+    setSandboxEgressRequester();
     issueProviderCredentialLeaseMock.mockRejectedValue(
       new CredentialUnavailableError(
         "sentry",
@@ -770,7 +811,32 @@ describe("sandbox egress proxy", () => {
     );
   });
 
-  it("requires a requester-bound sandbox egress session", async () => {
+  it("requires a signed requester context", async () => {
+    mockSentryLease();
+
+    const response = await proxy(egressRequest());
+
+    expect(response.status).toBe(403);
+    expect(issueProviderCredentialLeaseMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects requester context tokens from a different sandbox session", async () => {
+    activeRequesterToken = createSandboxEgressRequesterToken({
+      requesterId: REQUESTER_ID,
+      egressId: "different-egress-session",
+      ttlMs: 60_000,
+    });
+    mockSentryLease();
+
+    const response = await proxy(egressRequest());
+
+    expect(response.status).toBe(403);
+    expect(issueProviderCredentialLeaseMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects tampered requester tokens", async () => {
+    setSandboxEgressRequester();
+    activeRequesterToken = `${activeRequesterToken ?? ""}tampered`;
     mockSentryLease();
 
     const response = await proxy(egressRequest());
