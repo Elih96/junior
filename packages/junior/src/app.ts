@@ -1,8 +1,13 @@
 import { Hono } from "hono";
-import { setConfigDefaults } from "@/chat/configuration/defaults";
+import {
+  getConfigDefaults,
+  setConfigDefaults,
+} from "@/chat/configuration/defaults";
 import { logException } from "@/chat/logging";
-import { setPluginPackages } from "@/chat/plugins/package-discovery";
-import { setPluginConfig } from "@/chat/plugins/registry";
+import {
+  getPluginCatalogSignature,
+  setPluginConfig,
+} from "@/chat/plugins/registry";
 import type { PluginConfig } from "@/chat/plugins/types";
 import { GET as diagnosticsGET } from "@/handlers/diagnostics";
 import { GET as dashboardGET } from "@/handlers/diagnostics-dashboard";
@@ -47,25 +52,86 @@ async function resolveBuildPluginConfig(): Promise<PluginConfig | undefined> {
   try {
     const mod: { plugins?: PluginConfig } = await import("#junior/config");
     return mod.plugins;
-  } catch {
-    // Virtual module unavailable (not running in Nitro context).
-    // Fall back to env var for dev mode and tests.
-    const env = process.env.JUNIOR_PLUGIN_PACKAGES;
-    if (env) {
-      try {
-        return { packages: JSON.parse(env) };
-      } catch {}
+  } catch (error) {
+    if (!isMissingVirtualConfig(error)) {
+      throw error;
+    }
+    const packages = readEnvPluginPackages();
+    if (packages) {
+      return { packages };
     }
     return undefined;
   }
 }
 
+function isMissingVirtualConfig(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  const code = (error as { code?: string }).code;
+  return (
+    (code === "ERR_PACKAGE_IMPORT_NOT_DEFINED" ||
+      code === "ERR_MODULE_NOT_FOUND" ||
+      code === "MODULE_NOT_FOUND") &&
+    error.message.includes("#junior/config")
+  );
+}
+
+function readEnvPluginPackages(): string[] | undefined {
+  const env = process.env.JUNIOR_PLUGIN_PACKAGES;
+  if (!env) {
+    return undefined;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(env);
+  } catch (error) {
+    throw new Error("JUNIOR_PLUGIN_PACKAGES must be valid JSON", {
+      cause: error,
+    });
+  }
+
+  if (
+    !Array.isArray(parsed) ||
+    parsed.some((value) => typeof value !== "string" || !value.trim())
+  ) {
+    throw new Error(
+      "JUNIOR_PLUGIN_PACKAGES must be a JSON array of package names",
+    );
+  }
+
+  return parsed;
+}
+
+function hasConfiguredPluginCatalog(config: PluginConfig | undefined): boolean {
+  if (!config) {
+    return false;
+  }
+
+  return Boolean(
+    config.packages?.length || Object.keys(config.manifests ?? {}).length,
+  );
+}
+
 /** Create a Hono app with all Junior routes. */
 export async function createApp(options?: JuniorAppOptions): Promise<Hono> {
   const pluginConfig = options?.plugins ?? (await resolveBuildPluginConfig());
-  setPluginPackages(pluginConfig?.packages);
-  setPluginConfig(pluginConfig);
-  setConfigDefaults(options?.configDefaults);
+  const shouldValidatePluginCatalog =
+    hasConfiguredPluginCatalog(pluginConfig) ||
+    Boolean(Object.keys(options?.configDefaults ?? {}).length);
+  const previousPluginConfig = setPluginConfig(pluginConfig);
+  const previousConfigDefaults = getConfigDefaults();
+  try {
+    setConfigDefaults(options?.configDefaults);
+    if (shouldValidatePluginCatalog) {
+      getPluginCatalogSignature();
+    }
+  } catch (error) {
+    setPluginConfig(previousPluginConfig);
+    setConfigDefaults(previousConfigDefaults);
+    throw error;
+  }
 
   const waitUntil = options?.waitUntil ?? (await defaultWaitUntil());
 

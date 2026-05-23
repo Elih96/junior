@@ -8,7 +8,11 @@ import { createGitHubAppBroker } from "./auth/github-app-broker";
 import { parsePluginManifest } from "./manifest";
 import { createOAuthBearerBroker } from "./auth/oauth-bearer-broker";
 import { createApiHeadersBroker } from "./auth/api-headers-broker";
-import { discoverInstalledPluginPackageContent } from "./package-discovery";
+import {
+  discoverInstalledPluginPackageContent,
+  type InstalledPluginPackageContent,
+  normalizePluginPackageNames,
+} from "./package-discovery";
 import type {
   PluginBrokerDeps,
   PluginConfig,
@@ -130,39 +134,9 @@ function normalizePluginRoots(roots: string[]): string[] {
   return resolved;
 }
 
-function getExtraPluginRoots(): string[] {
-  const raw = process.env.JUNIOR_EXTRA_PLUGIN_ROOTS?.trim();
-  if (!raw) {
-    return [];
-  }
-
-  if (raw.startsWith("[")) {
-    try {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) {
-        return normalizePluginRoots(
-          parsed.filter((value): value is string => typeof value === "string"),
-        );
-      }
-    } catch {
-      return [];
-    }
-  }
-
-  return normalizePluginRoots(
-    raw
-      .split(path.delimiter)
-      .map((entry) => entry.trim())
-      .filter((entry) => entry.length > 0),
-  );
-}
-
 function getPluginCatalogSource(): PluginCatalogSource {
-  const packagedContent = discoverInstalledPluginPackageContent();
-  const localRoots = normalizePluginRoots([
-    ...pluginRoots(),
-    ...getExtraPluginRoots(),
-  ]);
+  const packagedContent = discoverConfiguredPluginPackageContent();
+  const localRoots = normalizePluginRoots(pluginRoots());
   const manifestRoots = normalizePluginRoots([
     ...localRoots,
     ...packagedContent.manifestRoots,
@@ -179,6 +153,42 @@ function getPluginCatalogSource(): PluginCatalogSource {
       pluginConfig: pluginConfig ?? {},
     }),
   };
+}
+
+function normalizePluginConfig(
+  config: PluginConfig | undefined,
+): PluginConfig | undefined {
+  if (!config) {
+    return undefined;
+  }
+
+  return {
+    packages: normalizePluginPackageNames(config.packages),
+    ...(config.manifests
+      ? { manifests: structuredClone(config.manifests) }
+      : {}),
+  };
+}
+
+function clonePluginConfig(
+  config: PluginConfig | undefined,
+): PluginConfig | undefined {
+  if (!config) {
+    return undefined;
+  }
+
+  return {
+    packages: [...(config.packages ?? [])],
+    ...(config.manifests
+      ? { manifests: structuredClone(config.manifests) }
+      : {}),
+  };
+}
+
+function discoverConfiguredPluginPackageContent(): InstalledPluginPackageContent {
+  return discoverInstalledPluginPackageContent(process.cwd(), {
+    packageNames: pluginConfig?.packages,
+  });
 }
 
 function buildLoadedPluginState(
@@ -310,9 +320,18 @@ function ensurePluginsLoaded(): LoadedPluginState {
 
 // --- Sync exports ---
 
-/** Set install-wide plugin configuration before plugin discovery. */
-export function setPluginConfig(config: PluginConfig | undefined): void {
-  pluginConfig = config;
+/** Set install-wide plugin configuration and return the previous value for rollback. */
+export function setPluginConfig(
+  config: PluginConfig | undefined,
+): PluginConfig | undefined {
+  const previousConfig = clonePluginConfig(pluginConfig);
+  pluginConfig = normalizePluginConfig(config);
+  return previousConfig;
+}
+
+/** Return installed plugin package content from the active plugin configuration. */
+export function getPluginPackageContent(): InstalledPluginPackageContent {
+  return discoverConfiguredPluginPackageContent();
 }
 
 /** Return the current plugin catalog signature used for cache invalidation. */

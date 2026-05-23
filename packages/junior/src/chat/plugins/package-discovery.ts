@@ -1,10 +1,14 @@
 import path from "node:path";
 import { discoverNodeModulesDirs, isDirectory, isFile } from "@/chat/discovery";
+import {
+  isValidPackageName,
+  resolvePackageLocation,
+} from "@/package-resolution";
 
 interface InstalledJuniorContentPackage {
   name: string;
   dir: string;
-  nodeModulesDir: string | null;
+  nodeModulesDir?: string;
   hasRootPluginManifest: boolean;
   hasPluginsDir: boolean;
   hasSkillsDir: boolean;
@@ -36,7 +40,12 @@ function uniqueStringsInOrder(values: string[]): string[] {
 
 function pathForTracingInclude(cwd: string, targetPath: string): string | null {
   const relative = path.relative(cwd, targetPath);
-  if (!relative || path.isAbsolute(relative)) {
+  if (
+    !relative ||
+    path.isAbsolute(relative) ||
+    relative === ".." ||
+    relative.startsWith(`..${path.sep}`)
+  ) {
     return null;
   }
 
@@ -44,28 +53,49 @@ function pathForTracingInclude(cwd: string, targetPath: string): string | null {
   return normalized.startsWith(".") ? normalized : `./${normalized}`;
 }
 
-let configuredPluginPackages: string[] | undefined;
+/** Normalize and validate configured plugin package names. */
+export function normalizePluginPackageNames(packageNames: unknown): string[] {
+  if (packageNames === undefined) {
+    return [];
+  }
 
-/** Set the runtime plugin package allowlist. Called by `createApp()`. */
-export function setPluginPackages(packages: string[] | undefined): void {
-  configuredPluginPackages = packages;
+  if (!Array.isArray(packageNames)) {
+    throw new Error("plugins.packages must be an array of package names");
+  }
+
+  const normalized: string[] = [];
+  const seen = new Set<string>();
+  for (const packageName of packageNames) {
+    const normalizedPackageName =
+      typeof packageName === "string" ? packageName.trim() : "";
+    if (!normalizedPackageName || !isValidPackageName(normalizedPackageName)) {
+      throw new Error("Plugin package names must be valid npm package names");
+    }
+    if (seen.has(normalizedPackageName)) {
+      continue;
+    }
+    seen.add(normalizedPackageName);
+    normalized.push(normalizedPackageName);
+  }
+  return normalized;
+}
+
+function formatNodeModulesDirs(candidateNodeModulesDirs: string[]): string {
+  return candidateNodeModulesDirs.length > 0
+    ? candidateNodeModulesDirs.join(", ")
+    : "none found";
 }
 
 function resolvePackageDirFromName(
+  cwd: string,
   packageName: string,
   candidateNodeModulesDirs: string[],
-): { dir: string; nodeModulesDir: string } | null {
-  for (const nodeModulesDir of candidateNodeModulesDirs) {
-    const packageDir = path.join(nodeModulesDir, ...packageName.split("/"));
-    if (isDirectory(packageDir)) {
-      return {
-        dir: path.resolve(packageDir),
-        nodeModulesDir: path.resolve(nodeModulesDir),
-      };
-    }
-  }
-
-  return null;
+): { dir: string; nodeModulesDir?: string } | null {
+  return (
+    resolvePackageLocation(cwd, packageName, {
+      nodeModulesDirs: candidateNodeModulesDirs,
+    }) ?? null
+  );
 }
 
 function readPluginPackageFlags(dir: string): {
@@ -90,33 +120,34 @@ function readPluginPackageFlags(dir: string): {
 function discoverDeclaredPackages(
   packageNames: string[],
   candidateNodeModulesDirs: string[],
+  cwd: string,
 ): InstalledJuniorContentPackage[] {
   const discovered: InstalledJuniorContentPackage[] = [];
-  const seenPackageNames = new Set<string>();
   const seenPackageDirs = new Set<string>();
 
   for (const packageName of packageNames) {
     const resolved = resolvePackageDirFromName(
+      cwd,
       packageName,
       candidateNodeModulesDirs,
     );
     if (!resolved) {
-      continue;
+      throw new Error(
+        `Plugin package "${packageName}" was configured but could not be resolved from node_modules or package resolution (${formatNodeModulesDirs(candidateNodeModulesDirs)})`,
+      );
     }
 
-    if (
-      seenPackageNames.has(packageName) ||
-      seenPackageDirs.has(resolved.dir)
-    ) {
+    if (seenPackageDirs.has(resolved.dir)) {
       continue;
     }
 
     const pluginFlags = readPluginPackageFlags(resolved.dir);
     if (!pluginFlags) {
-      continue;
+      throw new Error(
+        `Plugin package "${packageName}" was configured but does not contain plugin content; expected plugin.yaml, plugins/, or skills/ in ${resolved.dir}`,
+      );
     }
 
-    seenPackageNames.add(packageName);
     seenPackageDirs.add(resolved.dir);
     discovered.push({
       name: packageName,
@@ -131,7 +162,7 @@ function discoverDeclaredPackages(
 
 export interface DiscoverInstalledPluginPackageContentOptions {
   nodeModulesDirs?: string[];
-  packageNames?: string[];
+  packageNames?: unknown;
 }
 
 /** Discover plugin package content from explicitly declared package names. */
@@ -140,13 +171,14 @@ export function discoverInstalledPluginPackageContent(
   options?: DiscoverInstalledPluginPackageContentOptions,
 ): InstalledPluginPackageContent {
   const resolvedCwd = path.resolve(cwd);
-  const packageNames = options?.packageNames ?? configuredPluginPackages ?? [];
+  const packageNames = normalizePluginPackageNames(options?.packageNames);
   const nodeModulesDirs =
     options?.nodeModulesDirs ?? discoverNodeModulesDirs(resolvedCwd);
 
   const discoveredPackages = discoverDeclaredPackages(
     packageNames,
     nodeModulesDirs,
+    resolvedCwd,
   );
 
   const manifestRoots: string[] = [];
