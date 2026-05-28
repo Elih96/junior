@@ -1,8 +1,8 @@
 ---
 title: Scheduler Plugin
-description: Enable and verify Junior's built-in scheduled task support.
+description: Enable and verify Junior's scheduled task support.
 type: tutorial
-summary: Configure the built-in scheduler plugin so Slack users can create reminders and recurring tasks.
+summary: Configure the scheduler plugin so Slack users can create reminders and recurring tasks.
 prerequisites:
   - /start-here/quickstart/
   - /start-here/slack-app-setup/
@@ -12,18 +12,37 @@ related:
   - /operate/reliability-runbooks/
 ---
 
-The scheduler plugin is built into `@sentry/junior`. It registers Slack tools for creating, listing, updating, deleting, and running scheduled tasks, then uses Junior's internal heartbeat to dispatch due work back to the configured Slack conversation.
+The scheduler plugin lives in `@sentry/junior-scheduler`. It registers Slack tools for creating, listing, updating, deleting, and running scheduled tasks, then uses Junior's internal heartbeat to dispatch due work back to the configured Slack conversation.
 
 ## Runtime setup
 
-No plugin package install is required. `createApp()` registers the trusted scheduler plugin automatically:
+Install the package next to `@sentry/junior`:
+
+```bash
+pnpm add @sentry/junior-scheduler
+```
+
+Register the trusted plugin in app code:
 
 ```ts title="server.ts"
 import { createApp } from "@sentry/junior";
+import { schedulerPlugin } from "@sentry/junior-scheduler";
 
-const app = await createApp();
+const app = await createApp({
+  plugins: [schedulerPlugin()],
+});
 
 export default app;
+```
+
+List the package in `juniorNitro()` as well so Nitro bundles the manifest:
+
+```ts title="nitro.config.ts"
+juniorNitro({
+  plugins: {
+    packages: ["@sentry/junior-scheduler"],
+  },
+});
 ```
 
 The scaffolded `vercel.json` includes the internal heartbeat route:
@@ -47,14 +66,14 @@ If you manage routes manually, call the heartbeat route on a one-minute cadence:
 
 ## Configure environment variables
 
-Set one scheduler route secret:
+Set one heartbeat route secret:
 
-| Variable                                   | Required   | Purpose                                                                                       |
-| ------------------------------------------ | ---------- | --------------------------------------------------------------------------------------------- |
-| `CRON_SECRET` or `JUNIOR_SCHEDULER_SECRET` | Production | Bearer token for internal scheduler and heartbeat routes. Use `CRON_SECRET` with Vercel Cron. |
-| `JUNIOR_TIMEZONE`                          | No         | Default IANA timezone for schedule authoring. Defaults to `America/Los_Angeles`.              |
+| Variable                                   | Required   | Purpose                                                                            |
+| ------------------------------------------ | ---------- | ---------------------------------------------------------------------------------- |
+| `CRON_SECRET` or `JUNIOR_SCHEDULER_SECRET` | Production | Bearer token for the internal heartbeat route. Use `CRON_SECRET` with Vercel Cron. |
+| `JUNIOR_TIMEZONE`                          | No         | Default IANA timezone for schedule authoring. Defaults to `America/Los_Angeles`.   |
 
-Local development can run without a scheduler route secret when you call the dev server directly. Production deployments should set `CRON_SECRET` or `JUNIOR_SCHEDULER_SECRET`.
+Local development can run without a heartbeat route secret when you call the dev server directly. Production deployments should set `CRON_SECRET` or `JUNIOR_SCHEDULER_SECRET`.
 
 ## Verify
 
@@ -80,4 +99,4 @@ For recurring or non-reminder scheduled work, Junior should show the proposed ta
 
 ## Next step
 
-Read [Build a Plugin](/extend/build-a-plugin/) for the trusted `tools(ctx)` and `heartbeat(ctx)` APIs that the built-in scheduler uses.
+Read [Build a Plugin](/extend/build-a-plugin/) for the trusted `tools(ctx)` and `heartbeat(ctx)` APIs that the scheduler uses.

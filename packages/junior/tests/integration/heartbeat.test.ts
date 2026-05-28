@@ -2,9 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { defineJuniorPlugin } from "@sentry/junior-plugin-api";
 import { createHeartbeatContext } from "@/chat/agent-dispatch/context";
 import { recoverStaleDispatches } from "@/chat/agent-dispatch/heartbeat";
-import { createSchedulerPlugin } from "@/chat/scheduler/plugin";
-import { createStateSchedulerStore } from "@/chat/scheduler/store";
-import type { ScheduledTask } from "@/chat/scheduler/types";
+import {
+  createSchedulerStore,
+  schedulerPlugin,
+  type ScheduledTask,
+} from "@sentry/junior-scheduler";
+import { createPluginState } from "@/chat/plugins/state";
 import {
   createOrGetDispatch,
   getDispatchRecord,
@@ -30,6 +33,10 @@ function collectWaitUntil(tasks: Promise<unknown>[]): WaitUntilFn {
   return (task) => {
     tasks.push(typeof task === "function" ? task() : task);
   };
+}
+
+function schedulerStore() {
+  return createSchedulerStore(createPluginState("scheduler"));
 }
 
 function createTask(overrides: Partial<ScheduledTask> = {}): ScheduledTask {
@@ -200,6 +207,30 @@ describe("trusted plugin heartbeat", () => {
 
     await expect(first.state.get("run:1")).resolves.toBe("first");
     await expect(second.state.get("1")).resolves.toBe("second");
+  });
+
+  it("claims scheduled tasks from the scheduler legacy state namespace", async () => {
+    const task = createTask({ id: "sched_legacy" });
+    const state = getStateAdapter();
+    await state.connect();
+    await state.set("junior:scheduler:tasks", [task.id]);
+    await state.set("junior:scheduler:team:T123:tasks", [task.id]);
+    await state.set("junior:scheduler:task:sched_legacy", task);
+
+    const store = createSchedulerStore(
+      createPluginState("scheduler", {
+        legacyStatePrefixes: ["junior:scheduler"],
+      }),
+    );
+
+    await expect(store.listTasksForTeam("T123")).resolves.toMatchObject([
+      { id: task.id },
+    ]);
+    await expect(
+      store.claimDueRun({ nowMs: TEST_NOW_MS }),
+    ).resolves.toMatchObject({
+      taskId: task.id,
+    });
   });
 
   it("bounds dispatch fanout from one heartbeat context", async () => {
@@ -398,8 +429,8 @@ describe("trusted plugin heartbeat", () => {
       return new Response("Accepted", { status: 202 });
     });
     global.fetch = fetchMock as typeof fetch;
-    setAgentPlugins([createSchedulerPlugin()]);
-    const store = createStateSchedulerStore();
+    setAgentPlugins([schedulerPlugin()]);
+    const store = schedulerStore();
     await store.saveTask(createTask());
 
     const firstWaitUntilTasks: Promise<unknown>[] = [];
@@ -458,8 +489,8 @@ describe("trusted plugin heartbeat", () => {
       return new Response("Accepted", { status: 202 });
     });
     global.fetch = fetchMock as typeof fetch;
-    setAgentPlugins([createSchedulerPlugin()]);
-    const store = createStateSchedulerStore();
+    setAgentPlugins([schedulerPlugin()]);
+    const store = schedulerStore();
     await store.saveTask(
       createTask({
         destination: {
@@ -503,8 +534,8 @@ describe("trusted plugin heartbeat", () => {
       return new Response("Accepted", { status: 202 });
     });
     global.fetch = fetchMock as typeof fetch;
-    setAgentPlugins([createSchedulerPlugin()]);
-    const store = createStateSchedulerStore();
+    setAgentPlugins([schedulerPlugin()]);
+    const store = schedulerStore();
     await store.saveTask(createTask());
 
     const firstWaitUntilTasks: Promise<unknown>[] = [];
@@ -550,8 +581,8 @@ describe("trusted plugin heartbeat", () => {
       return new Response("Accepted", { status: 202 });
     });
     global.fetch = fetchMock as typeof fetch;
-    setAgentPlugins([createSchedulerPlugin()]);
-    const store = createStateSchedulerStore();
+    setAgentPlugins([schedulerPlugin()]);
+    const store = schedulerStore();
     await store.saveTask({
       ...createTask(),
       id: "sched_plugin_malformed",
@@ -594,8 +625,8 @@ describe("trusted plugin heartbeat", () => {
       return new Response("Accepted", { status: 202 });
     });
     global.fetch = fetchMock as typeof fetch;
-    setAgentPlugins([createSchedulerPlugin()]);
-    const store = createStateSchedulerStore();
+    setAgentPlugins([schedulerPlugin()]);
+    const store = schedulerStore();
     await store.saveTask({
       ...createTask(),
       id: "sched_plugin_bad_destination",
@@ -640,8 +671,8 @@ describe("trusted plugin heartbeat", () => {
       return new Response("Accepted", { status: 202 });
     });
     global.fetch = fetchMock as typeof fetch;
-    setAgentPlugins([createSchedulerPlugin()]);
-    const store = createStateSchedulerStore();
+    setAgentPlugins([schedulerPlugin()]);
+    const store = schedulerStore();
     const task = createDailyTask();
     await store.saveTask(task);
 
@@ -673,8 +704,8 @@ describe("trusted plugin heartbeat", () => {
       return new Response("Accepted", { status: 202 });
     });
     global.fetch = fetchMock as typeof fetch;
-    setAgentPlugins([createSchedulerPlugin()]);
-    const store = createStateSchedulerStore();
+    setAgentPlugins([schedulerPlugin()]);
+    const store = schedulerStore();
     const first = createDailyTask({
       id: "sched_plugin_duplicate_a",
       createdAtMs: Date.parse("2026-05-24T12:00:00.000Z"),
