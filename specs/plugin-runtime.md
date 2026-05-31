@@ -3,7 +3,7 @@
 ## Metadata
 
 - Created: 2026-05-28
-- Last Edited: 2026-05-28
+- Last Edited: 2026-05-30
 
 ## Purpose
 
@@ -75,14 +75,26 @@ Install-wide config defaults use `createApp({ configDefaults })` and must refere
 ## MCP Activation
 
 - MCP tools are not sandbox dependencies and are not registered globally at startup.
-- Runtime activates a plugin's MCP tools only after a skill owned by that plugin is loaded in the current turn.
-- Explicit `/skill` invocations preload the skill first.
+- At turn setup, the runtime restores providers from durable session-log
+  `mcp_provider_connected` events. Fresh turns discover providers through
+  `searchMcpTools` and connect lazily when the model first accesses one.
+- Runtime must infer restored plugin skill and MCP activation state from the
+  session log, not side metadata. Successful `loadSkill` tool results identify
+  loaded plugin skills. `mcp_provider_connected` events identify connected MCP
+  providers.
+- Calling `searchMcpTools` without `provider` lists matching configured providers without connecting to them.
+- Calling `searchMcpTools({ provider })` or `callMcpTool` for a configured but inactive provider triggers connection and `listTools` on demand, surfacing the auth flow if credentials are missing or expired.
+- `loadSkill` does not activate MCP by itself in the target runtime. Skills may
+  teach the model how to use provider tools, but provider connection is caused
+  by `searchMcpTools({ provider })`, `callMcpTool`, resume restoration, or
+  another explicit provider-access path.
 - Remote MCP catalogs are authoritative only after connection and `listTools`.
-- Mid-turn `loadSkill` updates the host-managed MCP registry, but Junior does not mutate the Pi native tool list during the turn.
-- Stable native tools `searchMcpTools` and `callMcpTool` search and execute active-provider MCP tools.
-- `loadSkill` returns provider/count metadata, not full tool descriptors.
+- Mid-turn MCP activation updates the host-managed MCP registry, but Junior does not mutate the Pi native tool list during the turn.
+- `searchMcpTools` and `callMcpTool` search and execute active-provider tools. Both lazily connect a provider when given one that is configured but not active.
+- `loadSkill` may return provider guidance, but full tool descriptors come from
+  `searchMcpTools` after provider connection.
 - `searchMcpTools` returns focused descriptors including canonical `tool_name`, upstream `mcp_tool_name`, schemas, and annotations.
-- Preloaded and resumed skills disclose provider/count summaries in `<active-mcp-catalogs>`.
+- Resumed skills recover runtime handles from the session log. They must not re-embed skill bodies or provider summaries into the prompt when those facts are already visible in Pi history.
 - MCP OAuth uses `/api/oauth/callback/mcp/<plugin>` and resumes the paused turn after authorization.
 - Canonical MCP tool names remain `mcp__<plugin>__<tool>`.
 
@@ -126,8 +138,8 @@ Hook contexts expose narrow capabilities rather than raw Junior internals. Trust
 - Registry load order is deterministic.
 - Manifest validation fails before partial registration.
 - Plugin-backed skill loading rejects forged plugin metadata.
-- MCP tools activate only after same-plugin skill load.
-- `searchMcpTools` and `callMcpTool` cannot reach inactive provider tools.
+- No MCP connections are made at turn start unless restoring providers from session-log connection events.
+- `searchMcpTools` and `callMcpTool` cannot reach tools from providers that are not configured or failed activation.
 
 ## Related Specs
 

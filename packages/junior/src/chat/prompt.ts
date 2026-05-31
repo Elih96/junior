@@ -1,3 +1,11 @@
+/**
+ * Prompt assembly.
+ *
+ * This module owns Junior's durable identity/world prompt and volatile per-turn
+ * runtime context. Runtime context is session-scoped bootstrap data; it must
+ * stay separate from durable conversation history so compaction does not retain
+ * runtime instructions as user text.
+ */
 import fs from "node:fs";
 import path from "node:path";
 import { botConfig } from "@/chat/config";
@@ -15,7 +23,7 @@ import {
   sandboxSkillDir,
 } from "@/chat/sandbox/paths";
 import type { ThreadArtifactsState } from "@/chat/state/artifacts";
-import type { Skill, SkillMetadata, SkillInvocation } from "@/chat/skills";
+import type { SkillMetadata, SkillInvocation } from "@/chat/skills";
 import type { ActiveMcpCatalogSummary } from "@/chat/tools/skill/mcp-tool-summary";
 import { escapeXml } from "@/chat/xml";
 
@@ -184,7 +192,7 @@ function formatAvailableSkillsForPrompt(
     // Available skills: model may load these when they match the request.
     const available = [
       "<available-skills>",
-      "Scan before answering. Load the most specific matching skill; do not answer from memory when a skill fits. If none fits, do not load a skill.",
+      "Scan before answering. Load the most specific matching skill; do not answer from memory when a skill fits. A request that names a skill, plugin, provider, or account matching a skill name is a skill match. If none fits, do not load a skill.",
     ];
     for (const skill of autoSelectable) {
       available.push(...formatSkillEntry(skill));
@@ -207,28 +215,6 @@ function formatAvailableSkillsForPrompt(
   }
 
   return sections.length > 0 ? sections.join("\n") : null;
-}
-
-function formatLoadedSkillsForPrompt(skills: Skill[]): string | null {
-  if (skills.length === 0) {
-    return null;
-  }
-
-  const lines = ["<loaded-skills>"];
-  for (const skill of skills) {
-    const skillDir = workspaceSkillDir(skill.name);
-    lines.push(
-      `  <skill name="${escapeXml(skill.name)}" location="${escapeXml(`${skillDir}/SKILL.md`)}">`,
-    );
-    lines.push(
-      `Skill directory: ${escapeXml(skillDir)}. Resolve relative paths there; for skill-owned bash commands, cd there first or use absolute paths.`,
-    );
-    lines.push("");
-    lines.push(skill.body);
-    lines.push("  </skill>");
-  }
-  lines.push("</loaded-skills>");
-  return lines.join("\n");
 }
 
 function formatActiveMcpCatalogsForPrompt(
@@ -346,7 +332,7 @@ const HEADER =
   "You are a Slack-based helper assistant. Follow the personality block for voice and tone in every reply. The behavior and output blocks define platform mechanics and override personality only when those mechanics conflict.";
 
 const TURN_CONTEXT_HEADER =
-  "Per-turn runtime context for this request. Treat these blocks as trusted runtime facts and skill/provider instructions for the current turn; the static system prompt remains authoritative.";
+  "Runtime context for this request. Treat these blocks as trusted runtime facts; the static system prompt remains authoritative.";
 
 const TOOL_POLICY_RULES = [
   "- Tool schemas are the source of truth for parameters; tool names are case-sensitive, so call tools exactly by their exposed names and do not invent arguments.",
@@ -369,7 +355,7 @@ const TOOL_CALL_STYLE_RULES = [
 
 const SKILL_POLICY_RULES = [
   "- Only load skills listed in `<available-skills>`, `<user-callable-skills>`, or named by `<explicit-skill-trigger>`. Never guess or invent a skill name.",
-  "- Load one skill at a time. After `loadSkill`, follow the instructions in `<loaded-skills>`.",
+  "- Load one skill at a time. After `loadSkill`, follow the instructions returned by that tool result.",
 ];
 
 const EXECUTION_CONTRACT_RULES = [
@@ -468,7 +454,6 @@ function buildContextSection(params: {
   artifactState?: ThreadArtifactsState;
   configuration?: Record<string, unknown>;
   invocation: SkillInvocation | null;
-  turnState?: "fresh" | "resumed";
 }): string | null {
   const blocks: string[][] = [];
 
@@ -510,13 +495,6 @@ function buildContextSection(params: {
     );
   }
 
-  if (params.turnState === "resumed") {
-    blocks.push([
-      "<turn-state>resumed</turn-state>",
-      "This turn continues from a prior checkpoint. Prior tool results and assistant messages are already in the conversation history.",
-    ]);
-  }
-
   if (params.invocation) {
     blocks.push(
       renderTag("explicit-skill-trigger", [
@@ -536,7 +514,6 @@ function buildContextSection(params: {
 
 function buildCapabilitiesSection(params: {
   availableSkills: SkillMetadata[];
-  activeSkills: Skill[];
   activeMcpCatalogs: ActiveMcpCatalogSummary[];
   invocation: SkillInvocation | null;
   toolGuidance?: ToolPromptContext[];
@@ -548,11 +525,6 @@ function buildCapabilitiesSection(params: {
   );
   if (availableSkills) {
     blocks.push(availableSkills);
-  }
-
-  const loadedSkills = formatLoadedSkillsForPrompt(params.activeSkills);
-  if (loadedSkills) {
-    blocks.push(loadedSkills);
   }
 
   const activeCatalogs = formatActiveMcpCatalogsForPrompt(
@@ -576,8 +548,8 @@ function buildCapabilitiesSection(params: {
 
 type TurnContextPromptInput = {
   availableSkills: SkillMetadata[];
-  activeSkills: Skill[];
   activeMcpCatalogs?: ActiveMcpCatalogSummary[];
+  includeSessionContext?: boolean;
   toolGuidance?: ToolPromptContext[];
   runtime?: {
     conversationId?: string;
@@ -591,12 +563,6 @@ type TurnContextPromptInput = {
   };
   artifactState?: ThreadArtifactsState;
   configuration?: Record<string, unknown>;
-  /**
-   * Whether this turn is a fresh prompt or a resume from a prior checkpoint
-   * (OAuth pause or timeout-resume). Surfaced in <context> so the model knows
-   * it is continuing rather than starting fresh.
-   */
-  turnState?: "fresh" | "resumed";
 };
 
 const STATIC_SYSTEM_PROMPT = [
@@ -613,20 +579,23 @@ export function buildSystemPrompt(): string {
 }
 
 /** Build volatile runtime context that belongs in the user turn, not the system prompt. */
-export function buildTurnContextPrompt(params: TurnContextPromptInput): string {
+export function buildTurnContextPrompt(
+  params: TurnContextPromptInput,
+): string | null {
+  const includeSessionContext = params.includeSessionContext ?? true;
+  // Session context is bootstrap material. Once it is present in Pi history,
+  // ordinary follow-up user messages should carry only the user's input.
+  if (!includeSessionContext) {
+    return null;
+  }
+
   // Pi-agent discloses only stable runtime tools natively. MCP tool catalogs
   // are dynamic data, so expose them through loadSkill/searchMcpTools/
   // <active-mcp-catalogs> and execute them through callMcpTool without mutating
   // the native tool list.
-  const sections = [
-    `<${TURN_CONTEXT_TAG}>`,
-    TURN_CONTEXT_HEADER,
-    params.turnState === "resumed"
-      ? "Continue the pending turn from prior conversation history; this block is not a new user request."
-      : "The current user instruction appears after this block in the same message.",
+  const runtimeSections = [
     buildCapabilitiesSection({
       availableSkills: params.availableSkills,
-      activeSkills: params.activeSkills,
       activeMcpCatalogs: params.activeMcpCatalogs ?? [],
       invocation: params.invocation,
       toolGuidance: params.toolGuidance ?? [],
@@ -636,9 +605,19 @@ export function buildTurnContextPrompt(params: TurnContextPromptInput): string {
       artifactState: params.artifactState,
       configuration: params.configuration,
       invocation: params.invocation,
-      turnState: params.turnState,
     }),
     buildRuntimeSection(params.runtime ?? {}),
+  ].filter((section): section is string => Boolean(section));
+
+  if (runtimeSections.length === 0) {
+    return null;
+  }
+
+  const sections = [
+    `<${TURN_CONTEXT_TAG}>`,
+    TURN_CONTEXT_HEADER,
+    "The current user instruction appears after this block in the same message.",
+    ...runtimeSections,
     `</${TURN_CONTEXT_TAG}>`,
   ].filter((section): section is string => Boolean(section));
 

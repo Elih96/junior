@@ -1,3 +1,11 @@
+/**
+ * Plugin authorization pause orchestration.
+ *
+ * This module detects plugin command credential failures and maps them onto the
+ * same paused-turn contract used by MCP auth. It owns provider attribution,
+ * private-link delivery/reuse, session-log recording, and credential cleanup.
+ */
+import { THREAD_STATE_TTL_MS } from "chat";
 import type { ChannelConfigurationService } from "@/chat/configuration/types";
 import { unlinkProvider } from "@/chat/credentials/unlink-provider";
 import type { UserTokenStore } from "@/chat/credentials/user-token-store";
@@ -9,6 +17,7 @@ import {
   type AuthorizationFlowMode,
 } from "@/chat/services/auth-pause";
 import type { ConversationPendingAuthState } from "@/chat/state/conversation";
+import { recordAuthorizationRequested } from "@/chat/state/session-log";
 import {
   getPluginDefinition,
   getPluginProviders,
@@ -182,6 +191,14 @@ function formatCommand(command: string): string {
   return collapsed.length > 160 ? `${collapsed.slice(0, 157)}...` : collapsed;
 }
 
+function authorizationId(args: {
+  kind: "plugin";
+  provider: string;
+  sessionId: string;
+}): string {
+  return `${args.sessionId}:${args.kind}:${args.provider}`;
+}
+
 function buildCredentialFailureError(
   provider: string,
   command: string,
@@ -275,6 +292,23 @@ export function createPluginAuthOrchestration(
         linkSentAtMs: reusingPendingLink
           ? deps.currentPendingAuth!.linkSentAtMs
           : Date.now(),
+      });
+    }
+    if (deps.conversationId && deps.sessionId) {
+      await recordAuthorizationRequested({
+        conversationId: deps.conversationId,
+        kind: "plugin",
+        provider,
+        requesterId: deps.requesterId,
+        authorizationId: authorizationId({
+          kind: "plugin",
+          provider,
+          sessionId: deps.sessionId,
+        }),
+        delivery: reusingPendingLink
+          ? "private_link_reused"
+          : "private_link_sent",
+        ttlMs: THREAD_STATE_TTL_MS,
       });
     }
     pendingPause = new PluginAuthorizationPauseError(

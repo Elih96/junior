@@ -1,3 +1,11 @@
+/**
+ * Durable agent dispatch runner.
+ *
+ * This is the queue/scheduled-task path for agent turns that are not driven by
+ * a live Slack event. It claims a dispatch lease, reconstructs thread state,
+ * calls the same agent boundary as Slack replies, persists visible result
+ * state, and schedules follow-up slices when a turn needs to continue.
+ */
 import { botConfig } from "@/chat/config";
 import {
   generateAssistantReply as generateAssistantReplyImpl,
@@ -116,7 +124,6 @@ async function persistRuntimePatch(args: {
 async function markDispatch(args: {
   dispatch: DispatchRecord;
   errorMessage?: string;
-  resumeCheckpointVersion?: number;
   resultMessageTs?: string;
   status: DispatchRecord["status"];
 }): Promise<DispatchRecord> {
@@ -129,9 +136,6 @@ async function markDispatch(args: {
       ...current,
       status: args.status,
       ...(args.errorMessage ? { errorMessage: args.errorMessage } : {}),
-      ...(typeof args.resumeCheckpointVersion === "number"
-        ? { resumeCheckpointVersion: args.resumeCheckpointVersion }
-        : {}),
       ...(args.resultMessageTs
         ? { resultMessageTs: args.resultMessageTs }
         : {}),
@@ -418,15 +422,14 @@ export async function runAgentDispatchSlice(
       return;
     }
     if (isRetryableTurnError(error, "turn_timeout_resume")) {
-      const checkpointVersion = error.metadata?.checkpointVersion;
+      const version = error.metadata?.version;
       const nextSliceId = error.metadata?.sliceId;
       if (
-        typeof checkpointVersion === "number" &&
+        typeof version === "number" &&
         canScheduleTurnTimeoutResume(nextSliceId)
       ) {
         const awaiting = await markDispatch({
           dispatch,
-          resumeCheckpointVersion: checkpointVersion,
           status: "awaiting_resume",
         });
         await scheduleCallback({

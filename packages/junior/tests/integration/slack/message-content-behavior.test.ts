@@ -7,7 +7,8 @@ import {
 } from "@/chat/runtime/thread-state";
 import { coerceThreadConversationState } from "@/chat/state/conversation";
 import { disconnectStateAdapter } from "@/chat/state/adapter";
-import { upsertAgentTurnSessionCheckpoint } from "@/chat/state/turn-session-store";
+import { commitMessages } from "@/chat/state/session-log";
+import { upsertAgentTurnSessionRecord } from "@/chat/state/turn-session";
 import { createTestChatRuntime } from "../../fixtures/chat-runtime";
 import {
   createTestMessage,
@@ -242,15 +243,6 @@ describe("Slack behavior: message content", () => {
         timestamp: 2,
       },
     ] as PiMessage[];
-    const expectedHistory: PiMessage[] = [
-      {
-        role: "user",
-        content: [{ type: "text", text: "I need the budget by Friday" }],
-        timestamp: 1,
-      },
-      storedFirstTurnHistory[1]!,
-    ] as PiMessage[];
-
     const { slackRuntime } = createTestChatRuntime({
       services: {
         subscribedReplyPolicy: {
@@ -277,7 +269,7 @@ describe("Slack behavior: message content", () => {
               context?.correlation?.conversationId &&
               context.correlation.turnId
             ) {
-              await upsertAgentTurnSessionCheckpoint({
+              await upsertAgentTurnSessionRecord({
                 conversationId: context.correlation.conversationId,
                 sessionId: context.correlation.turnId,
                 sliceId: 1,
@@ -329,7 +321,7 @@ describe("Slack behavior: message content", () => {
 
     expect(calls).toHaveLength(2);
     expect(calls[1]?.contextConversation ?? "").toContain("budget by Friday");
-    expect(calls[1]?.piMessages).toEqual(expectedHistory);
+    expect(calls[1]?.piMessages).toEqual(storedFirstTurnHistory);
   });
 
   it("auto compacts oversized reusable Pi history before the next turn", async () => {
@@ -337,7 +329,13 @@ describe("Slack behavior: message content", () => {
     const priorMessages: PiMessage[] = [
       {
         role: "user",
-        content: [{ type: "text", text: "old context ".repeat(5_000) }],
+        content: [
+          {
+            type: "text",
+            text: "<runtime-turn-context>\nbootstrap instructions that must be replaced after compaction\n</runtime-turn-context>",
+          },
+          { type: "text", text: "old context ".repeat(5_000) },
+        ],
         timestamp: 1,
       },
       {
@@ -347,15 +345,12 @@ describe("Slack behavior: message content", () => {
       },
     ] as PiMessage[];
     const thread = createTestThread({ id: "slack:C_BEHAVIOR:1700005005.000" });
-    await upsertAgentTurnSessionCheckpoint({
+    await commitMessages({
       conversationId: thread.id,
-      sessionId: "turn-large-history",
-      sliceId: 1,
-      state: "completed",
-      piMessages: priorMessages,
+      messages: priorMessages,
+      ttlMs: 60_000,
     });
     const conversation = coerceThreadConversationState({});
-    conversation.processing.lastSessionId = "turn-large-history";
     await persistThreadState(thread, { conversation });
 
     const { slackAdapter, slackRuntime } = createTestChatRuntime({
@@ -422,6 +417,12 @@ describe("Slack behavior: message content", () => {
     expect(JSON.stringify(calls[0]?.piMessages)).toContain(
       "old context is still relevant",
     );
+    expect(JSON.stringify(calls[0]?.piMessages)).not.toContain(
+      "bootstrap instructions",
+    );
+    expect(JSON.stringify(calls[0]?.piMessages)).not.toContain(
+      "<runtime-turn-context>",
+    );
   });
 
   it("keeps active-turn Pi history instead of compacting older completed history", async () => {
@@ -429,7 +430,20 @@ describe("Slack behavior: message content", () => {
     const activeMessages: PiMessage[] = [
       {
         role: "user",
-        content: [{ type: "text", text: "active checkpoint tool context" }],
+        content: [
+          {
+            type: "text",
+            text: "<runtime-turn-context>\nstale active turn bootstrap\n</runtime-turn-context>",
+          },
+          { type: "text", text: "active session record tool context" },
+        ],
+        timestamp: 3,
+      },
+    ] as PiMessage[];
+    const expectedActiveMessages: PiMessage[] = [
+      {
+        role: "user",
+        content: [{ type: "text", text: "active session record tool context" }],
         timestamp: 3,
       },
     ] as PiMessage[];
@@ -446,14 +460,12 @@ describe("Slack behavior: message content", () => {
       },
     ] as PiMessage[];
     const thread = createTestThread({ id: "slack:C_BEHAVIOR:1700005006.000" });
-    await upsertAgentTurnSessionCheckpoint({
+    await commitMessages({
       conversationId: thread.id,
-      sessionId: "turn-older-completed",
-      sliceId: 1,
-      state: "completed",
-      piMessages: priorMessages,
+      messages: priorMessages,
+      ttlMs: 60_000,
     });
-    await upsertAgentTurnSessionCheckpoint({
+    await upsertAgentTurnSessionRecord({
       conversationId: thread.id,
       sessionId: "turn-active-crashed",
       sliceId: 1,
@@ -462,14 +474,13 @@ describe("Slack behavior: message content", () => {
     });
     const conversation = coerceThreadConversationState({});
     conversation.processing.activeTurnId = "turn-active-crashed";
-    conversation.processing.lastSessionId = "turn-older-completed";
     await persistThreadState(thread, { conversation });
 
     const { slackRuntime } = createTestChatRuntime({
       services: {
         contextCompactor: {
           completeText: async () => {
-            throw new Error("active checkpoint history should not compact");
+            throw new Error("active session record history should not compact");
           },
           autoCompactionTriggerTokens: 100,
         },
@@ -500,7 +511,7 @@ describe("Slack behavior: message content", () => {
     await slackRuntime.handleNewMention(
       thread,
       createTestMessage({
-        id: "m-content-active-checkpoint",
+        id: "m-content-active-session-record",
         text: "<@U_APP> continue",
         isMention: true,
         threadId: thread.id,
@@ -509,6 +520,6 @@ describe("Slack behavior: message content", () => {
     );
 
     expect(calls).toHaveLength(1);
-    expect(calls[0]?.piMessages).toEqual(activeMessages);
+    expect(calls[0]?.piMessages).toEqual(expectedActiveMessages);
   });
 });

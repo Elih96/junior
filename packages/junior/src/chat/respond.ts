@@ -1,5 +1,14 @@
+/**
+ * Agent turn orchestration.
+ *
+ * This module owns the Pi-facing execution boundary for one Junior turn after
+ * Slack/runtime code has normalized the request. It assembles prompt context,
+ * restores durable Pi/session state, wires tools/MCP/auth, executes the agent,
+ * and persists resumable checkpoints. Slack delivery and thread presentation
+ * should stay outside this file.
+ */
 import { Agent, type AgentTool } from "@earendil-works/pi-agent-core";
-import type { FileUpload } from "chat";
+import { THREAD_STATE_TTL_MS, type FileUpload } from "chat";
 import { botConfig } from "@/chat/config";
 import {
   extractGenAiUsageAttributes,
@@ -33,8 +42,16 @@ import {
 } from "@/chat/plugins/registry";
 import { createAgentPluginHookRunner } from "@/chat/plugins/agent-hooks";
 import { McpToolManager } from "@/chat/mcp/tool-manager";
+import {
+  inferActiveMcpProvidersFromPiMessages,
+  inferLoadedSkillNamesFromPiMessages,
+} from "@/chat/pi/derived-state";
 import type { ThreadArtifactsState } from "@/chat/state/artifacts";
 import type { ConversationPendingAuthState } from "@/chat/state/conversation";
+import {
+  loadConnectedMcpProviders,
+  recordMcpProviderConnected,
+} from "@/chat/state/session-log";
 import { createTools } from "@/chat/tools";
 import { resolveChannelCapabilities } from "@/chat/tools/channel-capabilities";
 import type { ToolDefinition } from "@/chat/tools/definition";
@@ -68,6 +85,7 @@ import {
   buildUserTurnText,
   encodeNonImageAttachmentForPrompt,
   getSessionIdentifiers,
+  hasRuntimeTurnContext,
   isAssistantMessage,
   refreshRuntimeTurnContext,
   summarizeMessageText,
@@ -94,12 +112,12 @@ import {
   type AgentTurnUsage,
 } from "@/chat/usage";
 import {
-  loadTurnCheckpoint,
-  persistCompletedCheckpoint,
-  persistAuthPauseCheckpoint,
-  persistRunningCheckpoint,
-  persistTimeoutCheckpoint,
-} from "@/chat/services/turn-checkpoint";
+  loadTurnSessionRecord,
+  persistCompletedSessionRecord,
+  persistAuthPauseSessionRecord,
+  persistRunningSessionRecord,
+  persistTimeoutSessionRecord,
+} from "@/chat/services/turn-session-record";
 import { createMcpAuthOrchestration } from "@/chat/services/mcp-auth-orchestration";
 import { createPluginAuthOrchestration } from "@/chat/services/plugin-auth-orchestration";
 import {
@@ -344,13 +362,14 @@ export async function generateAssistantReply(
   let lastKnownSandboxId: string | undefined = context.sandbox?.sandboxId;
   let lastKnownSandboxDependencyProfileHash: string | undefined =
     context.sandbox?.sandboxDependencyProfileHash;
-  let loadedSkillNamesForResume: string[] = [];
   let mcpToolManager: McpToolManager | undefined;
+  let connectedMcpProviders = new Set<string>();
+  let canRecordMcpProviders = false;
   let sandboxExecutor: SandboxExecutor | undefined;
   let timedOut = false;
   let turnUsage: AgentTurnUsage | undefined;
   let thinkingSelection: TurnThinkingSelection | undefined;
-  const checkpointLogContext = {
+  const sessionRecordLogContext = {
     threadId: context.correlation?.threadId,
     requesterId: context.correlation?.requesterId,
     channelId: context.correlation?.channelId,
@@ -359,6 +378,29 @@ export async function generateAssistantReply(
     actorId: context.correlation?.actorId,
     assistantUserName: botConfig.userName,
     modelId: botConfig.modelId,
+  };
+  const recordConnectedMcpProvider = async (provider: string) => {
+    if (
+      !canRecordMcpProviders ||
+      !timeoutResumeConversationId ||
+      connectedMcpProviders.has(provider)
+    ) {
+      return;
+    }
+    await recordMcpProviderConnected({
+      conversationId: timeoutResumeConversationId,
+      provider,
+      ttlMs: THREAD_STATE_TTL_MS,
+    });
+    connectedMcpProviders.add(provider);
+  };
+  const recordActiveMcpProviders = async () => {
+    if (!mcpToolManager) {
+      return;
+    }
+    for (const provider of mcpToolManager.getActiveProviders()) {
+      await recordConnectedMcpProvider(provider);
+    }
   };
 
   const getSandboxMetadata = () =>
@@ -444,18 +486,21 @@ export async function generateAssistantReply(
     const activeSkills: Skill[] = [];
     const skillSandbox = new SkillSandbox(availableSkills, activeSkills);
 
-    // ── Turn checkpoint ──────────────────────────────────────────────
+    // ── Turn Session Record ────────────────────────────────────────
     const { conversationId: sessionConversationId, sessionId } =
       getSessionIdentifiers(context);
-    const checkpointState = await loadTurnCheckpoint({
+    const turnSessionState = await loadTurnSessionRecord({
       conversationId: sessionConversationId,
       sessionId,
     });
-    const { resumedFromCheckpoint, currentSliceId, existingCheckpoint } =
-      checkpointState;
+    const { resumedFromSessionRecord, currentSliceId, existingSessionRecord } =
+      turnSessionState;
     timeoutResumeConversationId = sessionConversationId;
     timeoutResumeSessionId = sessionId;
     timeoutResumeSliceId = currentSliceId;
+    canRecordMcpProviders = Boolean(
+      turnSessionState.canUseTurnSession && sessionConversationId && sessionId,
+    );
     const persistedConfigurationValues = context.channelConfiguration
       ? await context.channelConfiguration.resolveValues()
       : {};
@@ -511,6 +556,18 @@ export async function generateAssistantReply(
     const currentSandboxExecutor = sandboxExecutor;
     sandboxExecutor.configureSkills(availableSkills);
     sandboxExecutor.configureReferenceFiles(listReferenceFiles());
+    // Match the history source the agent will actually receive so crash retries
+    // do not let an unstripped running record suppress fresh turn context.
+    const priorPiMessages = resumedFromSessionRecord
+      ? existingSessionRecord?.piMessages
+      : context.piMessages;
+    connectedMcpProviders = new Set(
+      turnSessionState.canUseTurnSession && sessionConversationId
+        ? await loadConnectedMcpProviders({
+            conversationId: sessionConversationId,
+          })
+        : [],
+    );
     let sandboxPromise: Promise<SandboxWorkspace> | undefined;
     let sandboxPromiseId: string | undefined;
     const clearSandboxPromise = (): void => {
@@ -575,17 +632,19 @@ export async function generateAssistantReply(
         ).runCommand(input),
     };
 
-    // ── Preload skills from checkpoint ───────────────────────────────
-    for (const skillName of existingCheckpoint?.loadedSkillNames ?? []) {
-      const preloaded = await skillSandbox.loadSkill(skillName);
-      if (preloaded) {
-        upsertActiveSkill(activeSkills, preloaded);
+    // ── Restore skill runtime handles from durable Pi history ────────
+    for (const skillName of inferLoadedSkillNamesFromPiMessages(
+      priorPiMessages,
+    )) {
+      const restoredSkill = await skillSandbox.loadSkill(skillName);
+      if (restoredSkill) {
+        upsertActiveSkill(activeSkills, restoredSkill);
       }
     }
     if (invokedSkill) {
-      const preloaded = await skillSandbox.loadSkill(invokedSkill.name);
-      if (preloaded) {
-        upsertActiveSkill(activeSkills, preloaded);
+      const restoredSkill = await skillSandbox.loadSkill(invokedSkill.name);
+      if (restoredSkill) {
+        upsertActiveSkill(activeSkills, restoredSkill);
       }
     }
 
@@ -602,6 +661,15 @@ export async function generateAssistantReply(
       userAttachments: context.userAttachments,
       userTurnText,
     });
+    const preAgentPromptMessages = (): PiMessage[] =>
+      existingSessionRecord?.piMessages ?? [
+        ...(context.piMessages ?? []),
+        {
+          role: "user",
+          content: userContentParts,
+          timestamp: Date.now(),
+        } as PiMessage,
+      ];
 
     thinkingSelection = await selectTurnThinkingLevel({
       completeObject,
@@ -680,9 +748,6 @@ export async function generateAssistantReply(
     const turnMcpToolManager = mcpToolManager;
     const getPendingAuthPause = () =>
       pluginAuth.getPendingPause() ?? mcpAuth.getPendingPause();
-    const syncResumeState = () => {
-      loadedSkillNamesForResume = activeSkills.map((skill) => skill.name);
-    };
     setTags({
       conversationId: spanContext.conversationId,
       slackThreadId: context.correlation?.threadId,
@@ -729,9 +794,9 @@ export async function generateAssistantReply(
           const resolvedSkill = await skillSandbox.loadSkill(loadedSkill.name);
           const effective = resolvedSkill ?? loadedSkill;
           upsertActiveSkill(activeSkills, effective);
-          syncResumeState();
-          await turnMcpToolManager.activateForSkill(effective);
-          syncResumeState();
+          if (await turnMcpToolManager.activateForSkill(effective)) {
+            await recordConnectedMcpProvider(effective.pluginProvider!);
+          }
           if (mcpAuth.getPendingPause()) {
             // Auth pause requested — suppress loadSkill failure and let the
             // aborted turn park cleanly.
@@ -747,12 +812,9 @@ export async function generateAssistantReply(
           ) {
             return undefined;
           }
-          const availableToolCount = turnMcpToolManager.getActiveToolCatalog(
-            activeSkills,
-            {
-              provider: effective.pluginProvider,
-            },
-          ).length;
+          const availableToolCount = turnMcpToolManager.getActiveToolCatalog({
+            provider: effective.pluginProvider,
+          }).length;
           return {
             mcp_provider: effective.pluginProvider,
             available_tool_count: availableToolCount,
@@ -769,7 +831,6 @@ export async function generateAssistantReply(
         userText: userInput,
         artifactState: context.artifactState,
         configuration: configurationValues,
-        getActiveSkills: () => activeSkills,
         mcpToolManager: turnMcpToolManager,
         sandbox,
         advisor: {
@@ -790,26 +851,45 @@ export async function generateAssistantReply(
       promptSnippet: definition.promptSnippet,
     }));
 
-    syncResumeState();
-    for (const skill of activeSkills) {
-      await turnMcpToolManager.activateForSkill(skill);
-      syncResumeState();
+    // ── MCP provider activation ──────────────────────────────────────
+    // Restore providers visible in durable Pi session history. In serverless
+    // runtimes, later slices and follow-up turns usually run in a fresh
+    // process, so in-memory MCP clients cannot be reused.
+    const providersToRestore = new Set([
+      ...connectedMcpProviders,
+      ...inferActiveMcpProvidersFromPiMessages(priorPiMessages),
+    ]);
+    for (const provider of providersToRestore) {
+      if (await turnMcpToolManager.activateProvider(provider)) {
+        await recordConnectedMcpProvider(provider);
+      }
       if (mcpAuth.getPendingPause()) {
-        timeoutResumeMessages = existingCheckpoint?.piMessages ?? [];
+        timeoutResumeMessages = preAgentPromptMessages();
         throw mcpAuth.getPendingPause()!;
       }
     }
-    syncResumeState();
+    // Activate MCP for skills recovered from durable Pi history.
+    for (const skill of activeSkills) {
+      if (await turnMcpToolManager.activateForSkill(skill)) {
+        await recordConnectedMcpProvider(skill.pluginProvider!);
+      }
+      if (mcpAuth.getPendingPause()) {
+        timeoutResumeMessages = preAgentPromptMessages();
+        throw mcpAuth.getPendingPause()!;
+      }
+    }
 
     // ── Prompt context ───────────────────────────────────────────────
     const activeMcpCatalogs = toActiveMcpCatalogSummaries(
-      turnMcpToolManager.getActiveToolCatalog(activeSkills),
+      turnMcpToolManager.getActiveToolCatalog(),
     );
     baseInstructions = buildSystemPrompt();
+    const includeSessionContext =
+      resumedFromSessionRecord || !hasRuntimeTurnContext(priorPiMessages ?? []);
     const turnContextPrompt = buildTurnContextPrompt({
       availableSkills,
-      activeSkills,
       activeMcpCatalogs,
+      includeSessionContext,
       toolGuidance,
       runtime: {
         conversationId: spanContext.conversationId,
@@ -819,10 +899,12 @@ export async function generateAssistantReply(
       requester: context.requester,
       artifactState: context.artifactState,
       configuration: configurationValues,
-      turnState: resumedFromCheckpoint ? "resumed" : "fresh",
     });
+    const turnContextParts: UserTurnContentPart[] = turnContextPrompt
+      ? [{ type: "text", text: turnContextPrompt }]
+      : [];
     const promptContentParts: UserTurnContentPart[] = [
-      { type: "text", text: turnContextPrompt },
+      ...turnContextParts,
       ...userContentParts,
     ];
 
@@ -899,20 +981,19 @@ export async function generateAssistantReply(
       messages: PiMessage[],
     ): Promise<void> => {
       if (
-        !checkpointState.canUseTurnSession ||
+        !turnSessionState.canUseTurnSession ||
         !sessionConversationId ||
         !sessionId
       ) {
         return;
       }
 
-      await persistRunningCheckpoint({
+      await persistRunningSessionRecord({
         conversationId: sessionConversationId,
         sessionId,
         sliceId: currentSliceId,
         messages,
-        loadedSkillNames: loadedSkillNamesForResume,
-        logContext: checkpointLogContext,
+        logContext: sessionRecordLogContext,
       });
     };
 
@@ -962,11 +1043,13 @@ export async function generateAssistantReply(
     let newMessages: PiMessage[] = [];
     beforeMessageCount = agent.state.messages.length;
     try {
-      if (resumedFromCheckpoint) {
-        agent.state.messages = refreshRuntimeTurnContext(
-          existingCheckpoint!.piMessages,
-          turnContextPrompt,
-        );
+      if (resumedFromSessionRecord) {
+        agent.state.messages = turnContextPrompt
+          ? refreshRuntimeTurnContext(
+              existingSessionRecord!.piMessages,
+              turnContextPrompt,
+            )
+          : existingSessionRecord!.piMessages;
       } else if (context.piMessages && context.piMessages.length > 0) {
         agent.state.messages = [...context.piMessages];
       }
@@ -983,7 +1066,7 @@ export async function generateAssistantReply(
             content: promptContentParts,
             timestamp: Date.now(),
           } as PiMessage;
-          if (!resumedFromCheckpoint) {
+          if (!resumedFromSessionRecord) {
             await persistSafeBoundary([
               ...agent.state.messages,
               freshPromptMessage,
@@ -1044,7 +1127,7 @@ export async function generateAssistantReply(
             }
           };
 
-          let run = resumedFromCheckpoint
+          let run = resumedFromSessionRecord
             ? agent.continue()
             : agent.prompt(freshPromptMessage);
           let retryUsage: AgentTurnUsage | undefined;
@@ -1119,19 +1202,19 @@ export async function generateAssistantReply(
     }
 
     if (
-      checkpointState.canUseTurnSession &&
+      turnSessionState.canUseTurnSession &&
       sessionConversationId &&
       sessionId
     ) {
-      await persistCompletedCheckpoint({
+      await recordActiveMcpProviders();
+      await persistCompletedSessionRecord({
         conversationId: sessionConversationId,
         currentDurationMs: Date.now() - replyStartedAtMs,
         currentUsage: turnUsage,
         sessionId,
         sliceId: currentSliceId,
         allMessages: agent.state.messages,
-        loadedSkillNames: activeSkills.map((skill) => skill.name),
-        logContext: checkpointLogContext,
+        logContext: sessionRecordLogContext,
       });
     }
 
@@ -1159,32 +1242,32 @@ export async function generateAssistantReply(
       turnUsage =
         turnUsage ??
         extractSliceUsage(timeoutResumeMessages, beforeMessageCount);
-      const checkpoint = await persistTimeoutCheckpoint({
+      await recordActiveMcpProviders();
+      const sessionRecord = await persistTimeoutSessionRecord({
         conversationId: timeoutResumeConversationId,
         sessionId: timeoutResumeSessionId,
         currentSliceId: timeoutResumeSliceId,
         currentDurationMs: Date.now() - replyStartedAtMs,
         currentUsage: turnUsage,
         messages: timeoutResumeMessages,
-        loadedSkillNames: loadedSkillNamesForResume,
         errorMessage: error instanceof Error ? error.message : String(error),
-        logContext: checkpointLogContext,
+        logContext: sessionRecordLogContext,
       });
-      if (checkpoint) {
+      if (sessionRecord) {
         throw new RetryableTurnError(
           "turn_timeout_resume",
-          `conversation=${timeoutResumeConversationId} session=${timeoutResumeSessionId} slice=${checkpoint.sliceId} version=${checkpoint.checkpointVersion}`,
+          `conversation=${timeoutResumeConversationId} session=${timeoutResumeSessionId} slice=${sessionRecord.sliceId} version=${sessionRecord.version}`,
           {
             conversationId: timeoutResumeConversationId,
             sessionId: timeoutResumeSessionId,
-            sliceId: checkpoint.sliceId,
-            checkpointVersion: checkpoint.checkpointVersion,
+            sliceId: sessionRecord.sliceId,
+            version: sessionRecord.version,
           },
         );
       }
     }
 
-    // ── MCP auth pause → checkpoint and retry ────────────────────────
+    // ── MCP auth pause → session continuation ────────────────────────
     if (
       error instanceof AuthorizationPauseError &&
       timeoutResumeConversationId &&
@@ -1196,21 +1279,21 @@ export async function generateAssistantReply(
           beforeMessageCount,
         );
       }
-      const checkpoint = await persistAuthPauseCheckpoint({
+      await recordActiveMcpProviders();
+      const sessionRecord = await persistAuthPauseSessionRecord({
         conversationId: timeoutResumeConversationId,
         sessionId: timeoutResumeSessionId,
         currentSliceId: timeoutResumeSliceId,
         currentDurationMs: Date.now() - replyStartedAtMs,
         currentUsage: turnUsage,
         messages: timeoutResumeMessages,
-        loadedSkillNames: loadedSkillNamesForResume,
         errorMessage: error.message,
-        logContext: checkpointLogContext,
+        logContext: sessionRecordLogContext,
       });
-      if (checkpoint) {
+      if (sessionRecord) {
         throw new RetryableTurnError(
           error.kind === "plugin" ? "plugin_auth_resume" : "mcp_auth_resume",
-          `conversation=${timeoutResumeConversationId} session=${timeoutResumeSessionId} slice=${checkpoint.sliceId}`,
+          `conversation=${timeoutResumeConversationId} session=${timeoutResumeSessionId} slice=${sessionRecord.sliceId}`,
           {
             authDisposition: error.disposition,
             authDurationMs: Date.now() - replyStartedAtMs,
@@ -1220,7 +1303,7 @@ export async function generateAssistantReply(
             authUsage: turnUsage,
             conversationId: timeoutResumeConversationId,
             sessionId: timeoutResumeSessionId,
-            sliceId: checkpoint.sliceId,
+            sliceId: sessionRecord.sliceId,
           },
         );
       }

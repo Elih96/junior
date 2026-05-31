@@ -3,7 +3,7 @@
 ## Metadata
 
 - Created: 2026-04-28
-- Last Edited: 2026-05-26
+- Last Edited: 2026-05-30
 
 ## Purpose
 
@@ -36,9 +36,11 @@ Define the canonical contract for Junior's platform-owned agent prompt so prompt
 
 `buildSystemPrompt()` must be static: no parameters, no requester/thread/session/runtime/model/provider/catalog data, and no content that can vary between conversations or turns. Deployment-stable assistant identity, such as the bot Slack username, belongs here. This is required for provider prompt-prefix caching and for consistent multi-turn behavior.
 
-`buildTurnContextPrompt(...)` owns volatile prompt context. It is attached to the current user turn, including requester identity and resumed-turn context, and may vary by conversation or turn. Completed turns must strip this context before storing durable Pi message history so prior turns are not replayed with stale runtime facts.
+`buildTurnContextPrompt(...)` owns session bootstrap prompt context. It is attached to the first model-visible user message in a Pi session projection, including requester identity, available capabilities, configuration, artifacts, runtime identifiers, and resumed-turn context. Completed turns may store that bootstrap context as part of durable Pi history so later follow-up messages can avoid duplicating it. Compaction replacement history must omit stale bootstrap context; the next user turn after a projection reset receives fresh bootstrap context exactly once.
 
 Turn context may disclose dynamic capability surfaces that the model can act on, such as available skill names/descriptions, active MCP catalog summaries, and tool guidance attached to the current native tool set. It must not separately disclose plugin ownership or installed plugin/provider catalogs as prompt knowledge. If the model needs plugin-specific behavior, that behavior must arrive through the loaded skill body, tool description, tool schema, `promptSnippet`, or `promptGuidelines`.
+
+Turn context is not a session-state cache. If prior tool use, loaded skills, MCP provider activation, or provider descriptors are already present in the agent session log, runtime must recover handles from that log and only disclose the currently actionable capability surface for this turn. Do not add prompt blocks whose purpose is to preserve or replay state that belongs in the session log.
 
 The combined prompt surface must keep these concerns distinct:
 
@@ -50,7 +52,11 @@ The combined prompt surface must keep these concerns distinct:
 
 Context blocks describe facts. Behavior and output blocks carry instructions.
 
-Prompt order is part of the contract. Stable, high-priority operating rules live in the system prompt. Volatile requester, artifacts, active catalogs, configuration defaults, runtime metadata, and resume state must stay out of the system prompt and live in per-turn context.
+Prompt order is part of the contract. Stable, high-priority operating rules live in the system prompt. Volatile requester, artifacts, active catalogs, configuration defaults, runtime metadata, and resume state must stay out of the system prompt and live in session bootstrap context.
+
+Session bootstrap context is injected on the first model-visible user message in each Pi session. Ordinary follow-up messages in the same session must not duplicate that bootstrap context. When compaction creates a replacement projection, the replacement history must omit the old bootstrap context; the next user turn starts a new Pi session projection and receives fresh bootstrap context exactly once.
+
+The agent session log contract is defined in `./agent-session-resumability.md`. Prompt code must treat that log as the source of durable model history and must not introduce an alternate prompt-side history, provider catalog, loaded-skill list, or resume-state channel.
 
 The core operating rules must be split into fixed sections:
 
@@ -107,7 +113,7 @@ Mutable facts need live checks. Examples include files, repos, versions, issues,
 
 The tool policy must make sandbox workspace ownership explicit: sandbox-backed file and shell tools inspect the isolated sandbox workspace, not arbitrary host files. If sandbox execution is unavailable, the model should report that blocker instead of implying local inspection succeeded.
 
-Runtime facts should live in a compact runtime block inside per-turn context. Include only facts that help the model choose valid behavior, such as runtime version, model ids, selected thinking level, channel capabilities, and sandbox workspace root. Do not mix requester, artifacts, or configuration defaults into that runtime block.
+Runtime facts should live in a compact runtime block inside session bootstrap context. Include only facts that help the model choose valid behavior, such as runtime version, model ids, selected thinking level, channel capabilities, and sandbox workspace root. Do not mix requester, artifacts, or configuration defaults into that runtime block.
 
 The safety section must stay generic and runtime-level: remain within the user's request, respect stop/pause/audit/approval boundaries, avoid access expansion, and avoid administrative prompt/tool/security/config changes unless explicitly requested and supported by an available tool.
 
@@ -133,8 +139,9 @@ Prompt changes are rejected or revised when they introduce:
 2. Multiple adjacent bullets that all express the same ask/act/verify policy.
 3. Tool-schema restatement in prompt prose.
 4. Core prompt or turn-context code that exposes specific installed plugins, plugin providers, plugin-owned config keys, plugin-owned default targets, or plugin-specific workflows outside the dynamic skill/tool surfaces.
-5. Skill instructions that override generic harness behavior without a domain-specific reason.
-6. Static prompt tests that assert wording instead of behavior.
+5. Prompt blocks that duplicate durable session-log state instead of deriving runtime handles from the log.
+6. Skill instructions that override generic harness behavior without a domain-specific reason.
+7. Static prompt tests that assert wording instead of behavior.
 
 ## Observability
 

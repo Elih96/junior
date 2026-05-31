@@ -1,3 +1,12 @@
+/**
+ * Context compaction.
+ *
+ * This module bounds visible Pi history for long conversations. It strips
+ * runtime-only turn context before summarizing, commits a session-log projection
+ * reset, and keeps recent user intent. Compaction must not preserve runtime
+ * bootstrap context as durable conversation history.
+ */
+import { THREAD_STATE_TTL_MS } from "chat";
 import {
   estimateContextTokens,
   estimateTokens,
@@ -9,10 +18,7 @@ import {
   estimateTextTokens,
   getAgentContextCompactionTriggerTokens,
 } from "@/chat/services/context-budget";
-import {
-  getAgentTurnSessionCheckpoint,
-  upsertAgentTurnSessionCheckpoint,
-} from "@/chat/state/turn-session-store";
+import { commitMessages } from "@/chat/state/session-log";
 import type { ThreadConversationState } from "@/chat/state/conversation";
 import { logWarn, setSpanAttributes } from "@/chat/logging";
 import {
@@ -44,7 +50,7 @@ export interface CompactContextArgs {
   conversationContext?: string;
   conversationId: string;
   onCompactionStart?: () => void;
-  previousSessionId: string;
+  piMessages: PiMessage[];
   metadata?: {
     channelId?: string;
     requesterId?: string;
@@ -56,12 +62,7 @@ export interface CompactContextArgs {
 export interface CompactContextResult {
   compacted: boolean;
   piMessages?: PiMessage[];
-  reason?:
-    | "below_threshold"
-    | "missing_context"
-    | "not_completed"
-    | "summary_failed";
-  sessionId?: string;
+  reason?: "below_threshold" | "missing_context" | "summary_failed";
 }
 
 function textPart(value: unknown): string | undefined {
@@ -218,6 +219,7 @@ function renderSummaryInput(
   return keepTail(lines.join("\n"), MAX_SUMMARY_INPUT_CHARS);
 }
 
+/** Ask the fast model for a bounded handoff summary of durable thread context. */
 async function summarizeContext(
   args: {
     conversationContext?: string;
@@ -277,6 +279,7 @@ function estimateHistoryTokens(messages: PiMessage[]): number {
   return Math.max(usageEstimate, structuralEstimate);
 }
 
+/** Build a compacted Pi projection from retained recent asks plus the summary. */
 function buildReplacementHistory(args: {
   messages: PiMessage[];
   summary: string;
@@ -287,35 +290,17 @@ function buildReplacementHistory(args: {
   ];
 }
 
-function createCompactionSessionId(previousSessionId: string): string {
-  return `compaction_${previousSessionId}`;
-}
-
 type CompactionSource =
   | {
       estimatedTokens: number;
       messages: PiMessage[];
     }
   | {
-      reason: "missing_context" | "not_completed";
+      reason: "missing_context";
     };
 
-async function loadCompactionSource(args: {
-  conversationId: string;
-  previousSessionId: string;
-}): Promise<CompactionSource> {
-  const checkpoint = await getAgentTurnSessionCheckpoint(
-    args.conversationId,
-    args.previousSessionId,
-  );
-  if (!checkpoint) {
-    return { reason: "missing_context" };
-  }
-  if (checkpoint.state !== "completed") {
-    return { reason: "not_completed" };
-  }
-  const messages = checkpoint.piMessages;
-  if (messages.length) {
+function loadCompactionSource(messages: PiMessage[]): CompactionSource {
+  if (messages.length > 0) {
     return {
       estimatedTokens: estimateHistoryTokens(messages),
       messages,
@@ -324,14 +309,12 @@ async function loadCompactionSource(args: {
   return { reason: "missing_context" };
 }
 
+/** Decide whether this turn crosses the compaction threshold and perform it. */
 async function maybeCompactWithDeps(
   args: CompactContextArgs,
   deps: ContextCompactorDeps,
 ): Promise<CompactContextResult> {
-  const source = await loadCompactionSource({
-    conversationId: args.conversationId,
-    previousSessionId: args.previousSessionId,
-  });
+  const source = loadCompactionSource(args.piMessages);
   if ("reason" in source) {
     return { compacted: false, reason: source.reason };
   }
@@ -381,6 +364,10 @@ async function maybeCompactWithDeps(
   });
 }
 
+/**
+ * Commit the compacted projection reset so later turns read only the active
+ * session history, not the pre-compaction runtime transcript.
+ */
 async function writeCompactedThreadContext(
   args: CompactContextArgs,
   sourceMessages: PiMessage[],
@@ -394,23 +381,17 @@ async function writeCompactedThreadContext(
     messages: trimTrailingAssistantMessages(sourceMessages),
     summary,
   });
-  const nextSessionId = createCompactionSessionId(args.previousSessionId);
-  await upsertAgentTurnSessionCheckpoint({
+  await commitMessages({
     conversationId: args.conversationId,
-    sessionId: nextSessionId,
-    sliceId: 1,
-    state: "completed",
-    piMessages: replacement,
+    messages: replacement,
+    ttlMs: THREAD_STATE_TTL_MS,
   });
 
-  args.conversation.processing.lastSessionId = nextSessionId;
   updateConversationStats(args.conversation);
   setSpanAttributes({
     "app.compaction.input_messages": sourceMessages.length,
     "app.compaction.retained_messages": replacement.length - 1,
     "app.compaction.summary_chars": summary.length,
-    "app.compaction.previous_session_id": args.previousSessionId,
-    "app.compaction.next_session_id": nextSessionId,
     ...(context.triggerTokens !== undefined
       ? { "app.compaction.trigger_tokens": context.triggerTokens }
       : {}),
@@ -420,11 +401,10 @@ async function writeCompactedThreadContext(
   return {
     compacted: true,
     piMessages: replacement,
-    sessionId: nextSessionId,
   };
 }
 
-/** Build the service that owns local context compaction and checkpoint forks. */
+/** Build the service that owns local context compaction. */
 export function createContextCompactor(
   deps: ContextCompactorDeps,
 ): ContextCompactor {

@@ -1,3 +1,11 @@
+/**
+ * Turn-local MCP tool manager.
+ *
+ * This manager activates plugin MCP providers for one agent turn, exposes
+ * discovered tools through provider-prefixed names, and converts MCP results
+ * into Pi tool content. MCP clients, auth challenges, and provider session
+ * details stay inside this layer.
+ */
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 import type { OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
 import { logWarn, setSpanAttributes } from "@/chat/logging";
@@ -168,8 +176,6 @@ export interface ManagedMcpToolDescriptor {
   provider: string;
 }
 
-type ActiveMcpSkillScope = Pick<SkillMetadata, "pluginProvider">;
-
 type ActiveMcpSkill = Pick<SkillMetadata, "name" | "pluginProvider">;
 
 export interface ManagedMcpTool extends ManagedMcpToolDescriptor {
@@ -198,6 +204,21 @@ export class McpToolManager {
     return [...this.activeProviders].sort((left, right) =>
       left.localeCompare(right),
     );
+  }
+
+  /** List configured MCP providers for discovery without connecting to them. */
+  getAvailableProviderCatalog(): Array<{
+    provider: string;
+    description: string;
+    active: boolean;
+  }> {
+    return [...this.pluginsByProvider.entries()]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([provider, plugin]) => ({
+        provider,
+        description: plugin.manifest.description,
+        active: this.activeProviders.has(provider),
+      }));
   }
 
   async activateForSkill(skill: ActiveMcpSkill): Promise<boolean> {
@@ -262,11 +283,11 @@ export class McpToolManager {
     }
   }
 
+  /** Return descriptors for all active MCP provider tools, optionally filtered by provider. */
   getActiveToolCatalog(
-    skills: ActiveMcpSkillScope[],
     options: { provider?: string } = {},
   ): ManagedMcpToolDescriptor[] {
-    return this.getResolvedActiveTools(skills, options).map((tool) =>
+    return this.getResolvedActiveTools(options).map((tool) =>
       this.toToolDescriptor(tool),
     );
   }
@@ -415,9 +436,8 @@ export class McpToolManager {
     return true;
   }
 
-  /** Return all active ManagedMcpTool objects for the given skill scope. */
+  /** Return all active ManagedMcpTool objects, optionally filtered by provider. */
   getResolvedActiveTools(
-    skills: ActiveMcpSkillScope[],
     options: { provider?: string } = {},
   ): ManagedMcpTool[] {
     const resolved: ManagedMcpTool[] = [];
@@ -427,28 +447,10 @@ export class McpToolManager {
         continue;
       }
 
-      resolved.push(...this.resolveProviderTools(provider, skills));
+      resolved.push(...(this.toolsByProvider.get(provider) ?? []));
     }
 
     return resolved;
-  }
-
-  private resolveProviderTools(
-    provider: string,
-    skills: ActiveMcpSkillScope[],
-  ): ManagedMcpTool[] {
-    const providerTools = this.toolsByProvider.get(provider) ?? [];
-    if (providerTools.length === 0) {
-      return [];
-    }
-
-    const relevantSkills = skills.filter(
-      (skill) => skill.pluginProvider === provider,
-    );
-    if (relevantSkills.length === 0) {
-      return [];
-    }
-    return providerTools;
   }
 
   private toToolDescriptor(tool: ManagedMcpTool): ManagedMcpToolDescriptor {

@@ -1,3 +1,11 @@
+/**
+ * Turn state preparation.
+ *
+ * This module turns durable chat thread state plus the current Slack message
+ * into the state needed before agent execution. It owns conversation backfill,
+ * memory/context rendering, vision hydration, configuration, and artifact
+ * snapshots; it should not execute the agent or post replies.
+ */
 import type { Message, Thread } from "chat";
 import { coerceThreadConversationState } from "@/chat/state/conversation";
 import type {
@@ -7,7 +15,6 @@ import type {
 import { toOptionalString } from "@/chat/coerce";
 import { setSpanAttributes } from "@/chat/logging";
 import { getThreadTs } from "@/chat/runtime/thread-context";
-import { getSlackMessageTs } from "@/chat/slack/message";
 import {
   coerceThreadArtifactsState,
   type ThreadArtifactsState,
@@ -20,13 +27,17 @@ import {
   upsertConversationMessage,
 } from "@/chat/services/conversation-memory";
 import {
-  countPotentialImageAttachments,
   hasPotentialImageAttachment,
   isVisionEnabled,
 } from "@/chat/services/vision-context";
 import { getChannelConfigurationService } from "@/chat/runtime/thread-state";
 import type { ChannelConfigurationService } from "@/chat/configuration/types";
 import { appendSlackLegacyAttachmentText } from "@/chat/slack/legacy-attachments";
+import type {
+  PrepareTurnStateInput,
+  TurnContext,
+} from "@/chat/runtime/turn-input";
+import { toConversationMessage } from "@/chat/runtime/conversation-message";
 
 const BACKFILL_MESSAGE_LIMIT = 80;
 
@@ -45,22 +56,11 @@ export interface PreparedTurnState {
 export interface PrepareTurnStateDeps {
   compactConversationIfNeeded: (
     conversation: ThreadConversationState,
-    context: {
-      threadId?: string;
-      channelId?: string;
-      requesterId?: string;
-      runId?: string;
-    },
+    context: TurnContext,
   ) => Promise<void>;
   hydrateConversationVisionContext: (
     conversation: ThreadConversationState,
-    context: {
-      threadId?: string;
-      channelId?: string;
-      requesterId?: string;
-      runId?: string;
-      threadTs?: string;
-    },
+    context: TurnContext & { threadTs?: string },
   ) => Promise<void>;
 }
 
@@ -73,35 +73,17 @@ function hasPendingImageHydration(
   );
 }
 
-function createConversationMessageFromSdkMessage(
-  entry: Message,
-): ConversationMessage | null {
-  const enrichedText = appendSlackLegacyAttachmentText(entry.text, entry.raw);
-  const rawText = normalizeConversationText(enrichedText);
-  if (!rawText) {
-    return null;
-  }
-
-  return {
-    id: entry.id,
-    role: entry.author.isMe ? "assistant" : "user",
-    text: rawText,
-    createdAtMs: entry.metadata.dateSent.getTime(),
-    author: {
-      userId: entry.author.userId,
-      userName: entry.author.userName,
-      fullName: entry.author.fullName,
-      isBot:
-        typeof entry.author.isBot === "boolean"
-          ? entry.author.isBot
-          : undefined,
-    },
-    meta: {
-      slackTs: getSlackMessageTs(entry),
-    },
-  };
+function getBackfillText(entry: Message): string | undefined {
+  const text = normalizeConversationText(
+    appendSlackLegacyAttachmentText(entry.text, entry.raw),
+  );
+  return text || undefined;
 }
 
+/**
+ * Seed durable conversation memory before the current turn so routing and
+ * compaction can reason over a thread even when no prior app state exists.
+ */
 async function seedConversationBackfill(
   thread: Thread,
   conversation: ThreadConversationState,
@@ -135,9 +117,9 @@ async function seedConversationBackfill(
     }
     fetchedNewestFirst.reverse();
     for (const entry of fetchedNewestFirst) {
-      const message = createConversationMessageFromSdkMessage(entry);
-      if (message) {
-        seeded.push(message);
+      const text = getBackfillText(entry);
+      if (text) {
+        seeded.push(toConversationMessage({ entry, text }));
       }
     }
     if (seeded.length > 0) {
@@ -152,9 +134,9 @@ async function seedConversationBackfill(
 
     const fromRecent = thread.recentMessages.slice(-BACKFILL_MESSAGE_LIMIT);
     for (const entry of fromRecent) {
-      const message = createConversationMessageFromSdkMessage(entry);
-      if (message) {
-        seeded.push(message);
+      const text = getBackfillText(entry);
+      if (text) {
+        seeded.push(toConversationMessage({ entry, text }));
       }
     }
     source = "recent_messages";
@@ -186,18 +168,9 @@ async function seedConversationBackfill(
 
 /** Build the turn-state preparer from injected conversation services. */
 export function createPrepareTurnState(deps: PrepareTurnStateDeps) {
-  return async function prepareTurnState(args: {
-    explicitMention: boolean;
-    message: Message;
-    thread: Thread;
-    userText: string;
-    context: {
-      threadId?: string;
-      requesterId?: string;
-      channelId?: string;
-      runId?: string;
-    };
-  }): Promise<PreparedTurnState> {
+  return async function prepareTurnState(
+    args: PrepareTurnStateInput,
+  ): Promise<PreparedTurnState> {
     const existingState = await args.thread.state;
     const existingSandboxId = existingState
       ? toOptionalString(
@@ -219,44 +192,31 @@ export function createPrepareTurnState(deps: PrepareTurnStateDeps) {
       messageId: args.message.id,
       messageCreatedAtMs: args.message.metadata.dateSent.getTime(),
     });
-    const messageHasPotentialImageAttachment = hasPotentialImageAttachment(
-      args.message.attachments,
-    );
-    const imageAttachmentCount = messageHasPotentialImageAttachment
-      ? countPotentialImageAttachments(args.message.attachments)
-      : 0;
+    for (const queued of args.queuedMessages ?? []) {
+      const queuedMessage = toConversationMessage({
+        entry: queued.message,
+        explicitMention: queued.explicitMention,
+        text: queued.userText,
+      });
+      upsertConversationMessage(conversation, queuedMessage);
+    }
 
-    const normalizedUserText =
-      normalizeConversationText(args.userText) || "[non-text message]";
-    const slackTs = getSlackMessageTs(args.message);
-    const incomingUserMessage: ConversationMessage = {
-      id: args.message.id,
-      role: "user",
-      text: normalizedUserText,
-      createdAtMs: args.message.metadata.dateSent.getTime(),
-      author: {
-        userId: args.message.author.userId,
-        userName: args.message.author.userName,
-        fullName: args.message.author.fullName,
-        isBot:
-          typeof args.message.author.isBot === "boolean"
-            ? args.message.author.isBot
-            : undefined,
-      },
-      meta: {
-        attachmentCount: args.message.attachments.length,
-        explicitMention: args.explicitMention,
-        imageAttachmentCount:
-          imageAttachmentCount > 0 ? imageAttachmentCount : undefined,
-        slackTs,
-        imagesHydrated: !messageHasPotentialImageAttachment,
-      },
-    };
+    const incomingUserMessage = toConversationMessage({
+      entry: args.message,
+      explicitMention: args.explicitMention,
+      text: args.text.userText,
+    });
 
     const userMessageId = upsertConversationMessage(
       conversation,
       incomingUserMessage,
     );
+
+    const messageHasPotentialImageAttachment =
+      hasPotentialImageAttachment(args.message.attachments) ||
+      (args.queuedMessages ?? []).some((queued) =>
+        hasPotentialImageAttachment(queued.message.attachments),
+      );
 
     const shouldHydrateVisionContext =
       !conversation.vision.backfillCompletedAtMs ||

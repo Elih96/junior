@@ -57,7 +57,6 @@ export interface ToolRuntimeContext {
   userText?: string;
   artifactState?: ThreadArtifactsState;
   configuration?: Record<string, unknown>;
-  getActiveSkills?: () => Skill[];
   mcpToolManager?: McpToolManager;
   sandbox: SandboxWorkspace;
 }

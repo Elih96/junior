@@ -20,6 +20,7 @@ const {
   promptMessages,
   promptSeedMessages,
   recordToolResultMessage,
+  resumeMessages,
   resumeTurnContextCounts,
   searchMcpToolNames,
   turnContextInputs,
@@ -47,13 +48,16 @@ const {
   promptSeedMessages: [] as unknown[][],
   pushPreToolAssistantMessage: { value: false },
   recordToolResultMessage: { value: false },
+  resumeMessages: [] as unknown[][],
   resumeTurnContextCounts: [] as number[],
   searchMcpToolNames: [] as string[][],
   turnContextInputs: [] as Array<{
+    availableSkills?: Array<{ name: string }>;
     activeMcpCatalogs?: Array<{
       provider: string;
       available_tool_count: number;
     }>;
+    includeSessionContext?: boolean;
   }>,
 }));
 
@@ -179,23 +183,14 @@ vi.mock("@earendil-works/pi-agent-core", () => {
         });
         throw error;
       }
-      if (loadSkillResult.details?.mcp_provider) {
-        const searchMcpTools = this.state.tools.find(
-          (tool) => tool.name === "searchMcpTools",
-        );
-        if (!searchMcpTools) {
-          throw new Error("searchMcpTools missing");
-        }
-        const searchResult = (await searchMcpTools.execute("tool-call-search", {
-          provider: loadSkillResult.details.mcp_provider,
-          query: "ping query",
-        })) as {
-          details?: { tools?: Array<{ tool_name: string }> };
-        };
-        searchMcpToolNames.push(
-          (searchResult.details?.tools ?? []).map((tool) => tool.tool_name),
-        );
-      }
+      this.state.messages.push({
+        role: "toolResult",
+        toolCallId: "tool-call-1",
+        toolName: "loadSkill",
+        isError: false,
+        details: loadSkillResult.details,
+        content: [{ type: "text", text: "loaded" }],
+      });
       if (this.aborted) {
         this.state.messages.push({
           role: "assistant",
@@ -213,7 +208,23 @@ vi.mock("@earendil-works/pi-agent-core", () => {
         });
         return {};
       }
-
+      if (loadSkillResult.details?.mcp_provider) {
+        const searchMcpTools = this.state.tools.find(
+          (tool) => tool.name === "searchMcpTools",
+        );
+        if (!searchMcpTools) {
+          throw new Error("searchMcpTools missing");
+        }
+        const searchResult = (await searchMcpTools.execute("tool-call-search", {
+          provider: loadSkillResult.details.mcp_provider,
+          query: "ping query",
+        })) as {
+          details?: { tools?: Array<{ tool_name: string }> };
+        };
+        searchMcpToolNames.push(
+          (searchResult.details?.tools ?? []).map((tool) => tool.tool_name),
+        );
+      }
       if (pushPreToolAssistantMessage.value) {
         this.state.messages.push({
           role: "assistant",
@@ -258,6 +269,7 @@ vi.mock("@earendil-works/pi-agent-core", () => {
 
     async continue() {
       continueCallCount.value += 1;
+      resumeMessages.push([...this.state.messages]);
       resumeTurnContextCounts.push(
         this.state.messages.filter((message) => {
           const candidate = message as { role?: unknown; content?: unknown };
@@ -269,7 +281,8 @@ vi.mock("@earendil-works/pi-agent-core", () => {
                 part &&
                 typeof part === "object" &&
                 (part as { type?: unknown }).type === "text" &&
-                (part as { text?: unknown }).text === "Turn context",
+                typeof (part as { text?: unknown }).text === "string" &&
+                (part as { text: string }).text.includes("Turn context"),
             )
           );
         }).length,
@@ -392,13 +405,18 @@ vi.mock("@/chat/prompt", async (importOriginal) => {
     ...actual,
     buildSystemPrompt: () => "System prompt",
     buildTurnContextPrompt: (input: {
+      availableSkills?: Array<{ name: string }>;
       activeMcpCatalogs?: Array<{
         provider: string;
         available_tool_count: number;
       }>;
+      includeSessionContext?: boolean;
     }) => {
       turnContextInputs.push(input);
-      return "Turn context";
+      if (input.includeSessionContext === false) {
+        return null;
+      }
+      return "<runtime-turn-context>\nTurn context\n</runtime-turn-context>";
     },
   };
 });
@@ -543,9 +561,9 @@ vi.mock("@/chat/mcp/client", () => {
 
 import { generateAssistantReply } from "@/chat/respond";
 import {
-  getAgentTurnSessionCheckpoint,
-  upsertAgentTurnSessionCheckpoint,
-} from "@/chat/state/turn-session-store";
+  getAgentTurnSessionRecord,
+  upsertAgentTurnSessionRecord,
+} from "@/chat/state/turn-session";
 import { disconnectStateAdapter } from "@/chat/state/adapter";
 import { isRetryableTurnError } from "@/chat/runtime/turn";
 
@@ -571,6 +589,7 @@ describe("generateAssistantReply progressive MCP loading", () => {
     promptSeedMessages.length = 0;
     pushPreToolAssistantMessage.value = false;
     recordToolResultMessage.value = false;
+    resumeMessages.length = 0;
     resumeTurnContextCounts.length = 0;
     turnContextInputs.length = 0;
 
@@ -639,17 +658,17 @@ describe("generateAssistantReply progressive MCP loading", () => {
     expect(agentInitialToolNames[0]).not.toContain("searchTools");
     expect(agentInitialToolNames[0]).not.toContain("mcp__demo__ping");
 
-    const pausedCheckpoint = await getAgentTurnSessionCheckpoint(
+    const pausedSessionRecord = await getAgentTurnSessionRecord(
       "conversation-1",
       "turn-1",
     );
-    expect(pausedCheckpoint).toMatchObject({
+    expect(pausedSessionRecord).toMatchObject({
       state: "awaiting_resume",
-      loadedSkillNames: [DEMO_SKILL.name],
       resumeReason: "auth",
     });
-    expect(pausedCheckpoint?.piMessages.at(-1)).toMatchObject({
-      role: "user",
+    expect(pausedSessionRecord?.piMessages.at(-1)).toMatchObject({
+      role: "toolResult",
+      toolName: "loadSkill",
     });
     expect(deliverPrivateMessageMock).toHaveBeenCalledTimes(1);
     expect(loadSkillExecutionErrorCount.value).toBe(0);
@@ -672,6 +691,8 @@ describe("generateAssistantReply progressive MCP loading", () => {
       "System prompt",
     ]);
     expect(resumeTurnContextCounts).toEqual([1]);
+    expect(turnContextInputs[0]?.includeSessionContext).toBe(true);
+    expect(turnContextInputs[1]?.includeSessionContext).toBe(true);
     expect(turnContextInputs[1]?.activeMcpCatalogs).toEqual([
       { provider: "demo", available_tool_count: 1 },
     ]);
@@ -684,13 +705,12 @@ describe("generateAssistantReply progressive MCP loading", () => {
       { query: "hello" },
     );
 
-    const resumedCheckpoint = await getAgentTurnSessionCheckpoint(
+    const resumedSessionRecord = await getAgentTurnSessionRecord(
       "conversation-1",
       "turn-1",
     );
-    expect(resumedCheckpoint).toMatchObject({
+    expect(resumedSessionRecord).toMatchObject({
       state: "completed",
-      loadedSkillNames: [DEMO_SKILL.name],
     });
   });
 
@@ -726,17 +746,118 @@ describe("generateAssistantReply progressive MCP loading", () => {
       { query: "hello" },
     );
 
-    const checkpoint = await getAgentTurnSessionCheckpoint(
+    const sessionRecord = await getAgentTurnSessionRecord(
       "conversation-2",
       "turn-2",
     );
-    expect(checkpoint).toMatchObject({
+    expect(sessionRecord).toMatchObject({
       state: "completed",
-      loadedSkillNames: [DEMO_SKILL.name],
     });
   });
 
-  it("seeds normal turns from persisted Pi history", async () => {
+  it("restores MCP providers inferred from prior Pi history before building a follow-up turn prompt", async () => {
+    listToolsMock.mockReset();
+    listToolsMock.mockResolvedValue(makeDemoMcpTools());
+
+    await generateAssistantReply("help me", {
+      ...makeReplyContext({
+        conversationId: "conversation-restored-provider",
+        threadTs: "1712345.0090",
+        turnId: "turn-restored-provider",
+      }),
+      piMessages: [
+        {
+          role: "toolResult",
+          toolName: "callMcpTool",
+          isError: false,
+          content: [{ type: "text", text: "pong" }],
+          input: {
+            tool_name: "mcp__demo__ping",
+            arguments: { query: "prior" },
+          },
+        },
+      ] as unknown as PiMessage[],
+    });
+
+    expect(turnContextInputs[0]?.activeMcpCatalogs).toEqual([
+      { provider: "demo", available_tool_count: 1 },
+    ]);
+    expect(listToolsMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps prior Pi history and the current request when inferred provider restore pauses for auth", async () => {
+    const priorMessages = [
+      {
+        role: "user",
+        content: [{ type: "text", text: "prior question" }],
+        timestamp: 1,
+      },
+      {
+        role: "toolResult",
+        toolName: "callMcpTool",
+        isError: false,
+        content: [{ type: "text", text: "pong" }],
+        input: {
+          tool_name: "mcp__demo__ping",
+          arguments: { query: "prior" },
+        },
+      },
+    ] as unknown as PiMessage[];
+
+    const firstError = await generateAssistantReply("current follow-up", {
+      ...makeReplyContext({
+        conversationId: "conversation-restore-auth",
+        threadTs: "1712345.0091",
+        turnId: "turn-restore-auth",
+      }),
+      piMessages: priorMessages,
+    }).catch((error) => error);
+
+    expect(isRetryableTurnError(firstError, "mcp_auth_resume")).toBe(true);
+
+    const pausedSessionRecord = await getAgentTurnSessionRecord(
+      "conversation-restore-auth",
+      "turn-restore-auth",
+    );
+    expect(pausedSessionRecord).toMatchObject({
+      state: "awaiting_resume",
+      resumeReason: "auth",
+    });
+    expect(pausedSessionRecord?.piMessages).toHaveLength(3);
+    expect(pausedSessionRecord?.piMessages[0]).toMatchObject({
+      role: "user",
+      content: [{ type: "text", text: "prior question" }],
+    });
+    expect(pausedSessionRecord?.piMessages.at(-1)).toMatchObject({
+      role: "user",
+      content: [{ type: "text", text: "current follow-up" }],
+    });
+
+    const reply = await generateAssistantReply("current follow-up", {
+      ...makeReplyContext({
+        conversationId: "conversation-restore-auth",
+        threadTs: "1712345.0091",
+        turnId: "turn-restore-auth",
+      }),
+      piMessages: priorMessages,
+    });
+
+    expect(reply.text).toBe("resumed reply");
+    expect(resumeMessages).toHaveLength(1);
+    expect(resumeMessages[0]?.at(-1)).toMatchObject({
+      role: "user",
+      content: [
+        {
+          type: "text",
+          text: "<runtime-turn-context>\nTurn context\n</runtime-turn-context>",
+        },
+        { type: "text", text: "current follow-up" },
+      ],
+    });
+    expect(resumeTurnContextCounts).toEqual([1]);
+  });
+
+  it("injects session context when persisted Pi history has no runtime context", async () => {
     listToolsMock.mockReset();
     listToolsMock.mockResolvedValue(makeDemoMcpTools());
     const priorMessages: PiMessage[] = [
@@ -768,6 +889,95 @@ describe("generateAssistantReply progressive MCP loading", () => {
     );
     expect(JSON.stringify(promptMessages[0])).not.toContain(
       "<thread-background>",
+    );
+    expect(JSON.stringify(promptMessages[0])).toContain("Turn context");
+    expect(turnContextInputs.at(-1)?.availableSkills).toEqual([
+      expect.objectContaining({ name: "demo-skill" }),
+    ]);
+    expect(turnContextInputs.at(-1)?.includeSessionContext).toBe(true);
+  });
+
+  it("injects session context for crash retries loaded from stripped running history", async () => {
+    listToolsMock.mockReset();
+    listToolsMock.mockResolvedValue(makeDemoMcpTools());
+    const storedRunningMessages: PiMessage[] = [
+      {
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text: "<runtime-turn-context>\nstale bootstrap\n</runtime-turn-context>",
+          },
+          { type: "text", text: "prior interrupted request" },
+        ],
+        timestamp: 1,
+      },
+    ] as PiMessage[];
+    const strippedHistory: PiMessage[] = [
+      {
+        role: "user",
+        content: [{ type: "text", text: "prior interrupted request" }],
+        timestamp: 1,
+      },
+    ] as PiMessage[];
+    await upsertAgentTurnSessionRecord({
+      conversationId: "conversation-crash-retry",
+      sessionId: "turn-crash-retry",
+      sliceId: 1,
+      state: "running",
+      piMessages: storedRunningMessages,
+    });
+
+    await generateAssistantReply("continue after crash", {
+      ...makeReplyContext({
+        conversationId: "conversation-crash-retry",
+        threadTs: "1712345.00032",
+        turnId: "turn-crash-retry",
+      }),
+      piMessages: strippedHistory,
+    });
+
+    expect(promptSeedMessages[0]).toEqual(strippedHistory);
+    expect(turnContextInputs.at(-1)?.includeSessionContext).toBe(true);
+    expect(JSON.stringify(promptMessages[0])).toContain("Turn context");
+    expect(JSON.stringify(promptMessages[0])).not.toContain("stale bootstrap");
+  });
+
+  it("does not duplicate session context when persisted Pi history already has it", async () => {
+    listToolsMock.mockReset();
+    listToolsMock.mockResolvedValue(makeDemoMcpTools());
+    const priorMessages: PiMessage[] = [
+      {
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text: "<runtime-turn-context>\nexisting bootstrap\n</runtime-turn-context>",
+          },
+          { type: "text", text: "prior question" },
+        ],
+        timestamp: 1,
+      },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "prior answer" }],
+        timestamp: 2,
+      },
+    ] as PiMessage[];
+
+    await generateAssistantReply("help me", {
+      ...makeReplyContext({
+        conversationId: "conversation-history-with-context",
+        threadTs: "1712345.00031",
+        turnId: "turn-history-with-context",
+      }),
+      piMessages: priorMessages,
+    });
+
+    expect(promptSeedMessages[0]).toEqual(priorMessages);
+    expect(turnContextInputs.at(-1)?.includeSessionContext).toBe(false);
+    expect(JSON.stringify(promptMessages[0])).not.toContain(
+      "<runtime-turn-context>",
     );
   });
 
@@ -810,13 +1020,12 @@ describe("generateAssistantReply progressive MCP loading", () => {
     expect(isRetryableTurnError(firstError, "mcp_auth_resume")).toBe(true);
     expect(deliverPrivateMessageMock).toHaveBeenCalledTimes(1);
 
-    const pausedCheckpoint = await getAgentTurnSessionCheckpoint(
+    const pausedSessionRecord = await getAgentTurnSessionRecord(
       "conversation-4",
       "turn-4",
     );
-    expect(pausedCheckpoint).toMatchObject({
+    expect(pausedSessionRecord).toMatchObject({
       state: "awaiting_resume",
-      loadedSkillNames: [DEMO_SKILL.name],
       resumeReason: "auth",
     });
 
@@ -824,13 +1033,12 @@ describe("generateAssistantReply progressive MCP loading", () => {
 
     expect(reply.text).toBe("resumed reply");
 
-    const resumedCheckpoint = await getAgentTurnSessionCheckpoint(
+    const resumedSessionRecord = await getAgentTurnSessionRecord(
       "conversation-4",
       "turn-4",
     );
-    expect(resumedCheckpoint).toMatchObject({
+    expect(resumedSessionRecord).toMatchObject({
       state: "completed",
-      loadedSkillNames: [DEMO_SKILL.name],
     });
   });
 
@@ -855,11 +1063,11 @@ describe("generateAssistantReply progressive MCP loading", () => {
     expect(reply.diagnostics.usedPrimaryText).toBe(false);
   });
 
-  it("does not return auth resume when auth checkpoint persistence fails", async () => {
-    const turnSessionStore = await import("@/chat/state/turn-session-store");
-    const originalUpsert = turnSessionStore.upsertAgentTurnSessionCheckpoint;
-    const checkpointSpy = vi
-      .spyOn(turnSessionStore, "upsertAgentTurnSessionCheckpoint")
+  it("does not return auth resume when auth session record persistence fails", async () => {
+    const turnSessionStore = await import("@/chat/state/turn-session");
+    const originalUpsert = turnSessionStore.upsertAgentTurnSessionRecord;
+    const sessionRecordSpy = vi
+      .spyOn(turnSessionStore, "upsertAgentTurnSessionRecord")
       .mockImplementation(async (args) => {
         if (args.state === "awaiting_resume" && args.resumeReason === "auth") {
           throw new Error("state adapter unavailable");
@@ -881,10 +1089,10 @@ describe("generateAssistantReply progressive MCP loading", () => {
 
     expect(isRetryableTurnError(reply, "mcp_auth_resume")).toBe(false);
     expect(reply.diagnostics.outcome).toBe("provider_error");
-    expect(checkpointSpy).toHaveBeenCalled();
+    expect(sessionRecordSpy).toHaveBeenCalled();
   });
 
-  it("falls back to the latest stored checkpoint when auth pause captures no messages", async () => {
+  it("falls back to the latest stored record when auth pause captures no messages", async () => {
     continueStopsOnAbort.value = true;
 
     const priorMessages: PiMessage[] = [
@@ -893,6 +1101,19 @@ describe("generateAssistantReply progressive MCP loading", () => {
         content: [{ type: "text", text: "help me" }],
         timestamp: 1,
       },
+      {
+        role: "toolResult",
+        toolCallId: "tool-call-1",
+        toolName: "loadSkill",
+        isError: false,
+        details: {
+          ok: true,
+          skill_name: DEMO_SKILL.name,
+          mcp_provider: "demo",
+        },
+        content: [{ type: "text", text: "loaded" }],
+        timestamp: 2,
+      } as PiMessage,
       {
         role: "assistant",
         content: [{ type: "text", text: "working on it" }],
@@ -913,18 +1134,17 @@ describe("generateAssistantReply progressive MCP loading", () => {
             total: 0,
           },
         },
-        timestamp: 2,
+        timestamp: 3,
         stopReason: "toolUse",
       },
     ];
-    const expectedResumeMessages = [priorMessages[0]];
-    await upsertAgentTurnSessionCheckpoint({
+    const expectedResumeMessages = priorMessages.slice(0, 2);
+    await upsertAgentTurnSessionRecord({
       conversationId: "conversation-5",
       sessionId: "turn-5",
       sliceId: 1,
       state: "awaiting_resume",
       piMessages: priorMessages,
-      loadedSkillNames: ["demo-skill"],
       resumeReason: "auth",
     });
 
@@ -949,16 +1169,15 @@ describe("generateAssistantReply progressive MCP loading", () => {
 
     expect(isRetryableTurnError(firstError, "mcp_auth_resume")).toBe(true);
 
-    const resumedCheckpoint = await getAgentTurnSessionCheckpoint(
+    const resumedSessionRecord = await getAgentTurnSessionRecord(
       "conversation-5",
       "turn-5",
     );
-    expect(resumedCheckpoint).toMatchObject({
+    expect(resumedSessionRecord).toMatchObject({
       state: "awaiting_resume",
       sliceId: 2,
       resumedFromSliceId: 1,
       piMessages: expectedResumeMessages,
-      loadedSkillNames: ["demo-skill"],
       resumeReason: "auth",
     });
   });
@@ -978,17 +1197,17 @@ describe("generateAssistantReply progressive MCP loading", () => {
 
     expect(isRetryableTurnError(firstError, "mcp_auth_resume")).toBe(true);
 
-    const pausedCheckpoint = await getAgentTurnSessionCheckpoint(
+    const pausedSessionRecord = await getAgentTurnSessionRecord(
       "conversation-6",
       "turn-6",
     );
-    expect(pausedCheckpoint).toMatchObject({
+    expect(pausedSessionRecord).toMatchObject({
       state: "awaiting_resume",
-      loadedSkillNames: ["demo-skill"],
       resumeReason: "auth",
     });
-    expect(pausedCheckpoint?.piMessages.at(-1)).toMatchObject({
-      role: "user",
+    expect(pausedSessionRecord?.piMessages.at(-1)).toMatchObject({
+      role: "toolResult",
+      toolName: "loadSkill",
     });
   });
 });

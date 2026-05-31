@@ -47,7 +47,6 @@ export interface DispatchRecord {
   metadata?: Record<string, string>;
   plugin: string;
   resultMessageTs?: string;
-  resumeCheckpointVersion?: number;
   status: DispatchStatus;
   updatedAtMs: number;
   version: number;

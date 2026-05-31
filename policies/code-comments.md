@@ -2,19 +2,24 @@
 
 ## Intent
 
-Comments are for non-obvious intent, invariants, and tradeoffs.
+Comments are for non-obvious intent, module ownership, invariants, and
+tradeoffs.
 
 They are not there to narrate obvious code.
 
 ## Policy
 
-- Add comments when behavior is easy to misread, policy-driven, or coupled to a non-obvious invariant.
-- Exported functions must have a brief JSDoc comment explaining intent so future readers can change them safely.
-- Prefer inline docstrings on tricky local helpers when future readers will need context to change them safely.
-- Keep comments short and concrete. Explain why the code exists or what boundary it is protecting.
-- Delete or rewrite stale comments immediately when behavior changes.
+- Major entry-point modules need a short design comment: ownership, boundary,
+  and key invariants.
+- Exported functions need a brief JSDoc comment explaining intent.
+- Private functions also need JSDoc when they define an internal interface:
+  handlers/factories, wire or storage formats, signing, durable state changes,
+  reply gates, or retry/resume/compaction/session policy.
+- Comment non-obvious invariants, tradeoffs, and policy-driven behavior.
+- Keep comments short, concrete, and current.
 
 ## Exceptions
 
 - Do not comment obvious transformations or control flow.
 - Do not add comments that simply restate the code in English.
+- Small obvious leaf helpers do not need comments.
