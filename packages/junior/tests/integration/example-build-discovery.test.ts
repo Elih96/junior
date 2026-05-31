@@ -10,7 +10,14 @@ const originalCwd = process.cwd();
 const repoRoot = path.resolve(import.meta.dirname, "../../../..");
 const exampleRoot = path.join(repoRoot, "apps/example");
 const exampleEntry = path.join(exampleRoot, "server.ts");
+const exampleNitroConfig = path.join(exampleRoot, "nitro.config.ts");
 const exampleRequire = createRequire(exampleEntry);
+const vercelEnvNames = [
+  "VERCEL",
+  "VERCEL_ENV",
+  "VERCEL_URL",
+  "VERCEL_PROJECT_PRODUCTION_URL",
+];
 
 function isSamePath(left: string, right: string): boolean {
   try {
@@ -69,6 +76,19 @@ async function importExampleApp() {
   };
 }
 
+async function importExampleNitroConfig() {
+  const href = `${pathToFileURL(exampleNitroConfig).href}?t=${Date.now()}`;
+  return (await import(href)) as {
+    exampleDashboardAuthRequired: () => boolean;
+  };
+}
+
+function clearVercelEnv(): void {
+  for (const name of vercelEnvNames) {
+    delete process.env[name];
+  }
+}
+
 describe.sequential("example build discovery integration", () => {
   beforeAll(() => {
     buildJuniorPackage();
@@ -78,6 +98,30 @@ describe.sequential("example build discovery integration", () => {
     process.chdir(originalCwd);
     process.env = { ...originalEnv };
     vi.resetModules();
+  });
+
+  it("only disables dashboard auth for local development outside Vercel", async () => {
+    const config = await importExampleNitroConfig();
+
+    process.env = { ...originalEnv, NODE_ENV: "development" };
+    clearVercelEnv();
+    expect(config.exampleDashboardAuthRequired()).toBe(false);
+
+    process.env = {
+      ...originalEnv,
+      NODE_ENV: "development",
+      VERCEL: "1",
+    };
+    expect(config.exampleDashboardAuthRequired()).toBe(true);
+
+    process.env = { ...originalEnv, NODE_ENV: "production" };
+    clearVercelEnv();
+    expect(config.exampleDashboardAuthRequired()).toBe(true);
+
+    process.env = { ...originalEnv };
+    delete process.env.NODE_ENV;
+    clearVercelEnv();
+    expect(config.exampleDashboardAuthRequired()).toBe(true);
   });
 
   it("serves built health and recognizes the sentry oauth callback route", async () => {
@@ -102,7 +146,7 @@ describe.sequential("example build discovery integration", () => {
     expect(await oauth.text()).toContain("missing required parameters");
   }, 15_000);
 
-  it("reports discovery state from the example app", async () => {
+  it("does not expose discovery state from the public example app", async () => {
     const packageNames = getExamplePluginPackages();
     process.chdir(exampleRoot);
     process.env.JUNIOR_PLUGIN_PACKAGES = JSON.stringify(packageNames);
@@ -110,56 +154,6 @@ describe.sequential("example build discovery integration", () => {
     const app = await importExampleApp();
     const response = await app.fetch(new Request("http://localhost/api/info"));
 
-    expect(response.status).toBe(200);
-    const body = (await response.json()) as {
-      descriptionText?: string;
-      homeDir: string;
-      packagedContent: {
-        packageNames: string[];
-        manifestRoots: string[];
-        skillRoots: string[];
-      };
-      providers: string[];
-      skills: Array<{ name: string }>;
-    };
-
-    expect(body.descriptionText).toBe(
-      "Junior helps your team make progress directly in Slack.",
-    );
-    expect(body.homeDir).toBe(path.join(exampleRoot, "app"));
-    expect(body.skills.map((skill) => skill.name)).toEqual(
-      expect.arrayContaining(["example-local", "example-bundle-help"]),
-    );
-    expect(body.providers).toEqual(
-      expect.arrayContaining([
-        "agent-browser",
-        "example-bundle",
-        "github",
-        "notion",
-        "sentry",
-      ]),
-    );
-    expect(body.packagedContent.packageNames).toEqual(
-      expect.arrayContaining(packageNames),
-    );
-    expect(body.packagedContent.manifestRoots).toEqual(
-      expect.arrayContaining(
-        packageNames.map((packageName) =>
-          path.join(exampleRoot, "node_modules", ...packageName.split("/")),
-        ),
-      ),
-    );
-    expect(body.packagedContent.skillRoots).toEqual(
-      expect.arrayContaining(
-        packageNames.map((packageName) =>
-          path.join(
-            exampleRoot,
-            "node_modules",
-            ...packageName.split("/"),
-            "skills",
-          ),
-        ),
-      ),
-    );
+    expect(response.status).toBe(404);
   }, 15_000);
 });
