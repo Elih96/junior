@@ -1,12 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
-import {
-  formatMessageOffset,
-  formatMessageTimestamp,
-  stringifyPartValue,
-} from "../format";
+import { formatMessageTimestamp, stringifyPartValue } from "../format";
 import { cn } from "../styles";
-import type { ConversationTurn } from "../types";
 import {
   TranscriptHeadingMeta,
   TranscriptHeadingRow,
@@ -23,7 +18,6 @@ function isString(value: string | undefined): value is string {
 /** Render a thinking transcript event with layout-aware expansion. */
 export function TranscriptThinkingView(props: {
   timestamp?: number;
-  turn?: ConversationTurn;
   value: unknown;
 }) {
   const [open, setOpen] = useState(false);
@@ -35,14 +29,10 @@ export function TranscriptThinkingView(props: {
   const contentChangesOnExpand =
     preview !== expandedText || expandedText.includes("\n");
   const shouldMeasurePreview = !contentChangesOnExpand;
-  const offset = props.turn
-    ? formatMessageOffset(props.turn, props.timestamp)
-    : undefined;
   const meta = [
     typeof props.timestamp === "number"
       ? formatMessageTimestamp(props.timestamp)
       : undefined,
-    offset,
   ].filter(isString);
   const metaText = meta.join(" · ");
   const canExpand = contentChangesOnExpand || previewOverflows;
