@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   buildConversations,
@@ -19,6 +19,10 @@ import {
   turnMessageCount,
 } from "../src/client/format";
 import type { ConversationTurn, Session } from "../src/client/types";
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 describe("dashboard token formatting", () => {
   it("sums turn usage for conversation totals", () => {

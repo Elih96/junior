@@ -2,10 +2,16 @@ import {
   defineJuniorPlugin,
   type Dispatch,
   type AgentPluginToolDefinition,
+  type PluginOperationalReportContent,
   type ToolRegistrationHookContext,
 } from "@sentry/junior-plugin-api";
 import { buildScheduledTaskRunPrompt } from "./prompt";
-import { createSchedulerStore, type SchedulerStore } from "./store";
+import {
+  createSchedulerOperationalStore,
+  createSchedulerStore,
+  type SchedulerOperationalStore,
+  type SchedulerStore,
+} from "./store";
 import type { ScheduledRun, ScheduledTask } from "./types";
 import {
   createSlackScheduleCreateTaskTool,
@@ -17,6 +23,7 @@ import {
 } from "./schedule-tools";
 
 const SCHEDULER_HEARTBEAT_LIMIT = 10;
+const DASHBOARD_TABLE_LIMIT = 5;
 
 function shouldSkipRun(
   task: ScheduledTask,
@@ -167,6 +174,189 @@ async function failClaimedRun(args: {
   });
 }
 
+function formatCount(value: number): string {
+  return String(value);
+}
+
+function formatTimestamp(timestampMs: number | undefined): string {
+  return typeof timestampMs === "number" && Number.isFinite(timestampMs)
+    ? new Date(timestampMs).toISOString()
+    : "none";
+}
+
+function destinationLabel(destination: ScheduledTask["destination"]): string {
+  if (destination.channelId.startsWith("D")) {
+    return "Direct Message";
+  }
+  if (destination.channelId.startsWith("C")) {
+    return `Public Channel ${destination.channelId}`;
+  }
+  if (destination.channelId.startsWith("G")) {
+    return `Private Destination ${destination.channelId}`;
+  }
+  return destination.channelId;
+}
+
+function authorLabel(author: ScheduledTask["createdBy"]): string {
+  if (author.fullName && author.userName) {
+    return `${author.fullName} (@${author.userName})`;
+  }
+  if (author.fullName) {
+    return author.fullName;
+  }
+  if (author.userName) {
+    return `@${author.userName}`;
+  }
+  return `Slack User ${author.slackUserId}`;
+}
+
+function cadenceLabel(task: ScheduledTask): string {
+  if (task.schedule.kind === "one_off") {
+    return "one-off";
+  }
+  return task.schedule.recurrence
+    ? task.schedule.recurrence.frequency
+    : "recurring";
+}
+
+function taskStatusCounts(tasks: ScheduledTask[]) {
+  return tasks.reduce(
+    (counts, task) => ({
+      active: counts.active + (task.status === "active" ? 1 : 0),
+      blocked: counts.blocked + (task.status === "blocked" ? 1 : 0),
+      paused: counts.paused + (task.status === "paused" ? 1 : 0),
+    }),
+    { active: 0, blocked: 0, paused: 0 },
+  );
+}
+
+function isDue(task: ScheduledTask, nowMs: number): boolean {
+  return (
+    task.status === "active" &&
+    ((typeof task.runNowAtMs === "number" && task.runNowAtMs <= nowMs) ||
+      (typeof task.nextRunAtMs === "number" && task.nextRunAtMs <= nowMs))
+  );
+}
+
+async function buildSchedulerOperationalReport(args: {
+  nowMs: number;
+  store: SchedulerOperationalStore;
+}): Promise<PluginOperationalReportContent> {
+  const tasks = await args.store.listTasks();
+  const incompleteRuns = await args.store.listIncompleteRunsForTasks(tasks);
+  const taskById = new Map(tasks.map((task) => [task.id, task]));
+  const counts = taskStatusCounts(tasks);
+  const dueCount = tasks.filter((task) => isDue(task, args.nowMs)).length;
+  const upcomingTasks = tasks
+    .filter((task) => task.status === "active" && task.nextRunAtMs)
+    .sort((left, right) => left.nextRunAtMs! - right.nextRunAtMs!)
+    .slice(0, DASHBOARD_TABLE_LIMIT);
+  const blockedTasks = tasks
+    .filter((task) => task.status === "blocked")
+    .sort((left, right) => right.updatedAtMs - left.updatedAtMs)
+    .slice(0, DASHBOARD_TABLE_LIMIT);
+  const runningCount = incompleteRuns.length;
+  const runningRuns = incompleteRuns
+    .sort((left, right) => right.claimedAtMs - left.claimedAtMs)
+    .slice(0, DASHBOARD_TABLE_LIMIT);
+
+  return {
+    title: "Scheduler",
+    generatedAt: new Date(args.nowMs).toISOString(),
+    metrics: [
+      {
+        label: "active",
+        tone: counts.active > 0 ? "good" : "neutral",
+        value: formatCount(counts.active),
+      },
+      {
+        label: "blocked",
+        tone: counts.blocked > 0 ? "danger" : "neutral",
+        value: formatCount(counts.blocked),
+      },
+      { label: "paused", value: formatCount(counts.paused) },
+      {
+        label: "due now",
+        tone: dueCount > 0 ? "warning" : "neutral",
+        value: formatCount(dueCount),
+      },
+      {
+        label: "running",
+        tone: runningCount > 0 ? "warning" : "neutral",
+        value: formatCount(runningCount),
+      },
+    ],
+    recordSets: [
+      {
+        title: "Upcoming",
+        emptyText: "No active scheduled tasks.",
+        fields: [
+          { key: "task", label: "Task" },
+          { key: "author", label: "Author" },
+          { key: "destination", label: "Destination" },
+          { key: "nextRun", label: "Next Run" },
+          { key: "cadence", label: "Cadence" },
+        ],
+        records: upcomingTasks.map((task) => ({
+          id: task.id,
+          values: {
+            task: task.id,
+            author: authorLabel(task.createdBy),
+            destination: destinationLabel(task.destination),
+            nextRun: formatTimestamp(task.nextRunAtMs),
+            cadence: cadenceLabel(task),
+          },
+        })),
+      },
+      {
+        title: "Blocked",
+        emptyText: "No blocked scheduled tasks.",
+        fields: [
+          { key: "task", label: "Task" },
+          { key: "author", label: "Author" },
+          { key: "destination", label: "Destination" },
+          { key: "updated", label: "Updated" },
+        ],
+        records: blockedTasks.map((task) => ({
+          id: task.id,
+          tone: "danger",
+          values: {
+            task: task.id,
+            author: authorLabel(task.createdBy),
+            destination: destinationLabel(task.destination),
+            updated: formatTimestamp(task.updatedAtMs),
+          },
+        })),
+      },
+      {
+        title: "Running",
+        emptyText: "No scheduler runs in flight.",
+        fields: [
+          { key: "run", label: "Run" },
+          { key: "task", label: "Task" },
+          { key: "author", label: "Author" },
+          { key: "scheduledFor", label: "Scheduled For" },
+          { key: "status", label: "Status" },
+        ],
+        records: runningRuns.map((run) => {
+          const task = taskById.get(run.taskId);
+          return {
+            id: run.id,
+            tone: run.status === "pending" ? "warning" : "neutral",
+            values: {
+              run: run.id,
+              task: run.taskId,
+              author: task ? authorLabel(task.createdBy) : "unknown",
+              scheduledFor: formatTimestamp(run.scheduledForMs),
+              status: run.status,
+            },
+          };
+        }),
+      },
+    ],
+  };
+}
+
 /** Create Junior's built-in trusted scheduler plugin. */
 export function createSchedulerPlugin() {
   return defineJuniorPlugin({
@@ -304,6 +494,12 @@ export function createSchedulerPlugin() {
         }
 
         return { dispatchCount };
+      },
+      async operationalReport(ctx) {
+        return buildSchedulerOperationalReport({
+          nowMs: ctx.nowMs,
+          store: createSchedulerOperationalStore(ctx.state),
+        });
       },
     },
   });

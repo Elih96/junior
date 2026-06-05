@@ -115,6 +115,58 @@ function reporting(): JuniorReporting {
         ],
       };
     },
+    async getConversationStats() {
+      return {
+        active: 1,
+        conversations: 1,
+        durationMs: 0,
+        failed: 0,
+        generatedAt: "2026-05-29T00:00:00.000Z",
+        hung: 0,
+        locations: [
+          {
+            active: 1,
+            conversations: 1,
+            durationMs: 0,
+            failed: 0,
+            hung: 0,
+            label: "Public Channel",
+            turns: 1,
+          },
+        ],
+        requesters: [
+          {
+            active: 1,
+            conversations: 1,
+            durationMs: 0,
+            failed: 0,
+            hung: 0,
+            label: "Unknown",
+            turns: 1,
+          },
+        ],
+        sampleLimit: 1,
+        sampleSize: 1,
+        source: "turn_session_records",
+        truncated: false,
+        turns: 1,
+        windowEnd: "2026-05-29T00:00:00.000Z",
+        windowStart: "2026-05-22T00:00:00.000Z",
+      };
+    },
+    async getPluginOperationalReports() {
+      return {
+        source: "trusted_plugins",
+        generatedAt: "2026-05-29T00:00:00.000Z",
+        reports: [
+          {
+            pluginName: "scheduler",
+            title: "Scheduler",
+            metrics: [{ label: "active", value: "1" }],
+          },
+        ],
+      };
+    },
     async getConversation(conversationId: string) {
       return {
         conversationId,
@@ -205,13 +257,15 @@ describe("dashboard routes", () => {
 
   it("protects sub-routes at root basePath from unauthenticated access", async () => {
     // app.use("/", ...) only matches the exact root in Hono; sub-routes like
-    // /conversations and /sessions must be covered by a wildcard middleware.
+    // /conversations, /plugins, and /sessions must be covered by a wildcard
+    // middleware.
     const app = dashboard(null);
 
     for (const path of [
       "/conversations",
       "/conversations/slack%3AC1%3A123",
       "/conversations/slack%3AC1%3A123?view=tools",
+      "/plugins",
       "/sessions",
       "/sessions/some-session",
     ]) {
@@ -361,6 +415,8 @@ describe("dashboard routes", () => {
       "/api/dashboard/plugins",
       "/api/dashboard/skills",
       "/api/dashboard/sessions",
+      "/api/dashboard/conversation-stats",
+      "/api/dashboard/plugin-reports",
       "/api/dashboard/conversations/slack%3AC1%3A123",
       "/api/dashboard/config",
       "/api/dashboard/me",
@@ -495,6 +551,148 @@ describe("dashboard routes", () => {
     expect(await skills.json()).toEqual([
       { name: "triage", pluginProvider: "github" },
     ]);
+
+    const conversationStats = await app.fetch(
+      new Request("http://localhost/api/dashboard/conversation-stats"),
+    );
+    expect(conversationStats.status).toBe(200);
+    expect(await conversationStats.json()).toMatchObject({
+      active: 1,
+      conversations: 1,
+      requesters: [{ label: "Unknown", conversations: 1 }],
+      sampleLimit: 1,
+      sampleSize: 1,
+      source: "turn_session_records",
+      truncated: false,
+    });
+
+    const pluginReports = await app.fetch(
+      new Request("http://localhost/api/dashboard/plugin-reports"),
+    );
+    expect(pluginReports.status).toBe(200);
+    expect(await pluginReports.json()).toMatchObject({
+      reports: [
+        {
+          pluginName: "scheduler",
+          metrics: [{ label: "active", value: "1" }],
+        },
+      ],
+      source: "trusted_plugins",
+    });
+  });
+
+  it("returns empty conversation stats for legacy reporting providers", async () => {
+    const { getConversationStats: _getConversationStats, ...legacyReporting } =
+      reporting();
+    expect(_getConversationStats).toBeTypeOf("function");
+    const app = dashboard(
+      {
+        user: {
+          email: "person@sentry.io",
+          emailVerified: true,
+          hostedDomain: "sentry.io",
+        },
+      },
+      legacyReporting,
+    );
+
+    const conversationStats = await app.fetch(
+      new Request("http://localhost/api/dashboard/conversation-stats"),
+    );
+
+    expect(conversationStats.status).toBe(200);
+    expect(await conversationStats.json()).toMatchObject({
+      conversations: 0,
+      requesters: [],
+      sampleLimit: 0,
+      sampleSize: 0,
+      source: "turn_session_records",
+      truncated: false,
+    });
+  });
+
+  it("returns a failure status when conversation stats reporting throws", async () => {
+    const customReporting = {
+      ...reporting(),
+      async getConversationStats() {
+        throw new Error("conversation stats unavailable");
+      },
+    };
+    const app = dashboard(
+      {
+        user: {
+          email: "person@sentry.io",
+          emailVerified: true,
+          hostedDomain: "sentry.io",
+        },
+      },
+      customReporting,
+    );
+
+    const conversationStats = await app.fetch(
+      new Request("http://localhost/api/dashboard/conversation-stats"),
+    );
+
+    expect(conversationStats.status).toBe(500);
+    expect(await conversationStats.json()).toEqual({
+      error: "Conversation stats failed to load.",
+    });
+  });
+
+  it("returns an empty plugin report feed for legacy reporting providers", async () => {
+    const {
+      getPluginOperationalReports: _getPluginOperationalReports,
+      ...legacyReporting
+    } = reporting();
+    expect(_getPluginOperationalReports).toBeTypeOf("function");
+    const app = dashboard(
+      {
+        user: {
+          email: "person@sentry.io",
+          emailVerified: true,
+          hostedDomain: "sentry.io",
+        },
+      },
+      legacyReporting,
+    );
+
+    const pluginReports = await app.fetch(
+      new Request("http://localhost/api/dashboard/plugin-reports"),
+    );
+
+    expect(pluginReports.status).toBe(200);
+    expect(await pluginReports.json()).toMatchObject({
+      reports: [],
+      source: "trusted_plugins",
+    });
+  });
+
+  it("returns a failure status when plugin reporting throws", async () => {
+    const customReporting = {
+      ...reporting(),
+      async getPluginOperationalReports() {
+        throw new Error("plugin reporting unavailable");
+      },
+    };
+    const app = dashboard(
+      {
+        user: {
+          email: "person@sentry.io",
+          emailVerified: true,
+          hostedDomain: "sentry.io",
+        },
+      },
+      customReporting,
+    );
+
+    const pluginReports = await app.fetch(
+      new Request("http://localhost/api/dashboard/plugin-reports"),
+    );
+
+    expect(pluginReports.status).toBe(500);
+    expect(await pluginReports.json()).toEqual({
+      error: "Trusted plugin stats failed to load.",
+    });
   });
 
   it("returns the signed-in identity and session feed", async () => {
@@ -738,6 +936,7 @@ describe("dashboard routes", () => {
         pathname === "/" ||
         pathname === "/conversations" ||
         pathname.startsWith("/conversations/") ||
+        pathname === "/plugins" ||
         pathname === "/sessions" ||
         pathname.startsWith("/sessions/") ||
         pathname.startsWith("/api/dashboard/") ||
@@ -801,10 +1000,11 @@ describe("dashboard routes", () => {
       trustedOrigins: ["https://junior.example.com"],
     }).nitro.setup(fixture.nitro);
 
-    expect(Object.keys(fixture.nitro.options.routes).slice(0, 8)).toEqual([
+    expect(Object.keys(fixture.nitro.options.routes).slice(0, 9)).toEqual([
       "/",
       "/conversations",
       "/conversations/**",
+      "/plugins",
       "/sessions",
       "/sessions/**",
       "/api/dashboard/**",

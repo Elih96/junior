@@ -1,7 +1,11 @@
 import { Hono, type Context, type Next } from "hono";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
-import type { JuniorReporting } from "@sentry/junior/reporting";
+import type {
+  DashboardConversationStatsReport,
+  PluginOperationalReportFeed,
+  JuniorReporting,
+} from "@sentry/junior/reporting";
 import { createJuniorReporting } from "@sentry/junior/reporting";
 import { initSentry } from "@sentry/junior/instrumentation";
 import { dashboardClientAsset, dashboardTailwindAsset } from "./assets";
@@ -119,6 +123,53 @@ function dashboardLoginUrl(request: Request, basePath: string): string {
     url.searchParams.set(LOGIN_NEXT_PARAM, returnPath);
   }
   return url.toString();
+}
+
+function emptyPluginReportFeed(): PluginOperationalReportFeed {
+  return {
+    generatedAt: new Date().toISOString(),
+    reports: [],
+    source: "trusted_plugins",
+  };
+}
+
+function emptyConversationStatsReport(): DashboardConversationStatsReport {
+  const nowMs = Date.now();
+  return {
+    active: 0,
+    conversations: 0,
+    durationMs: 0,
+    failed: 0,
+    generatedAt: new Date(nowMs).toISOString(),
+    hung: 0,
+    locations: [],
+    requesters: [],
+    sampleLimit: 0,
+    sampleSize: 0,
+    source: "turn_session_records",
+    truncated: false,
+    turns: 0,
+    windowEnd: new Date(nowMs).toISOString(),
+    windowStart: new Date(nowMs - 7 * 24 * 60 * 60 * 1000).toISOString(),
+  };
+}
+
+async function readConversationStats(
+  reporting: JuniorReporting,
+): Promise<DashboardConversationStatsReport> {
+  if (!reporting.getConversationStats) {
+    return emptyConversationStatsReport();
+  }
+  return await reporting.getConversationStats();
+}
+
+async function readPluginReports(
+  reporting: JuniorReporting,
+): Promise<PluginOperationalReportFeed> {
+  if (!reporting.getPluginOperationalReports) {
+    return emptyPluginReportFeed();
+  }
+  return await reporting.getPluginOperationalReports();
 }
 
 function callbackUrl(request: Request, basePath: string): string {
@@ -255,6 +306,7 @@ function dashboardPagePaths(basePath: string): string[] {
   return [
     basePath,
     basePath === "/" ? "/conversations" : `${basePath}/conversations`,
+    basePath === "/" ? "/plugins" : `${basePath}/plugins`,
     basePath === "/" ? "/sessions" : `${basePath}/sessions`,
   ];
 }
@@ -436,8 +488,8 @@ export function createDashboardApp(
 
   if (basePath === "/") {
     // When mounted at root, a wildcard is required to cover all sub-routes
-    // (e.g. /conversations, /sessions). `app.use("/", ...)` only matches
-    // the exact root path in Hono and leaves those routes unprotected.
+    // (e.g. /conversations, /plugins, /sessions). `app.use("/", ...)` only
+    // matches the exact root path in Hono and leaves those routes unprotected.
     app.use("/*", requireDashboardSession);
   } else {
     app.use(basePath, requireDashboardSession);
@@ -465,6 +517,26 @@ export function createDashboardApp(
   });
   app.get("/api/dashboard/sessions", async () => {
     return Response.json(await reporting.getSessions());
+  });
+  app.get("/api/dashboard/conversation-stats", async () => {
+    try {
+      return Response.json(await readConversationStats(reporting));
+    } catch {
+      return Response.json(
+        { error: "Conversation stats failed to load." },
+        { status: 500 },
+      );
+    }
+  });
+  app.get("/api/dashboard/plugin-reports", async () => {
+    try {
+      return Response.json(await readPluginReports(reporting));
+    } catch {
+      return Response.json(
+        { error: "Trusted plugin stats failed to load." },
+        { status: 500 },
+      );
+    }
   });
   app.get("/api/dashboard/conversations/:conversationId", async (c) => {
     return Response.json(

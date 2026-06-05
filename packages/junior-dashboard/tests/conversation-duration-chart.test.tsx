@@ -35,22 +35,27 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-function renderChart(sessions: Session[]): void {
-  renderToStaticMarkup(
+function renderChart(sessions: Session[], nowMs: number): string {
+  return renderToStaticMarkup(
     <QueryClientProvider client={client}>
       <MemoryRouter>
-        <ConversationDurationChart sessions={sessions} timeZone="UTC" />
+        <ConversationDurationChart
+          nowMs={nowMs}
+          sessions={sessions}
+          timeZone="UTC"
+        />
       </MemoryRouter>
     </QueryClientProvider>,
   );
 }
 
 describe("conversation duration chart", () => {
-  it("plots conversation duration as summed turn runtime", () => {
+  it("plots recent conversation runtime without double-counting cumulative turns", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-06-02T12:00:00.000Z"));
 
-    renderChart([
+    const nowMs = Date.parse("2026-06-02T12:00:00.000Z");
+    const sessions: Session[] = [
       {
         completedAt: "2026-06-02T09:05:00.000Z",
         conversationId: "conversation-1",
@@ -75,13 +80,58 @@ describe("conversation duration chart", () => {
         surface: "slack",
         title: "Turn turn-2",
       },
-    ]);
+      {
+        conversationId: "conversation-active",
+        cumulativeDurationMs: 3_000,
+        id: "active-turn",
+        lastProgressAt: "2026-06-02T11:30:00.000Z",
+        lastSeenAt: "2026-06-02T11:30:00.000Z",
+        startedAt: "2026-06-02T11:30:00.000Z",
+        status: "active",
+        surface: "slack",
+        title: "Turn active-turn",
+      },
+      {
+        completedAt: "2026-06-02T10:10:00.000Z",
+        conversationId: "conversation-carryover",
+        cumulativeDurationMs: 9_000,
+        id: "carryover-turn",
+        lastProgressAt: "2026-06-02T10:10:00.000Z",
+        lastSeenAt: "2026-06-02T10:10:00.000Z",
+        startedAt: "2026-05-20T09:00:00.000Z",
+        status: "completed",
+        surface: "slack",
+        title: "Turn carryover-turn",
+      },
+      {
+        completedAt: "2026-05-20T09:05:00.000Z",
+        conversationId: "conversation-old",
+        cumulativeDurationMs: 9_000,
+        id: "old-turn",
+        lastProgressAt: "2026-05-20T09:05:00.000Z",
+        lastSeenAt: "2026-05-20T09:05:00.000Z",
+        startedAt: "2026-05-20T09:00:00.000Z",
+        status: "completed",
+        surface: "slack",
+        title: "Turn old-turn",
+      },
+    ];
+    const html = renderChart(sessions, nowMs);
 
-    expect(chartState.scatterData).toHaveLength(1);
+    expect(chartState.scatterData).toHaveLength(2);
     expect(chartState.scatterData[0]).toMatchObject({
-      conversationId: "conversation-1",
-      durationLabel: "3.5s",
-      durationMs: 3_500,
+      conversationId: "conversation-carryover",
+      durationLabel: "9.0s",
+      durationMs: 9_000,
+      x: Date.parse("2026-06-02T10:10:00.000Z"),
     });
+    expect(chartState.scatterData[1]).toMatchObject({
+      conversationId: "conversation-1",
+      durationLabel: "2.5s",
+      durationMs: 2_500,
+    });
+    expect(html).toContain(
+      "3 recent conversations / 1 active / 0 hung / 0 errors",
+    );
   });
 });

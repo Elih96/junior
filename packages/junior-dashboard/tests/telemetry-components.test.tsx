@@ -1,12 +1,13 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { HighlightedCode } from "../src/client/code";
 import { ToolCallsMetric } from "../src/client/components/TelemetryMetrics";
 import { Button } from "../src/client/components/Button";
 import { FilterTabs } from "../src/client/components/FilterTabs";
+import { PluginReports } from "../src/client/components/PluginReports";
 import { StatusBadge } from "../src/client/components/StatusBadge";
 import { TranscriptHeader } from "../src/client/components/TranscriptHeader";
 import { TranscriptToolView } from "../src/client/components/TranscriptToolView";
@@ -16,6 +17,7 @@ import { client } from "../src/client/api";
 import { CommandCenter } from "../src/client/pages/CommandCenter";
 import { ConversationPage } from "../src/client/pages/ConversationPage";
 import { ConversationsPage } from "../src/client/pages/ConversationsPage";
+import { PluginsPage } from "../src/client/pages/PluginsPage";
 import type {
   ConversationDetailFeed,
   ConversationTurn,
@@ -25,6 +27,7 @@ import type {
 
 afterEach(() => {
   client.clear();
+  vi.useRealTimers();
 });
 
 function dashboardData(sessions: Session[]): DashboardData {
@@ -43,7 +46,33 @@ function dashboardData(sessions: Session[]): DashboardData {
       status: "ok",
       timestamp: "2026-01-01T00:00:00.000Z",
     },
+    conversationStats: {
+      active: 0,
+      conversations: 0,
+      durationMs: 0,
+      failed: 0,
+      generatedAt: "2026-01-01T00:00:00.000Z",
+      hung: 0,
+      locations: [],
+      requesters: [],
+      sampleLimit: 0,
+      sampleSize: 0,
+      source: "turn_session_records",
+      truncated: false,
+      turns: 0,
+      windowEnd: "2026-01-01T00:00:00.000Z",
+      windowStart: "2025-12-25T00:00:00.000Z",
+    },
+    conversationStatsError: false,
+    conversationStatsLoading: false,
     me: { user: {} },
+    pluginReports: {
+      generatedAt: "2026-01-01T00:00:00.000Z",
+      reports: [],
+      source: "trusted_plugins",
+    },
+    pluginReportsError: false,
+    pluginReportsLoading: false,
     plugins: [],
     runtime: {
       cwd: "/repo",
@@ -350,7 +379,11 @@ describe("dashboard telemetry components", () => {
     const html = renderToStaticMarkup(
       <QueryClientProvider client={client}>
         <MemoryRouter>
-          <ConversationDurationChart sessions={[session]} timeZone="UTC" />
+          <ConversationDurationChart
+            nowMs={Date.parse("2026-01-05T00:00:00.000Z")}
+            sessions={[session]}
+            timeZone="UTC"
+          />
         </MemoryRouter>
       </QueryClientProvider>,
     );
@@ -428,10 +461,266 @@ describe("dashboard telemetry components", () => {
         <CommandCenter data={data} queryError={null} />
       </MemoryRouter>,
     );
+    const plugins = renderToStaticMarkup(
+      <MemoryRouter>
+        <PluginsPage data={data} />
+      </MemoryRouter>,
+    );
 
     expect(conversation).toContain("mx-auto w-full min-w-0 max-w-screen-xl");
     expect(conversations).toContain("mx-auto w-full min-w-0 max-w-screen-xl");
     expect(command).toContain("mx-auto grid w-full min-w-0 max-w-screen-xl");
+    expect(plugins).toContain("mx-auto w-full min-w-0 max-w-screen-xl");
+  });
+
+  it("renders aggregate stats and trusted plugin reports", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-05T00:00:00.000Z"));
+
+    const sessions: Session[] = [
+      {
+        channel: "C1",
+        channelName: "proj-alpha",
+        conversationId: "slack:C1:100",
+        cumulativeDurationMs: 1_000,
+        id: "turn-1",
+        lastProgressAt: "2026-01-01T00:00:01.000Z",
+        lastSeenAt: "2026-01-01T00:00:02.000Z",
+        requesterIdentity: { fullName: "Avery" },
+        startedAt: "2026-01-01T00:00:00.000Z",
+        status: "completed",
+        surface: "slack",
+        title: "Turn turn-1",
+      },
+      {
+        channel: "D1",
+        conversationId: "slack:D1:200",
+        cumulativeDurationMs: 2_000,
+        id: "turn-2",
+        lastProgressAt: "2026-01-01T00:02:01.000Z",
+        lastSeenAt: "2026-01-01T00:02:02.000Z",
+        requesterIdentity: { fullName: "Avery" },
+        startedAt: "2026-01-01T00:02:00.000Z",
+        status: "failed",
+        surface: "slack",
+        title: "Turn turn-2",
+      },
+      {
+        channel: "C2",
+        channelName: "old-project",
+        conversationId: "slack:C2:300",
+        cumulativeDurationMs: 5_000,
+        id: "old-turn",
+        lastProgressAt: "2025-12-20T00:00:01.000Z",
+        lastSeenAt: "2025-12-20T00:00:02.000Z",
+        requesterIdentity: { fullName: "Casey" },
+        startedAt: "2025-12-20T00:00:00.000Z",
+        status: "completed",
+        surface: "slack",
+        title: "Old thread",
+      },
+    ];
+    const data = dashboardData(sessions);
+    data.conversationStats = {
+      active: 0,
+      conversations: 2,
+      durationMs: 3_000,
+      failed: 1,
+      generatedAt: "2026-01-05T00:00:00.000Z",
+      hung: 0,
+      locations: [
+        {
+          active: 0,
+          conversations: 1,
+          durationMs: 1_000,
+          failed: 0,
+          hung: 0,
+          label: "#proj-alpha",
+          turns: 1,
+        },
+      ],
+      requesters: [
+        {
+          active: 0,
+          conversations: 2,
+          durationMs: 3_000,
+          failed: 1,
+          hung: 0,
+          label: "Avery",
+          turns: 2,
+        },
+      ],
+      sampleLimit: 2,
+      sampleSize: 2,
+      source: "turn_session_records",
+      truncated: false,
+      turns: 2,
+      windowEnd: "2026-01-05T00:00:00.000Z",
+      windowStart: "2025-12-29T00:00:00.000Z",
+    };
+    data.plugins = [{ name: "github" }];
+    data.pluginReports.reports = [
+      {
+        pluginName: "scheduler",
+        title: "Scheduler",
+        metrics: [{ label: "active", value: "2" }],
+        recordSets: [
+          {
+            title: "Upcoming",
+            fields: [{ key: "task", label: "Task" }],
+            records: [{ id: "sched_1", values: { task: "sched_1" } }],
+          },
+        ],
+      },
+    ];
+    data.skills = [{ name: "triage", pluginProvider: "github" }];
+
+    const commandHtml = renderToStaticMarkup(
+      <MemoryRouter>
+        <CommandCenter data={data} queryError={null} />
+      </MemoryRouter>,
+    );
+    const pluginHtml = renderToStaticMarkup(
+      <MemoryRouter>
+        <PluginsPage data={data} />
+      </MemoryRouter>,
+    );
+
+    expect(commandHtml).toContain(">Stats<");
+    expect(commandHtml).toContain(">People<");
+    expect(commandHtml).toContain("Avery");
+    expect(commandHtml).not.toContain("Casey");
+    expect(commandHtml).not.toContain("Old thread");
+    expect(pluginHtml).toContain(">Plugins<");
+    expect(pluginHtml).toContain(">Scheduler<");
+    expect(pluginHtml).toContain("github");
+    expect(pluginHtml).toContain("triage");
+    expect(pluginHtml).toContain("scheduler");
+    expect(pluginHtml).toContain("sched_1");
+  });
+
+  it("renders a clear fallback for plugin records without fields", () => {
+    const html = renderToStaticMarkup(
+      <PluginReports
+        reports={[
+          {
+            pluginName: "scheduler",
+            recordSets: [
+              {
+                title: "Malformed",
+                records: [{ id: "row-1", values: { task: "sched_1" } }],
+              },
+            ],
+          },
+        ]}
+      />,
+    );
+
+    expect(html).toContain(
+      "Report records are unavailable because no fields were declared.",
+    );
+  });
+
+  it("renders plugins page when plugin reports are absent", () => {
+    const data = dashboardData([]) as Partial<DashboardData>;
+    data.plugins = [{ name: "github" }];
+    delete data.pluginReports;
+
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <PluginsPage data={data as DashboardData} />
+      </MemoryRouter>,
+    );
+
+    expect(html).toContain(">Plugins<");
+    expect(html).toContain("github");
+    expect(html).toContain("No trusted plugin stats have been reported yet.");
+  });
+
+  it("shows plugin reports as loading before the report query returns", () => {
+    const data = dashboardData([]);
+    data.pluginReportsLoading = true;
+    data.plugins = [{ name: "github" }];
+    data.skills = [{ name: "triage", pluginProvider: "github" }];
+
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <PluginsPage data={data} />
+      </MemoryRouter>,
+    );
+
+    expect(html).toContain("Loading trusted plugin stats.");
+    expect(html).toContain(">...<");
+    expect(html).toContain(">loading<");
+    expect(html).not.toContain(">none<");
+    expect(html).not.toContain(
+      "No trusted plugin stats have been reported yet.",
+    );
+  });
+
+  it("shows plugin report failures without looking empty", () => {
+    const data = dashboardData([]);
+    data.pluginReportsError = true;
+
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <PluginsPage data={data} />
+      </MemoryRouter>,
+    );
+
+    expect(html).toContain("Trusted plugin stats failed to load.");
+    expect(html).not.toContain(
+      "No trusted plugin stats have been reported yet.",
+    );
+  });
+
+  it("shows plugin report failures while keeping stale reports visible", () => {
+    const data = dashboardData([]);
+    data.pluginReportsError = true;
+    data.pluginReports.reports = [
+      {
+        metrics: [{ label: "active", value: "1" }],
+        pluginName: "scheduler",
+        title: "Scheduler",
+      },
+    ];
+
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <PluginsPage data={data} />
+      </MemoryRouter>,
+    );
+
+    expect(html).toContain("Trusted plugin stats failed to load.");
+    expect(html).toContain(">Scheduler<");
+  });
+
+  it("shows conversation stats failures without hiding the command center", () => {
+    const data = dashboardData([]);
+    data.conversationStatsError = true;
+
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <CommandCenter data={data} queryError={null} />
+      </MemoryRouter>,
+    );
+
+    expect(html).toContain(">Stats<");
+    expect(html).toContain(">degraded<");
+    expect(html).toContain(">Conversations<");
+  });
+
+  it("marks sampled conversation stats as limited", () => {
+    const data = dashboardData([]);
+    data.conversationStats.truncated = true;
+
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <CommandCenter data={data} queryError={null} />
+      </MemoryRouter>,
+    );
+
+    expect(html).toContain(">limited sample<");
   });
 
   it("renders transcript copy as an icon-only control", () => {

@@ -1,8 +1,12 @@
 import type {
   AgentPluginRequester,
+  AgentPluginReadState,
   AgentPluginRoute,
   AgentPluginRouteMethod,
   AgentPluginSandbox,
+  PluginOperationalReport,
+  PluginOperationalReportContent,
+  PluginOperationalTone,
   SlackConversationLink,
   JuniorPluginRegistration,
 } from "@sentry/junior-plugin-api";
@@ -48,6 +52,12 @@ export interface AgentPluginHookRunner {
 let agentPlugins: JuniorPluginRegistration[] = [];
 const AGENT_PLUGIN_NAME_RE = /^[a-z][a-z0-9-]*$/;
 const AGENT_PLUGIN_TOOL_NAME_RE = /^[a-z][A-Za-z0-9]*$/;
+const OPERATIONAL_REPORT_MAX_METRICS = 8;
+const OPERATIONAL_REPORT_MAX_RECORD_SETS = 8;
+const OPERATIONAL_REPORT_MAX_FIELDS = 8;
+const OPERATIONAL_REPORT_MAX_RECORDS = 25;
+const OPERATIONAL_REPORT_MAX_LABEL_LENGTH = 80;
+const OPERATIONAL_REPORT_MAX_VALUE_LENGTH = 160;
 const AGENT_PLUGIN_ROUTE_METHODS = new Set<AgentPluginRouteMethod>([
   "GET",
   "POST",
@@ -316,6 +326,228 @@ export function getAgentPluginSlackConversationLink(
     }
   }
   return undefined;
+}
+
+function pluginReadState(state: { get: AgentPluginReadState["get"] }) {
+  return {
+    get: state.get,
+  } satisfies AgentPluginReadState;
+}
+
+function operationalReportText(
+  value: string | undefined,
+  maxLength: number,
+): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  return trimmed.length <= maxLength
+    ? trimmed
+    : `${trimmed.slice(0, Math.max(0, maxLength - 3))}...`;
+}
+
+function operationalReportTone(
+  tone: PluginOperationalTone | undefined,
+): PluginOperationalTone | undefined {
+  return tone === "danger" ||
+    tone === "good" ||
+    tone === "neutral" ||
+    tone === "warning"
+    ? tone
+    : undefined;
+}
+
+function sanitizeOperationalReport(args: {
+  pluginName: string;
+  report: PluginOperationalReportContent;
+}): PluginOperationalReport {
+  const metrics = args.report.metrics
+    ?.slice(0, OPERATIONAL_REPORT_MAX_METRICS)
+    .map((metric) => {
+      const label = operationalReportText(
+        metric.label,
+        OPERATIONAL_REPORT_MAX_LABEL_LENGTH,
+      );
+      const value = operationalReportText(
+        metric.value,
+        OPERATIONAL_REPORT_MAX_VALUE_LENGTH,
+      );
+      if (!label || !value) {
+        return undefined;
+      }
+      const sanitizedMetric: NonNullable<
+        PluginOperationalReport["metrics"]
+      >[number] = { label, value };
+      const tone = operationalReportTone(metric.tone);
+      if (tone) {
+        sanitizedMetric.tone = tone;
+      }
+      return sanitizedMetric;
+    })
+    .filter((metric): metric is NonNullable<typeof metric> => Boolean(metric));
+  const recordSets = args.report.recordSets
+    ?.slice(0, OPERATIONAL_REPORT_MAX_RECORD_SETS)
+    .map((recordSet, recordSetIndex) => {
+      const title = operationalReportText(
+        recordSet.title,
+        OPERATIONAL_REPORT_MAX_LABEL_LENGTH,
+      );
+      if (!title) {
+        return undefined;
+      }
+      const fields = recordSet.fields
+        ?.slice(0, OPERATIONAL_REPORT_MAX_FIELDS)
+        .map((field) => {
+          const key = operationalReportText(
+            field.key,
+            OPERATIONAL_REPORT_MAX_LABEL_LENGTH,
+          );
+          const label = operationalReportText(
+            field.label,
+            OPERATIONAL_REPORT_MAX_LABEL_LENGTH,
+          );
+          return key && label ? { key, label } : undefined;
+        })
+        .filter((field): field is NonNullable<typeof field> => Boolean(field));
+      const records = recordSet.records
+        ?.slice(0, OPERATIONAL_REPORT_MAX_RECORDS)
+        .map((record, recordIndex) => {
+          const id =
+            operationalReportText(
+              record.id,
+              OPERATIONAL_REPORT_MAX_LABEL_LENGTH,
+            ) ?? `${recordSetIndex}:${recordIndex}`;
+          const values = Object.fromEntries(
+            (fields ?? []).map((field) => [
+              field.key,
+              operationalReportText(
+                record.values[field.key],
+                OPERATIONAL_REPORT_MAX_VALUE_LENGTH,
+              ) ?? "",
+            ]),
+          );
+          const sanitizedRecord: NonNullable<
+            NonNullable<
+              PluginOperationalReport["recordSets"]
+            >[number]["records"]
+          >[number] = {
+            id,
+            values,
+          };
+          const tone = operationalReportTone(record.tone);
+          if (tone) {
+            sanitizedRecord.tone = tone;
+          }
+          return sanitizedRecord;
+        });
+      const sanitizedRecordSet: NonNullable<
+        PluginOperationalReport["recordSets"]
+      >[number] = { title };
+      if (fields?.length) {
+        sanitizedRecordSet.fields = fields;
+      }
+      const emptyText = operationalReportText(
+        recordSet.emptyText,
+        OPERATIONAL_REPORT_MAX_VALUE_LENGTH,
+      );
+      if (emptyText) {
+        sanitizedRecordSet.emptyText = emptyText;
+      }
+      if (records?.length) {
+        sanitizedRecordSet.records = records;
+      }
+      return sanitizedRecordSet;
+    })
+    .filter((recordSet): recordSet is NonNullable<typeof recordSet> =>
+      Boolean(recordSet),
+    );
+
+  const sanitized: PluginOperationalReport = {
+    pluginName: args.pluginName,
+  };
+  const generatedAt = operationalReportText(
+    args.report.generatedAt,
+    OPERATIONAL_REPORT_MAX_VALUE_LENGTH,
+  );
+  if (generatedAt) {
+    sanitized.generatedAt = generatedAt;
+  }
+  if (recordSets?.length) {
+    sanitized.recordSets = recordSets;
+  }
+  if (metrics?.length) {
+    sanitized.metrics = metrics;
+  }
+  const title = operationalReportText(
+    args.report.title,
+    OPERATIONAL_REPORT_MAX_LABEL_LENGTH,
+  );
+  if (title) {
+    sanitized.title = title;
+  }
+  return sanitized;
+}
+
+function failedOperationalReport(args: {
+  nowMs: number;
+  pluginName: string;
+}): PluginOperationalReport {
+  return {
+    generatedAt: new Date(args.nowMs).toISOString(),
+    pluginName: args.pluginName,
+    metrics: [{ label: "report", tone: "danger", value: "failed" }],
+    title: args.pluginName,
+    recordSets: [
+      {
+        emptyText: "This plugin report failed to load.",
+        title: "Error",
+      },
+    ],
+  };
+}
+
+/** Collect read-only operational summaries exposed by trusted plugins. */
+export async function getAgentPluginOperationalReports(
+  nowMs = Date.now(),
+): Promise<PluginOperationalReport[]> {
+  const reports: PluginOperationalReport[] = [];
+  for (const plugin of getAgentPlugins()) {
+    const hook = plugin.hooks?.operationalReport;
+    if (!hook) {
+      continue;
+    }
+    const log = createAgentPluginLogger(plugin.name);
+    try {
+      const state = createPluginState(plugin.name, {
+        legacyStatePrefixes: plugin.legacyStatePrefixes,
+      });
+      const report = await hook({
+        plugin: { name: plugin.name },
+        log,
+        nowMs,
+        state: pluginReadState(state),
+      });
+      if (!report) {
+        continue;
+      }
+      reports.push(
+        sanitizeOperationalReport({
+          pluginName: plugin.name,
+          report,
+        }),
+      );
+    } catch (error) {
+      log.error("Trusted plugin operational report failed", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      reports.push(failedOperationalReport({ nowMs, pluginName: plugin.name }));
+    }
+  }
+  return reports;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

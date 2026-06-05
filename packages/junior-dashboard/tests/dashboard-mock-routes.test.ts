@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { JuniorReporting } from "@sentry/junior/reporting";
 import { createDashboardApp } from "../src/app";
 import { createMockConversationReporting } from "../src/mock-conversations";
@@ -53,6 +53,32 @@ function reporting(): JuniorReporting {
         ],
       };
     },
+    async getConversationStats() {
+      return {
+        active: 1,
+        conversations: 1,
+        durationMs: 0,
+        failed: 0,
+        generatedAt: "2026-05-29T00:00:00.000Z",
+        hung: 0,
+        locations: [],
+        requesters: [],
+        sampleLimit: 1,
+        sampleSize: 1,
+        source: "turn_session_records",
+        truncated: false,
+        turns: 1,
+        windowEnd: "2026-05-29T00:00:00.000Z",
+        windowStart: "2026-05-22T00:00:00.000Z",
+      };
+    },
+    async getPluginOperationalReports() {
+      return {
+        source: "trusted_plugins",
+        generatedAt: "2026-05-29T00:00:00.000Z",
+        reports: [],
+      };
+    },
     async getConversation(conversationId: string) {
       return {
         conversationId,
@@ -79,6 +105,10 @@ function reporting(): JuniorReporting {
 }
 
 describe("dashboard mock conversation routes", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("overlays mock conversations for local dashboard visual QA", async () => {
     const app = createDashboardApp({
       authRequired: false,
@@ -92,7 +122,7 @@ describe("dashboard mock conversation routes", () => {
     );
     expect(sessions.status).toBe(200);
     const sessionBody = (await sessions.json()) as {
-      sessions: Array<{ conversationId: string }>;
+      sessions: Array<{ conversationId: string; cumulativeDurationMs: number }>;
     };
     expect(sessionBody.sessions[0]?.conversationId).toBe(
       "slack:CQA123:1770003600.000200",
@@ -103,6 +133,28 @@ describe("dashboard mock conversation routes", () => {
     expect(
       sessionBody.sessions.map((session) => session.conversationId),
     ).toContain("slack:CQA456:1770021600.000600");
+    const conversationStats = await app.fetch(
+      new Request("http://localhost/api/dashboard/conversation-stats"),
+    );
+    expect(conversationStats.status).toBe(200);
+    const statsBody = (await conversationStats.json()) as {
+      conversations: number;
+      durationMs: number;
+      sampleSize: number;
+      truncated: boolean;
+    };
+    expect(statsBody).toMatchObject({
+      conversations: new Set(
+        sessionBody.sessions.map((session) => session.conversationId),
+      ).size,
+      sampleSize: sessionBody.sessions.length,
+      truncated: false,
+    });
+    const rawDurationMs = sessionBody.sessions.reduce(
+      (sum, session) => sum + session.cumulativeDurationMs,
+      0,
+    );
+    expect(statsBody.durationMs).toBeLessThan(rawDurationMs);
 
     const activeConversation = await app.fetch(
       new Request(
@@ -231,6 +283,67 @@ describe("dashboard mock conversation routes", () => {
       conversationId: "slack:CQA123:1770003600.000200",
       status: "active",
     });
+    const stats = await app.fetch(
+      new Request("http://localhost/api/dashboard/conversation-stats"),
+    );
+    expect(stats.status).toBe(200);
+    expect(await stats.json()).toMatchObject({
+      conversations: expect.any(Number),
+      truncated: false,
+    });
+  });
+
+  it("excludes stale real sessions from mock aggregate stats", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-04T12:00:00.000Z"));
+    const mockReporting = reporting();
+    mockReporting.getSessions = async () => ({
+      source: "turn_session_records",
+      generatedAt: "2026-06-04T12:00:00.000Z",
+      sessions: [
+        {
+          conversationId: "slack:COLD:111",
+          cumulativeDurationMs: 1_000_000,
+          id: "old-real-turn",
+          lastProgressAt: "2026-05-01T00:00:00.000Z",
+          lastSeenAt: "2026-05-01T00:00:00.000Z",
+          startedAt: "2026-05-01T00:00:00.000Z",
+          status: "completed",
+          surface: "slack",
+          title: "Old real turn",
+        },
+      ],
+    });
+    const app = createDashboardApp({
+      authRequired: false,
+      allowedGoogleDomains: [],
+      mockConversations: true,
+      reporting: mockReporting,
+    });
+
+    const sessions = await app.fetch(
+      new Request("http://localhost/api/dashboard/sessions"),
+    );
+    const sessionBody = (await sessions.json()) as {
+      sessions: Array<{ conversationId: string; lastSeenAt: string }>;
+    };
+    expect(
+      sessionBody.sessions.map((session) => session.conversationId),
+    ).toContain("slack:COLD:111");
+
+    const stats = await app.fetch(
+      new Request("http://localhost/api/dashboard/conversation-stats"),
+    );
+    const statsBody = (await stats.json()) as { conversations: number };
+    const windowStartMs =
+      Date.parse("2026-06-04T12:00:00.000Z") - 7 * 24 * 60 * 60 * 1000;
+    const recentConversationIds = new Set(
+      sessionBody.sessions
+        .filter((session) => Date.parse(session.lastSeenAt) >= windowStartMs)
+        .map((session) => session.conversationId),
+    );
+
+    expect(statsBody.conversations).toBe(recentConversationIds.size);
   });
 
   it("does not hide unexpected reporting errors in mock mode", async () => {

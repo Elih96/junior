@@ -16,6 +16,7 @@ import type {
 import { sameToolInvocation } from "./toolInvocations";
 
 let dashboardTimeZone = "America/Los_Angeles";
+const RECENT_CONVERSATION_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 
 /** Set the dashboard display timezone returned by the authenticated config API. */
 export function setDashboardTimeZone(timeZone: string): void {
@@ -57,6 +58,30 @@ function parseTime(value: string | undefined): number | null {
   if (!value) return null;
   const time = Date.parse(value);
   return Number.isFinite(time) ? time : null;
+}
+
+/** Return the recent reporting window shared by command-center aggregates. */
+export function recentConversationRange(nowMs = Date.now()) {
+  return {
+    endMs: nowMs,
+    startMs: nowMs - RECENT_CONVERSATION_WINDOW_MS,
+  };
+}
+
+/** Keep command-center conversations inside the shared recent activity window. */
+export function filterRecentConversations(
+  conversations: Conversation[],
+  nowMs = Date.now(),
+): Conversation[] {
+  const range = recentConversationRange(nowMs);
+  return conversations.filter((conversation) => {
+    const activityAt = parseTime(conversation.lastSeenAt);
+    return (
+      activityAt !== null &&
+      activityAt >= range.startMs &&
+      activityAt <= range.endMs
+    );
+  });
 }
 
 /** Format absolute dashboard timestamps with a stable empty fallback. */
@@ -509,6 +534,18 @@ export function formatConversationDuration(conversation: Conversation): string {
   return `${Math.round(minutes / 60)}h`;
 }
 
+/** Return cumulative conversation runtime without double-counting prior turns. */
+export function conversationRuntimeMs(
+  conversation: Pick<Conversation, "turns">,
+): number | undefined {
+  if (
+    !conversation.turns.some((turn) => durationSnapshot(turn) !== undefined)
+  ) {
+    return undefined;
+  }
+  return contributionDurationTotal(turnContributions(conversation.turns));
+}
+
 /** Resolve the owning conversation id for a turn/session summary. */
 export function conversationIdForSession(session: Session): string {
   return session.conversationId;
@@ -545,8 +582,7 @@ function getConversationTitle(conversation: Conversation): string {
   if (title) return title;
   if (conversation.surface === "slack") {
     return (
-      slackLocationLabel(conversation, { includeId: false }) ??
-      "Conversation"
+      slackLocationLabel(conversation, { includeId: false }) ?? "Conversation"
     );
   }
   return "Conversation";
@@ -926,6 +962,41 @@ export function buildConversations(sessions: Session[]): Conversation[] {
       };
     })
     .sort((a, b) => compareTimeDesc(a.lastSeenAt, b.lastSeenAt));
+}
+
+function durationSnapshot(turn: Session): number | undefined {
+  const duration = turn.cumulativeDurationMs;
+  return typeof duration === "number" && Number.isFinite(duration)
+    ? Math.max(0, Math.floor(duration))
+    : undefined;
+}
+
+type TurnContribution = {
+  durationMs: number;
+  turn: Session;
+};
+
+function turnContributions(turns: Session[]): TurnContribution[] {
+  let previousDuration = 0;
+  return turns.map((turn) => {
+    const duration = durationSnapshot(turn);
+    const contribution: TurnContribution = {
+      durationMs:
+        duration === undefined ? 0 : Math.max(0, duration - previousDuration),
+      turn,
+    };
+    if (duration !== undefined) {
+      previousDuration = Math.max(previousDuration, duration);
+    }
+    return contribution;
+  });
+}
+
+function contributionDurationTotal(contributions: TurnContribution[]): number {
+  return contributions.reduce(
+    (sum, contribution) => sum + contribution.durationMs,
+    0,
+  );
 }
 
 /** Apply the dashboard conversation filter to grouped conversation rows. */

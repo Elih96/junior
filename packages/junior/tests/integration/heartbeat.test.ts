@@ -757,6 +757,112 @@ describe("trusted plugin heartbeat", () => {
     });
   });
 
+  it("exposes sanitized scheduler operational reports through Junior reporting", async () => {
+    setAgentPlugins([schedulerPlugin()]);
+    const store = schedulerStore();
+    await store.saveTask(
+      createTask({
+        createdBy: {
+          slackUserId: "U123",
+          fullName: "Alice Reviewer",
+          userName: "alice",
+        },
+        task: {
+          text: "Secret task text that must stay out of dashboard stats.",
+        },
+      }),
+    );
+    await store.saveTask(
+      createTask({
+        createdBy: {
+          slackUserId: "U456",
+          userName: "bob",
+        },
+        id: "sched_plugin_blocked",
+        status: "blocked",
+        statusReason: "Secret blocked reason",
+        task: {
+          text: "Secret blocked task text",
+        },
+        updatedAtMs: TEST_NOW_MS,
+      }),
+    );
+
+    const { createJuniorReporting } = await import("@/reporting");
+    const feed = await createJuniorReporting().getPluginOperationalReports();
+    const scheduler = feed.reports.find(
+      (report) => report.pluginName === "scheduler",
+    );
+
+    expect(feed.source).toBe("trusted_plugins");
+    expect(scheduler).toMatchObject({
+      pluginName: "scheduler",
+      title: "Scheduler",
+    });
+    expect(scheduler?.metrics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ label: "active", value: "1" }),
+        expect.objectContaining({ label: "blocked", value: "1" }),
+        expect.objectContaining({ label: "due now", value: "1" }),
+      ]),
+    );
+    expect(scheduler?.recordSets?.map((recordSet) => recordSet.title)).toEqual([
+      "Upcoming",
+      "Blocked",
+      "Running",
+    ]);
+    expect(scheduler?.recordSets?.[0]?.fields).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ key: "author", label: "Author" }),
+      ]),
+    );
+    expect(
+      scheduler?.recordSets?.[0]?.records?.[0]?.values ?? {},
+    ).toMatchObject({
+      author: "Alice Reviewer (@alice)",
+    });
+    expect(
+      scheduler?.recordSets?.[1]?.records?.[0]?.values ?? {},
+    ).toMatchObject({
+      author: "@bob",
+    });
+    expect(JSON.stringify(feed)).not.toContain("Secret");
+  });
+
+  it("counts all running scheduler runs in operational summaries", async () => {
+    setAgentPlugins([schedulerPlugin()]);
+    const store = schedulerStore();
+    for (let index = 0; index < 6; index += 1) {
+      await store.saveTask(
+        createTask({
+          id: `sched_running_${index}`,
+          createdAtMs: TEST_RUN_AT_MS + index,
+          updatedAtMs: TEST_RUN_AT_MS + index,
+        }),
+      );
+    }
+    for (let index = 0; index < 6; index += 1) {
+      await expect(
+        store.claimDueRun({ nowMs: TEST_NOW_MS + index }),
+      ).resolves.toBeDefined();
+    }
+
+    const { createJuniorReporting } = await import("@/reporting");
+    const feed = await createJuniorReporting().getPluginOperationalReports();
+    const scheduler = feed.reports.find(
+      (report) => report.pluginName === "scheduler",
+    );
+    const runningSummary = scheduler?.metrics?.find(
+      (metric) => metric.label === "running",
+    );
+    const runningSection = scheduler?.recordSets?.find(
+      (recordSet) => recordSet.title === "Running",
+    );
+
+    expect(runningSummary).toMatchObject({ value: "6" });
+    expect(runningSection?.records).toHaveLength(5);
+  });
+
   it("carries scheduled task credential subjects into dispatch records", async () => {
     mockDispatchCallbackFetch(originalFetch);
     setAgentPlugins([schedulerPlugin()]);

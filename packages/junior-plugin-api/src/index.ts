@@ -167,6 +167,10 @@ export interface AgentPluginState {
   ): Promise<T>;
 }
 
+export interface AgentPluginReadState {
+  get<T = unknown>(key: string): Promise<T | undefined>;
+}
+
 export interface HeartbeatHookContext extends AgentPluginContext {
   agent: {
     dispatch(options: DispatchOptions): Promise<DispatchResult>;
@@ -178,6 +182,48 @@ export interface HeartbeatHookContext extends AgentPluginContext {
 
 export interface HeartbeatResult {
   dispatchCount?: number;
+}
+
+export type PluginOperationalTone = "danger" | "good" | "neutral" | "warning";
+
+export interface PluginOperationalMetric {
+  label: string;
+  tone?: PluginOperationalTone;
+  value: string;
+}
+
+export interface PluginOperationalField {
+  key: string;
+  label: string;
+}
+
+export interface PluginOperationalRecord {
+  id: string;
+  tone?: PluginOperationalTone;
+  values: Record<string, string>;
+}
+
+export interface PluginOperationalRecordSet {
+  fields?: PluginOperationalField[];
+  emptyText?: string;
+  records?: PluginOperationalRecord[];
+  title: string;
+}
+
+export interface PluginOperationalReportContent {
+  generatedAt?: string;
+  metrics?: PluginOperationalMetric[];
+  recordSets?: PluginOperationalRecordSet[];
+  title?: string;
+}
+
+export interface PluginOperationalReport extends PluginOperationalReportContent {
+  pluginName: string;
+}
+
+export interface OperationalReportHookContext extends AgentPluginContext {
+  nowMs: number;
+  state: AgentPluginReadState;
 }
 
 export type AgentPluginRouteMethod =
@@ -220,6 +266,12 @@ export interface AgentPluginHooks {
   heartbeat?(
     ctx: HeartbeatHookContext,
   ): Promise<HeartbeatResult | void> | HeartbeatResult | void;
+  operationalReport?(
+    ctx: OperationalReportHookContext,
+  ):
+    | Promise<PluginOperationalReportContent | undefined>
+    | PluginOperationalReportContent
+    | undefined;
   slackConversationLink?(
     ctx: SlackConversationLinkHookContext,
   ): SlackConversationLink | undefined;
