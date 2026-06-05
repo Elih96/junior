@@ -1,6 +1,6 @@
 {
   "name": "@sentry/junior-plugin-api",
-  "version": "0.67.2",
+  "version": "0.67.3",
   "private": false,
   "publishConfig": {
     "access": "public"
