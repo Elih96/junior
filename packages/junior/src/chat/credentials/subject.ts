@@ -2,6 +2,10 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import type { AgentPluginCredentialSubject } from "@sentry/junior-plugin-api";
 import type { CredentialSubject } from "@/chat/credentials/context";
 import { isDmChannel, normalizeSlackConversationId } from "@/chat/slack/client";
+import {
+  isActorUserId,
+  parseActorUserId,
+} from "@/chat/services/requester-identity";
 
 const CREDENTIAL_SUBJECT_HMAC_CONTEXT = "junior.credential_subject.v1";
 const CREDENTIAL_SUBJECT_SIGNATURE_VERSION = "v1";
@@ -47,7 +51,7 @@ export function createSlackDirectCredentialSubject(input: {
 }): AgentPluginCredentialSubject | undefined {
   const channelId = normalizeSlackConversationId(input.channelId);
   const teamId = input.teamId?.trim();
-  const userId = input.userId?.trim();
+  const userId = parseActorUserId(input.userId);
   if (!channelId || !teamId || !userId || !isDmChannel(channelId)) {
     return undefined;
   }
@@ -69,7 +73,7 @@ export function bindSlackDirectCredentialSubject(input: {
   const teamId = input.teamId.trim();
   const secret = getCredentialSubjectSecret();
   const { subject } = input;
-  const userId = subject.userId.trim();
+  const userId = parseActorUserId(subject.userId);
   if (
     !channelId ||
     !teamId ||
@@ -118,8 +122,7 @@ export function verifySlackDirectCredentialSubject(input: {
   const binding = subject.binding;
   if (
     subject.type !== "user" ||
-    typeof subject.userId !== "string" ||
-    !subject.userId ||
+    !isActorUserId(subject.userId) ||
     subject.allowedWhen !== "private-direct-conversation" ||
     !binding ||
     binding.type !== "slack-direct-conversation" ||

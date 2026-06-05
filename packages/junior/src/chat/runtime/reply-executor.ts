@@ -82,6 +82,8 @@ import {
 import { appendSlackLegacyAttachmentText } from "@/chat/slack/legacy-attachments";
 import { type ThreadArtifactsState } from "@/chat/state/artifacts";
 import { lookupSlackUser } from "@/chat/slack/user";
+import type { ActorIdentityInput } from "@/chat/services/requester-identity";
+import { ensureSlackMessageActorIdentity } from "@/chat/services/message-actor-identity";
 import type { TurnContinuationRequest } from "@/chat/services/timeout-resume";
 import {
   isCooperativeTurnYieldError,
@@ -120,19 +122,14 @@ function collectCanvasUrls(artifacts: Partial<ThreadArtifactsState>) {
   );
 }
 
-function turnRequester(args: {
-  email?: string;
-  fullName?: string;
-  userId?: string;
-  userName?: string;
-}): AgentTurnRequester | undefined {
+function turnRequester(identity: ActorIdentityInput): AgentTurnRequester {
   const requester: AgentTurnRequester = {
-    ...(args.email ? { email: args.email } : {}),
-    ...(args.fullName ? { fullName: args.fullName } : {}),
-    ...(args.userId ? { slackUserId: args.userId } : {}),
-    ...(args.userName ? { slackUserName: args.userName } : {}),
+    ...(identity.email ? { email: identity.email } : {}),
+    ...(identity.fullName ? { fullName: identity.fullName } : {}),
+    ...(identity.userId ? { slackUserId: identity.userId } : {}),
+    ...(identity.userName ? { slackUserName: identity.userName } : {}),
   };
-  return Object.keys(requester).length > 0 ? requester : undefined;
+  return requester;
 }
 
 async function resolveChannelName(thread: Thread): Promise<string | undefined> {
@@ -332,6 +329,19 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
           options.queuedMessages ?? [],
           currentText,
         ).userText;
+        await Promise.all(
+          (options.queuedMessages ?? []).map((queued) =>
+            ensureSlackMessageActorIdentity(
+              queued.message,
+              deps.services.lookupSlackUser,
+            ),
+          ),
+        );
+        const requesterIdentity = await ensureSlackMessageActorIdentity(
+          message,
+          deps.services.lookupSlackUser,
+        );
+        const requester = turnRequester(requesterIdentity);
 
         const preparedState =
           options.preparedState ??
@@ -353,15 +363,6 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
 
         const slackMessageTs = getSlackMessageTs(message);
         const turnId = buildDeterministicTurnId(message.id);
-        const fallbackIdentity = await deps.services.lookupSlackUser(
-          message.author.userId,
-        );
-        const requester = turnRequester({
-          email: fallbackIdentity?.email,
-          fullName: message.author.fullName ?? fallbackIdentity?.fullName,
-          userId: message.author.userId,
-          userName: message.author.userName ?? fallbackIdentity?.userName,
-        });
         const turnTraceContext = {
           conversationId,
           slackThreadId: threadId,
@@ -558,19 +559,19 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
         });
         await options.onTurnStatePersisted?.();
 
-        const resolvedUserName =
-          message.author.userName ?? fallbackIdentity?.userName;
         if (message.author.userId) {
           setSentryUser({
             id: message.author.userId,
-            ...(resolvedUserName ? { username: resolvedUserName } : {}),
-            ...(fallbackIdentity?.email
-              ? { email: fallbackIdentity.email }
+            ...(requesterIdentity.userName
+              ? { username: requesterIdentity.userName }
+              : {}),
+            ...(requesterIdentity.email
+              ? { email: requesterIdentity.email }
               : {}),
           });
         }
-        if (resolvedUserName) {
-          setTags({ slackUserName: resolvedUserName });
+        if (requesterIdentity.userName) {
+          setTags({ slackUserName: requesterIdentity.userName });
         }
         const turnAttachments = collectTurnAttachments(
           message,
@@ -727,12 +728,7 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
               credentialContext: {
                 actor: { type: "user", userId: message.author.userId },
               },
-              requester: {
-                userId: message.author.userId,
-                userName: message.author.userName ?? fallbackIdentity?.userName,
-                fullName: message.author.fullName ?? fallbackIdentity?.fullName,
-                email: fallbackIdentity?.email,
-              },
+              requester: requesterIdentity,
               conversationContext: preparedState.conversationContext,
               artifactState: preparedState.artifacts,
               piMessages,

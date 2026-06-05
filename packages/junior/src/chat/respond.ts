@@ -2,7 +2,7 @@
  * Agent turn orchestration.
  *
  * This module owns the Pi-facing execution boundary for one Junior turn after
- * Slack/runtime code has normalized the request. It assembles prompt context,
+ * Slack/runtime code has parsed and routed the request. It assembles prompt context,
  * restores durable Pi/session state, wires tools/MCP/auth, executes the agent,
  * and persists resumable checkpoints. Slack delivery and thread presentation
  * should stay outside this file.
@@ -135,6 +135,7 @@ import type { CredentialContext } from "@/chat/credentials/context";
 import { parseSlackThreadId } from "@/chat/slack/context";
 import { createMcpAuthOrchestration } from "@/chat/services/mcp-auth-orchestration";
 import { createPluginAuthOrchestration } from "@/chat/services/plugin-auth-orchestration";
+import { buildActorIdentity } from "@/chat/services/requester-identity";
 import {
   AuthorizationFlowDisabledError,
   AuthorizationPauseError,
@@ -318,15 +319,21 @@ function requesterFromContext(
   requester: ReplyRequestContext["requester"],
   requesterId: string | undefined,
 ): AgentTurnRequester | undefined {
-  const identity: AgentTurnRequester = {
-    ...(requester?.email ? { email: requester.email } : {}),
-    ...(requester?.fullName ? { fullName: requester.fullName } : {}),
-    ...((requesterId ?? requester?.userId)
-      ? { slackUserId: requesterId ?? requester?.userId }
-      : {}),
-    ...(requester?.userName ? { slackUserName: requester.userName } : {}),
+  const identity = actorRequesterFromContext(requester, requesterId);
+  const agentRequester: AgentTurnRequester = {
+    ...(identity?.email ? { email: identity.email } : {}),
+    ...(identity?.fullName ? { fullName: identity.fullName } : {}),
+    ...(identity?.userId ? { slackUserId: identity.userId } : {}),
+    ...(identity?.userName ? { slackUserName: identity.userName } : {}),
   };
-  return Object.keys(identity).length > 0 ? identity : undefined;
+  return Object.keys(agentRequester).length > 0 ? agentRequester : undefined;
+}
+
+function actorRequesterFromContext(
+  requester: ReplyRequestContext["requester"],
+  requesterId: string | undefined,
+): ReplyRequestContext["requester"] | undefined {
+  return buildActorIdentity(requester, requesterId);
 }
 
 function surfaceFromContext(
@@ -510,6 +517,10 @@ export async function generateAssistantReply(
     context.requester,
     context.correlation?.requesterId,
   );
+  const actorRequester = actorRequesterFromContext(
+    context.requester,
+    context.correlation?.requesterId,
+  );
   const surface = surfaceFromContext(context);
   const credentialActor = context.credentialContext?.actor;
   const credentialActorLogContext = credentialActor
@@ -676,7 +687,7 @@ export async function generateAssistantReply(
         : undefined;
     const userTokenStore = createUserTokenStore();
     const agentPluginHooks = createAgentPluginHookRunner({
-      requester: context.requester,
+      requester: actorRequester,
     });
     sandboxExecutor = createSandboxExecutor({
       sandboxId: context.sandbox?.sandboxId,
@@ -695,7 +706,7 @@ export async function generateAssistantReply(
         const result = await maybeExecuteJrRpcCustomCommand(command, {
           activeSkill: skillSandbox.getActiveSkill(),
           channelConfiguration: context.channelConfiguration,
-          requesterId: context.requester?.userId,
+          requesterId: actorRequester?.userId,
           onConfigurationValueChanged: (key, value) => {
             if (value === undefined) {
               delete configurationValues[key];
@@ -989,7 +1000,7 @@ export async function generateAssistantReply(
       {
         channelId: toolChannelId,
         channelCapabilities,
-        requester: context.requester,
+        requester: actorRequester,
         teamId: context.correlation?.teamId,
         messageTs: context.correlation?.messageTs,
         threadTs: context.correlation?.threadTs,
@@ -1062,7 +1073,7 @@ export async function generateAssistantReply(
             slackConversation: context.slackConversation,
           },
           invocation: skillInvocation,
-          requester: context.requester,
+          requester: actorRequester,
           artifactState: context.artifactState,
           configuration: configurationValues,
         })

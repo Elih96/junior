@@ -12,7 +12,12 @@ import {
   type SchedulerOperationalStore,
   type SchedulerStore,
 } from "./store";
-import type { ScheduledRun, ScheduledTask } from "./types";
+import { scheduledTaskPrincipalLabel } from "./identity";
+import type {
+  ScheduledRun,
+  ScheduledTask,
+  ScheduledTaskPrincipal,
+} from "./types";
 import {
   createSlackScheduleCreateTaskTool,
   createSlackScheduleDeleteTaskTool,
@@ -197,17 +202,12 @@ function destinationLabel(destination: ScheduledTask["destination"]): string {
   return destination.channelId;
 }
 
-function authorLabel(author: ScheduledTask["createdBy"]): string {
-  if (author.fullName && author.userName) {
-    return `${author.fullName} (@${author.userName})`;
+function operationalAuthorLabel(author: ScheduledTaskPrincipal): string {
+  try {
+    return scheduledTaskPrincipalLabel(author);
+  } catch {
+    return "Invalid Slack creator metadata";
   }
-  if (author.fullName) {
-    return author.fullName;
-  }
-  if (author.userName) {
-    return `@${author.userName}`;
-  }
-  return `Slack User ${author.slackUserId}`;
 }
 
 function cadenceLabel(task: ScheduledTask): string {
@@ -301,7 +301,7 @@ async function buildSchedulerOperationalReport(args: {
           id: task.id,
           values: {
             task: task.id,
-            author: authorLabel(task.createdBy),
+            author: operationalAuthorLabel(task.createdBy),
             destination: destinationLabel(task.destination),
             nextRun: formatTimestamp(task.nextRunAtMs),
             cadence: cadenceLabel(task),
@@ -322,7 +322,7 @@ async function buildSchedulerOperationalReport(args: {
           tone: "danger",
           values: {
             task: task.id,
-            author: authorLabel(task.createdBy),
+            author: operationalAuthorLabel(task.createdBy),
             destination: destinationLabel(task.destination),
             updated: formatTimestamp(task.updatedAtMs),
           },
@@ -346,7 +346,9 @@ async function buildSchedulerOperationalReport(args: {
             values: {
               run: run.id,
               task: run.taskId,
-              author: task ? authorLabel(task.createdBy) : "unknown",
+              author: task
+                ? operationalAuthorLabel(task.createdBy)
+                : "Missing scheduled task",
               scheduledFor: formatTimestamp(run.scheduledForMs),
               status: run.status,
             },
