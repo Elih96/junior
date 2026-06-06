@@ -131,7 +131,6 @@ function Leaderboard(props: {
 
 function LeaderboardRow(props: { index: number; item: ConversationStatsItem }) {
   const detail = [
-    plural("turn", props.item.turns),
     props.item.durationMs > 0 ? formatMs(props.item.durationMs) : undefined,
     props.item.tokens
       ? `${formatCompactNumber(props.item.tokens)} tokens`
@@ -154,7 +153,7 @@ function LeaderboardRow(props: { index: number; item: ConversationStatsItem }) {
           {props.item.label}
         </div>
         <div className="mt-1 truncate text-[0.76rem] leading-tight text-[#888]">
-          {detail || "No turn details"}
+          {detail || "No activity details"}
         </div>
       </div>
       <div className="text-right text-xl font-extrabold leading-none text-white">
