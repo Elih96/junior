@@ -1,9 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { http, HttpResponse } from "msw";
+import { mswServer } from "../../msw/server";
 
 const {
   BASE_URL,
   EXAMPLE_OAUTH_CONFIG,
+  GITHUB_OAUTH_CONFIG,
   SENTRY_OAUTH_CONFIG,
+  lookupSlackActorIdentityMock,
+  resolvePluginOAuthAccountMock,
   waitUntilCallbacks,
 } = vi.hoisted(() => ({
   BASE_URL: "https://example.com",
@@ -25,6 +30,16 @@ const {
     tokenExtraHeaders: { "Content-Type": "application/json" },
     callbackPath: "/api/oauth/callback/example",
   },
+  GITHUB_OAUTH_CONFIG: {
+    clientIdEnv: "GITHUB_APP_CLIENT_ID",
+    clientSecretEnv: "GITHUB_APP_CLIENT_SECRET",
+    authorizeEndpoint: "https://github.com/login/oauth/authorize",
+    tokenEndpoint: "https://github.com/login/oauth/access_token",
+    treatEmptyScopeAsUnreported: true,
+    callbackPath: "/api/oauth/callback/github",
+  },
+  lookupSlackActorIdentityMock: vi.fn(),
+  resolvePluginOAuthAccountMock: vi.fn(),
   waitUntilCallbacks: [] as Array<() => Promise<unknown> | void>,
 }));
 
@@ -36,10 +51,13 @@ vi.mock("@/chat/plugins/registry", () => ({
     if (provider === "example") {
       return EXAMPLE_OAUTH_CONFIG;
     }
+    if (provider === "github") {
+      return GITHUB_OAUTH_CONFIG;
+    }
     return undefined;
   },
   isPluginProvider: (provider: string) =>
-    provider === "sentry" || provider === "example",
+    provider === "sentry" || provider === "example" || provider === "github",
   getPluginCapabilityProviders: () => [],
   isPluginCapability: () => false,
   isPluginConfigKey: () => false,
@@ -66,13 +84,20 @@ vi.mock("@/chat/config", async (importOriginal) => {
   };
 });
 
+vi.mock("@/chat/slack/user", () => ({
+  lookupSlackActorIdentity: lookupSlackActorIdentityMock,
+}));
+
+vi.mock("@/chat/plugins/credential-hooks", () => ({
+  resolvePluginOAuthAccount: resolvePluginOAuthAccountMock,
+}));
+
 import { createUserTokenStore } from "@/chat/capabilities/factory";
 import { disconnectStateAdapter, getStateAdapter } from "@/chat/state/adapter";
 import { GET } from "@/handlers/oauth-callback";
 import type { WaitUntilFn } from "@/handlers/types";
 
 const ORIGINAL_ENV = { ...process.env };
-const ORIGINAL_FETCH = globalThis.fetch;
 
 const testWaitUntil: WaitUntilFn = (task) => {
   waitUntilCallbacks.push(typeof task === "function" ? task : () => task);
@@ -82,12 +107,18 @@ beforeEach(async () => {
   process.env.JUNIOR_STATE_ADAPTER = "memory";
   await disconnectStateAdapter();
   await getStateAdapter().connect();
+  lookupSlackActorIdentityMock.mockReset();
+  lookupSlackActorIdentityMock.mockResolvedValue({
+    userId: "U777",
+    userName: "requester",
+  });
+  resolvePluginOAuthAccountMock.mockReset();
+  resolvePluginOAuthAccountMock.mockResolvedValue(undefined);
   waitUntilCallbacks.length = 0;
 });
 
 afterEach(async () => {
   process.env = { ...ORIGINAL_ENV };
-  globalThis.fetch = ORIGINAL_FETCH;
   vi.restoreAllMocks();
   await disconnectStateAdapter();
 });
@@ -120,22 +151,77 @@ function configureExampleOAuthEnv() {
   process.env.JUNIOR_BASE_URL = BASE_URL;
 }
 
-function mockJsonFetch(payload: unknown) {
-  const fetchMock = vi.fn(async () => ({
-    ok: true,
-    json: async () => payload,
-  }));
-  globalThis.fetch = fetchMock as unknown as typeof fetch;
-  return fetchMock;
+function configureGitHubOAuthEnv() {
+  process.env.GITHUB_APP_CLIENT_ID = "github-client-id";
+  process.env.GITHUB_APP_CLIENT_SECRET = "github-client-secret";
+  process.env.JUNIOR_BASE_URL = BASE_URL;
 }
 
-function mockFailedFetch(status: number) {
-  const fetchMock = vi.fn(async () => ({
-    ok: false,
-    status,
-  }));
-  globalThis.fetch = fetchMock as unknown as typeof fetch;
-  return fetchMock;
+type CapturedTokenRequest = {
+  body: string;
+  headers: Record<string, string>;
+  method: string;
+  url: string;
+};
+
+async function captureTokenRequest(
+  request: Request,
+): Promise<CapturedTokenRequest> {
+  return {
+    url: request.url,
+    method: request.method,
+    headers: Object.fromEntries(request.headers.entries()),
+    body: await request.text(),
+  };
+}
+
+const TOKEN_ENDPOINTS = [
+  SENTRY_OAUTH_CONFIG.tokenEndpoint,
+  EXAMPLE_OAUTH_CONFIG.tokenEndpoint,
+  GITHUB_OAUTH_CONFIG.tokenEndpoint,
+];
+
+function mockJsonFetch(
+  payload: Record<string, unknown>,
+): CapturedTokenRequest[] {
+  const requests: CapturedTokenRequest[] = [];
+  mswServer.use(
+    ...TOKEN_ENDPOINTS.map((endpoint) =>
+      http.post(endpoint, async ({ request }) => {
+        requests.push(await captureTokenRequest(request));
+        return HttpResponse.json(payload);
+      }),
+    ),
+  );
+  return requests;
+}
+
+function mockFailedFetch(status: number): CapturedTokenRequest[] {
+  const requests: CapturedTokenRequest[] = [];
+  mswServer.use(
+    ...TOKEN_ENDPOINTS.map((endpoint) =>
+      http.post(endpoint, async ({ request }) => {
+        requests.push(await captureTokenRequest(request));
+        return HttpResponse.text("failed", { status });
+      }),
+    ),
+  );
+  return requests;
+}
+
+function mockInvalidJsonFetch(): CapturedTokenRequest[] {
+  const requests: CapturedTokenRequest[] = [];
+  mswServer.use(
+    ...TOKEN_ENDPOINTS.map((endpoint) =>
+      http.post(endpoint, async ({ request }) => {
+        requests.push(await captureTokenRequest(request));
+        return HttpResponse.text("not-json", {
+          headers: { "Content-Type": "application/json" },
+        });
+      }),
+    ),
+  );
+  return requests;
 }
 
 describe("oauth callback handler", () => {
@@ -302,7 +388,7 @@ describe("oauth callback handler", () => {
     });
 
     configureExampleOAuthEnv();
-    const fetchMock = mockJsonFetch({
+    const requests = mockJsonFetch({
       access_token: "example-access-token",
       refresh_token: "example-refresh-token",
     });
@@ -316,22 +402,21 @@ describe("oauth callback handler", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(fetchMock).toHaveBeenCalledWith(
-      "https://api.example.com/v1/oauth/token",
-      expect.objectContaining({
-        method: "POST",
-        headers: expect.objectContaining({
-          accept: "application/json",
-          authorization: `Basic ${Buffer.from("example-client-id:example-client-secret").toString("base64")}`,
-          "content-type": "application/json",
-        }),
-        body: JSON.stringify({
-          grant_type: "authorization_code",
-          code: "valid-code",
-          redirect_uri: `${BASE_URL}/api/oauth/callback/example`,
-        }),
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      url: "https://api.example.com/v1/oauth/token",
+      method: "POST",
+      headers: expect.objectContaining({
+        accept: "application/json",
+        authorization: `Basic ${Buffer.from("example-client-id:example-client-secret").toString("base64")}`,
+        "content-type": "application/json",
       }),
-    );
+    });
+    expect(JSON.parse(requests[0]!.body)).toEqual({
+      grant_type: "authorization_code",
+      code: "valid-code",
+      redirect_uri: `${BASE_URL}/api/oauth/callback/example`,
+    });
 
     const stored = (await getStoredTokens("U999", "example")) as {
       accessToken: string;
@@ -343,6 +428,60 @@ describe("oauth callback handler", () => {
       refreshToken: "example-refresh-token",
     });
     expect(stored.expiresAt).toBeUndefined();
+  });
+
+  it("stores GitHub App user tokens when GitHub returns an empty OAuth scope", async () => {
+    const stateKey = "oauth-state:github-exchange";
+    await putStoredState(stateKey, {
+      userId: "U777",
+      provider: "github",
+    });
+
+    configureGitHubOAuthEnv();
+    resolvePluginOAuthAccountMock.mockResolvedValue({
+      id: "12345",
+      label: "requester",
+      url: "https://github.com/requester",
+    });
+    mockJsonFetch({
+      access_token: "github-user-token",
+      refresh_token: "github-refresh-token",
+      expires_in: 28_800,
+      scope: "",
+    });
+
+    const response = await GET(
+      makeRequest(
+        "https://example.com/api/oauth/callback/github?code=valid-code&state=github-exchange",
+      ),
+      "github",
+      testWaitUntil,
+    );
+
+    expect(response.status).toBe(200);
+    const stored = (await getStoredTokens("U777", "github")) as {
+      account?: { id: string; label?: string; url?: string };
+      accessToken: string;
+      refreshToken: string;
+      scope?: string;
+    };
+    expect(stored).toMatchObject({
+      accessToken: "github-user-token",
+      account: {
+        id: "12345",
+        label: "requester",
+        url: "https://github.com/requester",
+      },
+      refreshToken: "github-refresh-token",
+    });
+    expect(stored.scope).toBeUndefined();
+    expect(resolvePluginOAuthAccountMock).toHaveBeenCalledWith({
+      provider: "github",
+      tokens: expect.objectContaining({
+        accessToken: "github-user-token",
+        refreshToken: "github-refresh-token",
+      }),
+    });
   });
 
   it("rejects callback grants whose explicit scope is missing required access", async () => {
@@ -399,6 +538,31 @@ describe("oauth callback handler", () => {
     const body = await response.text();
     expect(body).toContain("<!DOCTYPE html>");
     expect(body).toContain("failed");
+  });
+
+  it("returns styled HTML 500 when token exchange returns invalid JSON", async () => {
+    const stateKey = "oauth-state:invalid-token-json";
+    await putStoredState(stateKey, {
+      userId: "U789",
+      provider: "sentry",
+    });
+
+    configureSentryOAuthEnv();
+    mockInvalidJsonFetch();
+
+    const response = await GET(
+      makeRequest(
+        "https://example.com/api/oauth/callback/sentry?code=bad-code&state=invalid-token-json",
+      ),
+      "sentry",
+      testWaitUntil,
+    );
+
+    expect(response.status).toBe(500);
+    const body = await response.text();
+    expect(body).toContain("<!DOCTYPE html>");
+    expect(body).toContain("incomplete token response");
+    expect(await getStoredTokens("U789", "sentry")).toBeUndefined();
   });
 
   it("returns styled HTML 400 when user denies authorization", async () => {

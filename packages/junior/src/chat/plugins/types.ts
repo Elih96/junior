@@ -6,6 +6,14 @@ export interface PluginOAuthConfig {
   authorizeEndpoint: string;
   tokenEndpoint: string;
   scope?: string;
+  /**
+   * Set true when the provider returns an empty scope string even for authorized
+   * grants (e.g. GitHub App user-to-server tokens always return `scope: ""`
+   * regardless of what was requested). When enabled, an empty response scope
+   * uses the configured `scope` value instead of being treated as
+   * "no scopes granted".
+   */
+  treatEmptyScopeAsUnreported?: boolean;
   authorizeParams?: Record<string, string>;
   tokenAuthMethod?: "body" | "basic";
   tokenExtraHeaders?: Record<string, string>;
@@ -23,19 +31,7 @@ export interface OAuthBearerCredentials {
   authTokenPlaceholder?: string;
 }
 
-export interface GitHubAppCredentials {
-  type: "github-app";
-  domains: string[];
-  apiHeaders?: Record<string, string>;
-  authTokenEnv: string;
-  authTokenPlaceholder?: string;
-  appIdEnv: string;
-  privateKeyEnv: string;
-  installationIdEnv: string;
-  systemReadPermissions?: string[];
-}
-
-export type PluginCredentials = OAuthBearerCredentials | GitHubAppCredentials;
+export type PluginCredentials = OAuthBearerCredentials;
 
 export interface PluginNpmRuntimeDependency {
   type: "npm";
@@ -124,6 +120,17 @@ interface PluginOAuthConfigPatch extends Omit<
   tokenExtraHeaders?: Record<string, string | null> | null;
 }
 
+type PluginCredentialConfigBase = {
+  domains?: string[];
+  authTokenEnv?: string;
+  authTokenPlaceholder?: string | null;
+};
+
+type PluginCredentialConfig = PluginCredentialConfigBase & {
+  apiHeaders?: Record<string, string | null> | null;
+  type?: "oauth-bearer";
+};
+
 /** Install-level changes applied to one plugin manifest before validation. */
 export interface PluginManifestConfig {
   description?: string;
@@ -133,17 +140,7 @@ export interface PluginManifestConfig {
   apiHeaders?: Record<string, string | null> | null;
   commandEnv?: Record<string, string | null> | null;
   envVars?: Record<string, PluginEnvVarDeclaration | null> | null;
-  credentials?: {
-    type?: "oauth-bearer" | "github-app";
-    domains?: string[];
-    apiHeaders?: Record<string, string | null> | null;
-    authTokenEnv?: string;
-    authTokenPlaceholder?: string | null;
-    appIdEnv?: string;
-    privateKeyEnv?: string;
-    installationIdEnv?: string;
-    systemReadPermissions?: string[];
-  } | null;
+  credentials?: PluginCredentialConfig | null;
   runtimeDependencies?: PluginRuntimeDependencyConfig[] | null;
   runtimePostinstall?: PluginRuntimePostinstallCommand[] | null;
   mcp?: {

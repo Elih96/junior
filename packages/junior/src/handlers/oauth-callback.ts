@@ -34,6 +34,7 @@ import {
   buildOAuthTokenRequest,
   parseOAuthTokenResponse,
 } from "@/chat/plugins/auth/oauth-request";
+import { resolvePluginOAuthAccount } from "@/chat/plugins/credential-hooks";
 import {
   getTurnUserMessage,
   getTurnUserSlackMessageTs,
@@ -176,29 +177,6 @@ async function resumeOAuthSessionRecordTurn(
   }
   const destination = stored.destination;
 
-  const sessionRecord = await getAgentTurnSessionRecord(
-    stored.resumeConversationId,
-    stored.resumeSessionId,
-  );
-  if (!sessionRecord) {
-    return false;
-  }
-  // Terminal session record states are already handled; do not fall through to
-  // the pending-message resume which would re-post the original request.
-  if (
-    sessionRecord.state === "completed" ||
-    sessionRecord.state === "failed" ||
-    sessionRecord.state === "abandoned"
-  ) {
-    return true;
-  }
-  if (
-    sessionRecord.state !== "awaiting_resume" ||
-    sessionRecord.resumeReason !== "auth"
-  ) {
-    return true;
-  }
-
   const currentState = await getPersistedThreadState(
     stored.resumeConversationId,
   );
@@ -208,6 +186,7 @@ async function resumeOAuthSessionRecordTurn(
     kind: "plugin",
     provider: stored.provider,
     requesterId: stored.userId,
+    ...(stored.scope ? { scope: stored.scope } : {}),
   });
 
   const resolvedSessionId = pendingAuth?.sessionId ?? stored.resumeSessionId;
@@ -228,38 +207,50 @@ async function resumeOAuthSessionRecordTurn(
       });
       return true;
     }
-  } else {
-    if (!userMessage?.author?.userId) {
-      return false;
-    }
-    if (conversation.processing.activeTurnId !== stored.resumeSessionId) {
-      return true;
-    }
   }
-  if (!userMessage?.author?.userId || !resolvedSessionId) {
+
+  const sessionRecord = await getAgentTurnSessionRecord(
+    stored.resumeConversationId,
+    resolvedSessionId,
+  );
+  if (!sessionRecord) {
     return false;
+  }
+  // Terminal session record states are already handled; do not fall through to
+  // the pending-message resume which would re-post the original request.
+  if (
+    sessionRecord.state === "completed" ||
+    sessionRecord.state === "failed" ||
+    sessionRecord.state === "abandoned"
+  ) {
+    return true;
+  }
+  if (
+    sessionRecord.state !== "awaiting_resume" ||
+    sessionRecord.resumeReason !== "auth"
+  ) {
+    return true;
+  }
+  if (!userMessage?.author?.userId) {
+    return false;
+  }
+  if (
+    !pendingAuth &&
+    conversation.processing.activeTurnId !== stored.resumeSessionId
+  ) {
+    return true;
   }
 
   await resumeSlackTurn({
-    messageText: stored.pendingMessage ?? userMessage.text,
+    messageText: pendingAuth
+      ? userMessage.text
+      : (stored.pendingMessage ?? userMessage.text),
     channelId: stored.channelId,
     threadTs: stored.threadTs,
     messageTs: getTurnUserSlackMessageTs(userMessage),
     lockKey: stored.resumeConversationId,
     initialText: "",
     beforeStart: async () => {
-      const lockedSessionRecord = await getAgentTurnSessionRecord(
-        stored.resumeConversationId!,
-        stored.resumeSessionId!,
-      );
-      if (
-        !lockedSessionRecord ||
-        lockedSessionRecord.state !== "awaiting_resume" ||
-        lockedSessionRecord.resumeReason !== "auth"
-      ) {
-        return false;
-      }
-
       const lockedState = await getPersistedThreadState(
         stored.resumeConversationId!,
       );
@@ -270,10 +261,22 @@ async function resumeOAuthSessionRecordTurn(
         kind: "plugin",
         provider: stored.provider,
         requesterId: stored.userId,
+        ...(stored.scope ? { scope: stored.scope } : {}),
       });
       const lockedSessionId =
         lockedPendingAuth?.sessionId ?? stored.resumeSessionId!;
       if (lockedSessionId !== resolvedSessionId) {
+        return false;
+      }
+      const lockedSessionRecord = await getAgentTurnSessionRecord(
+        stored.resumeConversationId!,
+        lockedSessionId,
+      );
+      if (
+        !lockedSessionRecord ||
+        lockedSessionRecord.state !== "awaiting_resume" ||
+        lockedSessionRecord.resumeReason !== "auth"
+      ) {
         return false;
       }
       if (lockedPendingAuth) {
@@ -332,7 +335,9 @@ async function resumeOAuthSessionRecordTurn(
       );
 
       return {
-        messageText: stored.pendingMessage ?? lockedUserMessage.text,
+        messageText: lockedPendingAuth
+          ? lockedUserMessage.text
+          : (stored.pendingMessage ?? lockedUserMessage.text),
         messageTs: getTurnUserSlackMessageTs(lockedUserMessage),
         replyContext: {
           credentialContext: {
@@ -582,6 +587,7 @@ export async function GET(
   }
 
   const redirectUri = `${baseUrl}${providerConfig.callbackPath}`;
+  const requestedScope = stored.scope ?? providerConfig.scope;
 
   let tokenResponse: Response;
   try {
@@ -617,13 +623,12 @@ export async function GET(
     );
   }
 
-  const tokenData = (await tokenResponse.json()) as Record<string, unknown>;
   let parsedTokenResponse;
   try {
-    parsedTokenResponse = parseOAuthTokenResponse(
-      tokenData,
-      providerConfig.scope,
-    );
+    const tokenData = (await tokenResponse.json()) as Record<string, unknown>;
+    parsedTokenResponse = parseOAuthTokenResponse(tokenData, requestedScope, {
+      treatEmptyScopeAsUnreported: providerConfig.treatEmptyScopeAsUnreported,
+    });
   } catch {
     return htmlErrorResponse(
       "Connection failed",
@@ -632,7 +637,7 @@ export async function GET(
     );
   }
 
-  if (!hasRequiredOAuthScope(parsedTokenResponse.scope, providerConfig.scope)) {
+  if (!hasRequiredOAuthScope(parsedTokenResponse.scope, requestedScope)) {
     return htmlErrorResponse(
       "Connection failed",
       `The ${providerLabel} authorization did not grant the access Junior requires. Return to Slack and ask Junior to connect your ${providerLabel} account again.`,
@@ -641,7 +646,23 @@ export async function GET(
   }
 
   const userTokenStore = createUserTokenStore();
-  await userTokenStore.set(stored.userId, provider, parsedTokenResponse);
+  let account: Awaited<ReturnType<typeof resolvePluginOAuthAccount>>;
+  try {
+    account = await resolvePluginOAuthAccount({
+      provider,
+      tokens: parsedTokenResponse,
+    });
+  } catch {
+    return htmlErrorResponse(
+      "Connection failed",
+      `Junior could not verify the connected ${providerLabel} account. Please try again.`,
+      500,
+    );
+  }
+  await userTokenStore.set(stored.userId, provider, {
+    ...parsedTokenResponse,
+    ...(account ? { account } : {}),
+  });
 
   waitUntil(async () => {
     try {

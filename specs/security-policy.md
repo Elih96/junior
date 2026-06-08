@@ -62,21 +62,33 @@ This policy applies to:
 
 ### GitHub baseline
 
-- Use GitHub App installation auth.
-- Keep `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY` on host only.
+- Use GitHub App installation auth for `installation-read` grants.
+- Keep `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_APP_CLIENT_ID`, and
+  `GITHUB_APP_CLIENT_SECRET` on host only.
 - Sign App JWT on host, then exchange for installation token.
 - Require `GITHUB_INSTALLATION_ID` for deterministic installation selection.
-- For system actors, request an explicit read-only installation-token permission body. Use GitHub App `credentials.system-read-permissions` when configured, otherwise derive the safe default read subset from the installation permissions.
+- For GitHub `user-read` and `user-write` grants, require a stored GitHub App
+  user-to-server OAuth token from the current user actor or an explicit
+  delegated user subject allowed by the identity, scheduler, and dispatch
+  specs. GitHub mutations must be attributed to that GitHub user with the app
+  badge.
+- Missing GitHub user authorization in an interactive user turn must pause for
+  private OAuth. System-actor runs must block when no allowed delegated user
+  token is available; they must not fall back to installation writes.
+- For GitHub installation-token grants, the GitHub plugin must request an
+  explicit read-only permission body. Configured or installation-discovered
+  read-capable permissions must be requested at `read` level, with
+  `metadata: read` included.
 - Configure `GITHUB_APP_BOT_NAME` and `GITHUB_APP_BOT_EMAIL` as host env vars.
   They are public git author metadata, not credentials.
 - Declare both `api.github.com` and `github.com` in the GitHub plugin manifest
   so the egress proxy forwards REST API and git HTTPS traffic through
   host-managed credential transforms.
 - Disable git credential helpers in sandbox env (`GIT_ASKPASS`, `credential.helper=`) so git never sends its own auth — the proxy header transform is the sole credential source.
-- Set `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`, `GIT_COMMITTER_NAME`, and
-  `GIT_COMMITTER_EMAIL` from the configured GitHub App bot identity so
-  sandbox commits are attributed to the installation bot, not a user named
-  like the app slug.
+- Set `GIT_AUTHOR_NAME` and `GIT_AUTHOR_EMAIL` from the resolved requester
+  identity for commit authorship. Set `GIT_COMMITTER_NAME` and
+  `GIT_COMMITTER_EMAIL` from the configured GitHub App bot identity, and append
+  Junior as the commit co-author trailer.
 - Set `GITHUB_TOKEN` in lease env to a placeholder — real token never enters the sandbox.
 - Keep explicit `--repo owner/repo` and remote targets for command correctness and wrong-repo protection; they are not a credential-scoping boundary.
 

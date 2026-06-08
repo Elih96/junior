@@ -70,14 +70,14 @@ target:
 
 - `capabilities`: short names qualified to `<plugin>.<capability>` by the registry.
 - `config-keys`: short names qualified to `<plugin>.<key>` by the registry.
-- `domains`: plugin-level domains for API header injection. Required when `api-headers` is set.
+- `domains`: plugin-level domains for API header injection or code-based plugin egress hooks. Required when `api-headers` is set. In `plugin.yaml`, `domains` must pair with `api-headers` or `credentials`.
 - `api-headers`: headers injected for matching `domains`. Secret values must come from `${NAME}` placeholders declared in `env-vars` without defaults.
-- `credentials.type`: `"oauth-bearer"` or `"github-app"`.
-- `credentials.domains`: domains that receive runtime-managed credential headers. Include every host that needs credentials, such as both `api.github.com` and `github.com` for GitHub App git HTTPS auth.
-- `credentials.auth-token-env`: host env var for static token fallback outside credential-context-bound turns and for sandbox placeholder naming.
+- `credentials.type`: `"oauth-bearer"` only. Plugin-owned egress credentials are not declared in `credentials`; code-based plugins declare top-level `domains` and register both `grantForEgress` and `issueCredential`.
+- `credentials.domains`: domains that receive generic OAuth bearer credential headers.
+- `credentials.auth-token-env`: sandbox placeholder env var name. Required for `oauth-bearer` credentials, where it can also name a static host token used outside credential-context-bound turns.
 - `credentials.auth-token-placeholder`: optional non-secret sandbox env value for CLI compatibility.
-- `credentials.system-read-permissions`: optional GitHub App-only list of read scopes for system actors. Manifest entries may use dashes for readability and are normalized to GitHub API permission names at load. If omitted, the broker derives a safe read-only subset from the installation permissions.
-- `oauth`: required for OAuth bearer providers. Endpoints must be HTTPS.
+- `credentials.api-headers`: optional extra headers for `oauth-bearer` credentials only.
+- `oauth`: required for OAuth bearer providers. Code-based plugins may also declare OAuth without `credentials` so egress credential hooks can request user authorization when a plugin-defined grant needs it. Endpoints must be HTTPS.
 - `target.config-key`: must appear in `config-keys`.
 - `runtime-dependencies`: optional sandbox dependencies. `type` is `"npm"` or `"system"`.
 - `runtime-postinstall`: optional commands run after dependency install and before snapshot capture.

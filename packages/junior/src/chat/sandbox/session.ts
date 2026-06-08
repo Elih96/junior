@@ -109,6 +109,7 @@ interface SandboxSessionManager {
   configureSkills(skills: SkillMetadata[]): void;
   configureReferenceFiles(files: string[]): void;
   getSandboxId(): string | undefined;
+  getSandboxEgressId(): string | undefined;
   getDependencyProfileHash(): string | undefined;
   createSandbox(): Promise<SandboxInstance>;
   ensureToolExecutors(): Promise<SandboxToolExecutors>;
@@ -746,10 +747,6 @@ export function createSandboxSessionManager(options?: {
           if (input.signal?.aborted) {
             return getCommandAbortedResult();
           }
-          await refreshNetworkPolicy(sandboxInstance);
-          if (input.signal?.aborted) {
-            return getCommandAbortedResult();
-          }
           const sandboxCommandEnv = await resolveCommandEnv();
           if (input.signal?.aborted) {
             return getCommandAbortedResult();
@@ -871,6 +868,9 @@ export function createSandboxSessionManager(options?: {
     },
     getSandboxId() {
       return sandbox ? sandbox.sandboxId : sandboxIdHint;
+    },
+    getSandboxEgressId() {
+      return sandbox?.sandboxEgressId;
     },
     getDependencyProfileHash() {
       return dependencyProfileHash;

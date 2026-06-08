@@ -4,7 +4,6 @@ import type { CapabilityProviderDefinition } from "@/chat/capabilities/catalog";
 import type { CredentialBroker } from "@/chat/credentials/broker";
 import { pluginRoots } from "@/chat/discovery";
 import { logInfo, logWarn, setSpanAttributes } from "@/chat/logging";
-import { createGitHubAppBroker } from "./auth/github-app-broker";
 import { parseInlinePluginManifest, parsePluginManifest } from "./manifest";
 import { createOAuthBearerBroker } from "./auth/oauth-bearer-broker";
 import { createApiHeadersBroker } from "./auth/api-headers-broker";
@@ -505,6 +504,9 @@ export function getPluginOAuthConfig(
     ...(oauth.tokenExtraHeaders
       ? { tokenExtraHeaders: { ...oauth.tokenExtraHeaders } }
       : {}),
+    ...(oauth.treatEmptyScopeAsUnreported
+      ? { treatEmptyScopeAsUnreported: true }
+      : {}),
     callbackPath: `/api/oauth/callback/${plugin.manifest.name}`,
   };
 }
@@ -578,12 +580,8 @@ export function createPluginBroker(
 
   if (!credentials) {
     broker = createApiHeadersBroker(plugin.manifest);
-  } else if (credentials.type === "oauth-bearer") {
-    broker = createOAuthBearerBroker(plugin.manifest, credentials, deps);
-  } else if (credentials.type === "github-app") {
-    broker = createGitHubAppBroker(plugin.manifest, credentials);
   } else {
-    throw new Error(`Unsupported credentials type for plugin "${name}"`);
+    broker = createOAuthBearerBroker(plugin.manifest, credentials, deps);
   }
 
   setSpanAttributes({

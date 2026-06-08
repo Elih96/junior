@@ -24,6 +24,8 @@ import {
   getPluginProviders,
   getPluginOAuthConfig,
 } from "@/chat/plugins/registry";
+import { hasEgressCredentialHooks } from "@/chat/plugins/credential-hooks";
+import { parseSandboxEgressAuthRequiredSignal } from "@/chat/sandbox/egress-schemas";
 import type { Skill } from "@/chat/skills";
 
 export class PluginAuthorizationPauseError extends AuthorizationPauseError {
@@ -96,7 +98,6 @@ function isCommandAuthFailure(details: unknown): details is {
   }
 
   return [
-    /\bjunior-auth-required\b/,
     /\b401\b/,
     /\bunauthorized\b/,
     /\bbad credentials\b/,
@@ -122,24 +123,36 @@ function commandText(details: unknown): string {
   return `${typeof result.stdout === "string" ? result.stdout : ""}\n${typeof result.stderr === "string" ? result.stderr : ""}`;
 }
 
-function isGitHubSmartHttpAuthFailure(
-  provider: string,
-  command: string,
-  details: unknown,
-): boolean {
-  if (provider !== "github" || !/^\s*(?:gh|git)\b/i.test(command)) {
-    return false;
+function pluginAuthRequiredSignal(details: unknown):
+  | {
+      authorization?: {
+        provider: string;
+        scope?: string;
+        type: "oauth";
+      };
+      grant: {
+        access: "read" | "write";
+        name: string;
+        reason?: string;
+      };
+      provider: string;
+    }
+  | undefined {
+  if (!details || typeof details !== "object") {
+    return undefined;
   }
-
-  const text = commandText(details).toLowerCase();
-  return /\bgzip:\s*invalid header\b/.test(text);
-}
-
-function explicitAuthRequiredProvider(details: unknown): string | undefined {
-  const match = /\bjunior-auth-required\s+provider=([a-z0-9-]+)\b/.exec(
-    commandText(details).toLowerCase(),
-  );
-  return match?.[1];
+  const signal = (details as { auth_required?: unknown }).auth_required;
+  const parsedSignal = parseSandboxEgressAuthRequiredSignal(signal);
+  if (!parsedSignal) {
+    return undefined;
+  }
+  return {
+    provider: parsedSignal.provider,
+    grant: parsedSignal.grant,
+    ...(parsedSignal.authorization
+      ? { authorization: parsedSignal.authorization }
+      : {}),
+  };
 }
 
 function registeredProviderNames(): string[] {
@@ -166,16 +179,14 @@ function commandTargetsProvider(
     return false;
   }
 
-  if (provider === "github" && /^(gh|git)\b/.test(normalizedCommand)) {
-    return true;
-  }
-
   const plugin = getPluginDefinition(provider);
   const candidates = new Set<string>([provider.toLowerCase()]);
   const manifest = plugin?.manifest;
   const credentials = manifest?.credentials;
   if (credentials) {
-    candidates.add(credentials.authTokenEnv.toLowerCase());
+    if (credentials.authTokenEnv) {
+      candidates.add(credentials.authTokenEnv.toLowerCase());
+    }
     for (const domain of credentials.domains) {
       candidates.add(domain.toLowerCase());
     }
@@ -205,19 +216,12 @@ function buildCredentialFailureError(
   provider: string,
   command: string,
 ): PluginCredentialFailureError {
-  const providerLabel =
-    provider === "github" ? "GitHub" : formatProviderLabel(provider);
-  const plugin = getPluginDefinition(provider);
-  const credentialType = plugin?.manifest.credentials?.type;
+  const providerLabel = formatProviderLabel(provider);
   const commandSummary = formatCommand(command);
-  const remediation =
-    provider === "github" && credentialType === "github-app"
-      ? "Verify the GitHub App installation covers the target repository and the host GitHub App environment variables are current."
-      : `Verify the ${providerLabel} provider credentials before retrying.`;
 
   return new PluginCredentialFailureError(
     provider,
-    `${providerLabel} credentials were rejected while running \`${commandSummary}\`. ${remediation}`,
+    `${providerLabel} credentials were rejected while running \`${commandSummary}\`. Verify the ${providerLabel} provider credentials before retrying.`,
   );
 }
 
@@ -234,6 +238,7 @@ export function createPluginAuthOrchestration(
     provider: string,
     activeSkill: Skill | null,
     options?: {
+      scope?: string;
       unlinkExistingProvider?: boolean;
     },
   ): Promise<never> => {
@@ -253,6 +258,7 @@ export function createPluginAuthOrchestration(
       kind: "plugin",
       provider,
       requesterId: deps.requesterId,
+      ...(options?.scope ? { scope: options.scope } : {}),
     });
 
     if (!reusingPendingLink) {
@@ -264,6 +270,7 @@ export function createPluginAuthOrchestration(
         userMessage: deps.userMessage,
         channelConfiguration: deps.channelConfiguration,
         activeSkillName: activeSkill?.name ?? undefined,
+        ...(options?.scope ? { scope: options.scope } : {}),
         resumeConversationId: deps.conversationId,
         resumeSessionId: deps.sessionId,
       });
@@ -291,6 +298,7 @@ export function createPluginAuthOrchestration(
         kind: "plugin",
         provider,
         requesterId: deps.requesterId,
+        ...(options?.scope ? { scope: options.scope } : {}),
         sessionId: deps.sessionId,
         linkSentAtMs: reusingPendingLink
           ? deps.currentPendingAuth!.linkSentAtMs
@@ -325,27 +333,40 @@ export function createPluginAuthOrchestration(
   return {
     handleCommandFailure: async (input) => {
       const providers = registeredProviderNames();
-      const explicitProvider = explicitAuthRequiredProvider(input.details);
-      const provider =
-        explicitProvider && providers.includes(explicitProvider)
-          ? explicitProvider
-          : providers.find((availableProvider) =>
-              commandTargetsProvider(
-                availableProvider,
-                input.command,
-                input.details,
-              ),
-            );
+      const parsedAuthSignal = pluginAuthRequiredSignal(input.details);
+      const authSignal =
+        parsedAuthSignal && providers.includes(parsedAuthSignal.provider)
+          ? parsedAuthSignal
+          : undefined;
+      const provider = authSignal
+        ? authSignal.provider
+        : providers.find((availableProvider) =>
+            commandTargetsProvider(
+              availableProvider,
+              input.command,
+              input.details,
+            ),
+          );
       if (!provider) {
         return;
       }
 
       const authFailure =
-        isCommandAuthFailure(input.details) ||
-        isGitHubSmartHttpAuthFailure(provider, input.command, input.details);
+        Boolean(authSignal) || isCommandAuthFailure(input.details);
       if (!authFailure) {
         return;
       }
+
+      const providerOAuth = getPluginOAuthConfig(provider);
+      const authorization =
+        authSignal?.authorization ??
+        (!authSignal && !hasEgressCredentialHooks(provider) && providerOAuth
+          ? {
+              type: "oauth" as const,
+              provider,
+              ...(providerOAuth.scope ? { scope: providerOAuth.scope } : {}),
+            }
+          : undefined);
 
       if (!deps.requesterId || !deps.userTokenStore) {
         if (deps.authorizationFlowMode === "disabled") {
@@ -354,11 +375,15 @@ export function createPluginAuthOrchestration(
         throw buildCredentialFailureError(provider, input.command);
       }
 
-      if (!getPluginOAuthConfig(provider)) {
+      if (authorization?.type !== "oauth") {
+        throw buildCredentialFailureError(provider, input.command);
+      }
+      if (!getPluginOAuthConfig(authorization.provider)) {
         throw buildCredentialFailureError(provider, input.command);
       }
 
-      await startAuthorizationPause(provider, input.activeSkill, {
+      await startAuthorizationPause(authorization.provider, input.activeSkill, {
+        ...(authorization.scope ? { scope: authorization.scope } : {}),
         unlinkExistingProvider: true,
       });
     },

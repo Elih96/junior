@@ -34,8 +34,12 @@ vi.mock("@/chat/plugins/registry", () => ({
       manifest: {
         name: "github",
         description: "GitHub provider",
-        credentials: {
-          type: "github-app",
+        domains: ["api.github.com", "github.com"],
+        oauth: {
+          clientIdEnv: "GITHUB_APP_CLIENT_ID",
+          clientSecretEnv: "GITHUB_APP_CLIENT_SECRET",
+          authorizeEndpoint: "https://github.com/login/oauth/authorize",
+          tokenEndpoint: "https://github.com/login/oauth/access_token",
         },
       },
     },
@@ -210,19 +214,28 @@ describe("buildHomeView", () => {
     expect(section?.text?.text).toContain("sentry");
   });
 
-  it("excludes github-app providers (no per-user auth)", async () => {
-    // github-app tokens would never be in the user token store, and
-    // buildHomeView skips providers without oauth-bearer or MCP-backed auth.
-    const store = createMockTokenStore({ github: validToken });
+  it("shows GitHub App providers with user OAuth tokens", async () => {
+    const store = createMockTokenStore({
+      github: {
+        ...validToken,
+        account: {
+          id: "12345",
+          label: "requester",
+          url: "https://github.com/requester",
+        },
+      },
+    });
     const view = await buildHomeView("U123", store);
 
-    const noAccountsSection = findSection(
+    const section = findSection(
       view.blocks,
-      (candidate) => candidate.text?.text === "No connected accounts",
+      (candidate) => candidate.text?.text.includes("github") ?? false,
     );
-    expect(noAccountsSection).toBeDefined();
-    // github provider is github-app type, so store.get should not be called for it
-    expect(store.get).not.toHaveBeenCalledWith("U123", "github");
+    expect(section).toBeDefined();
+    expect(section?.text?.text).toContain(
+      "Connected as <https://github.com/requester|requester>",
+    );
+    expect(store.get).toHaveBeenCalledWith("U123", "github");
     expect(store.get).not.toHaveBeenCalledWith("U123", "example-bundle");
     expect(getMcpStoredOAuthCredentials).not.toHaveBeenCalledWith(
       "U123",

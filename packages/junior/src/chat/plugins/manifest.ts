@@ -1,7 +1,6 @@
 import { z } from "zod";
 import { parse as parseYaml } from "yaml";
 import type {
-  GitHubAppCredentials,
   PluginEnvVarDeclaration,
   PluginMcpConfig,
   PluginOAuthConfig,
@@ -17,7 +16,6 @@ import type {
   PluginSystemRuntimeDependencyFromUrl,
 } from "./types";
 import { inlineManifestSource } from "./inline-manifest-source";
-import { normalizeGitHubSystemReadPermissionScopes } from "./github-permissions";
 
 const PLUGIN_NAME_RE = /^[a-z][a-z0-9-]*$/;
 const SHORT_CAPABILITY_RE = /^[a-z0-9-]+(\.[a-z0-9-]+)*$/;
@@ -172,25 +170,19 @@ const domainsSchema = z
 const baseCredentialsSchema = z
   .object({
     domains: domainsSchema.optional(),
-    "api-headers": stringMapSchema.optional(),
-    "auth-token-env": envVarString,
-    "auth-token-placeholder": nonEmptyTrimmedString.optional(),
   })
   .passthrough();
 
 const oauthBearerCredentialsSchema = baseCredentialsSchema.extend({
+  "api-headers": stringMapSchema.optional(),
+  "auth-token-env": envVarString,
+  "auth-token-placeholder": nonEmptyTrimmedString.optional(),
   type: z.literal("oauth-bearer"),
 });
 
-const githubAppCredentialsSchema = baseCredentialsSchema.extend({
-  type: z.literal("github-app"),
-  "app-id-env": envVarString,
-  "private-key-env": envVarString,
-  "installation-id-env": envVarString,
-  "system-read-permissions": nonEmptyStringArraySchema(
-    "system-read-permissions",
-  ).optional(),
-});
+interface ManifestParseOptions {
+  allowHookManagedEgress?: boolean;
+}
 
 const runtimeDependencyEntrySchema = z
   .object({
@@ -232,6 +224,7 @@ const oauthSourceSchema = z
         error: 'must be "body" or "basic"',
       })
       .optional(),
+    "treat-empty-scope-as-unreported": z.boolean().optional(),
   })
   .passthrough();
 
@@ -357,22 +350,6 @@ function manifestConfigPatch(
         "auth-token-placeholder",
         config.credentials.authTokenPlaceholder,
       );
-      setDefined(credentials, "app-id-env", config.credentials.appIdEnv);
-      setDefined(
-        credentials,
-        "private-key-env",
-        config.credentials.privateKeyEnv,
-      );
-      setDefined(
-        credentials,
-        "installation-id-env",
-        config.credentials.installationIdEnv,
-      );
-      setDefined(
-        credentials,
-        "system-read-permissions",
-        config.credentials.systemReadPermissions,
-      );
       result.credentials = credentials;
     }
   }
@@ -404,6 +381,11 @@ function manifestConfigPatch(
       setDefined(oauth, "authorize-params", config.oauth.authorizeParams);
       setDefined(oauth, "token-auth-method", config.oauth.tokenAuthMethod);
       setDefined(oauth, "token-extra-headers", config.oauth.tokenExtraHeaders);
+      setDefined(
+        oauth,
+        "treat-empty-scope-as-unreported",
+        config.oauth.treatEmptyScopeAsUnreported,
+      );
       result.oauth = oauth;
     }
   }
@@ -622,11 +604,8 @@ function assertCommandEnvDoesNotExposeHostSecretRefs(
     }
   }
   if (credentials) {
-    hostOnlyRefs.add(credentials.authTokenEnv);
-    if (credentials.type === "github-app") {
-      hostOnlyRefs.add(credentials.appIdEnv);
-      hostOnlyRefs.add(credentials.privateKeyEnv);
-      hostOnlyRefs.add(credentials.installationIdEnv);
+    if (credentials.authTokenEnv) {
+      hostOnlyRefs.add(credentials.authTokenEnv);
     }
   }
   if (oauth) {
@@ -674,20 +653,13 @@ function normalizeCredentials(
   data: Record<string, unknown>,
   name: string,
 ): PluginCredentials {
-  const schema =
-    data.type === "oauth-bearer"
-      ? oauthBearerCredentialsSchema
-      : data.type === "github-app"
-        ? githubAppCredentialsSchema
-        : undefined;
-
-  if (!schema) {
+  if (data.type !== "oauth-bearer") {
     throw new Error(
       `Plugin ${name} has unsupported credentials.type: "${String(data.type)}"`,
     );
   }
 
-  const result = schema.safeParse(data);
+  const result = oauthBearerCredentialsSchema.safeParse(data);
   if (!result.success) {
     throw new Error(issueMessage(result.error, `Plugin ${name} credentials`));
   }
@@ -697,26 +669,6 @@ function normalizeCredentials(
   }
   const domains = result.data.domains;
 
-  if (result.data.type === "oauth-bearer") {
-    const apiHeaders = result.data["api-headers"]
-      ? normalizeStringMap(
-          result.data["api-headers"],
-          `Plugin ${name} credentials.api-headers`,
-          { forbiddenKeys: FORBIDDEN_API_HEADER_NAMES },
-        )
-      : undefined;
-
-    return {
-      type: "oauth-bearer",
-      domains,
-      ...(apiHeaders ? { apiHeaders } : {}),
-      authTokenEnv: result.data["auth-token-env"],
-      ...(result.data["auth-token-placeholder"]
-        ? { authTokenPlaceholder: result.data["auth-token-placeholder"] }
-        : {}),
-    } satisfies OAuthBearerCredentials;
-  }
-
   const apiHeaders = result.data["api-headers"]
     ? normalizeStringMap(
         result.data["api-headers"],
@@ -724,26 +676,16 @@ function normalizeCredentials(
         { forbiddenKeys: FORBIDDEN_API_HEADER_NAMES },
       )
     : undefined;
-  const systemReadPermissions = result.data["system-read-permissions"]
-    ? normalizeGitHubSystemReadPermissionScopes(
-        result.data["system-read-permissions"],
-        `Plugin ${name} credentials.system-read-permissions`,
-      )
-    : undefined;
 
   return {
-    type: "github-app",
+    type: "oauth-bearer",
     domains,
     ...(apiHeaders ? { apiHeaders } : {}),
     authTokenEnv: result.data["auth-token-env"],
     ...(result.data["auth-token-placeholder"]
       ? { authTokenPlaceholder: result.data["auth-token-placeholder"] }
       : {}),
-    appIdEnv: result.data["app-id-env"],
-    privateKeyEnv: result.data["private-key-env"],
-    installationIdEnv: result.data["installation-id-env"],
-    ...(systemReadPermissions ? { systemReadPermissions } : {}),
-  } satisfies GitHubAppCredentials;
+  } satisfies OAuthBearerCredentials;
 }
 
 function normalizeRuntimeDependencies(
@@ -1020,6 +962,7 @@ function parseManifestSource(
   parsedSource: ManifestSource,
   dir: string,
   config?: PluginCatalogConfig,
+  options?: ManifestParseOptions,
 ): PluginManifest {
   const source = applyManifestConfig(parsedSource, config);
   const sourceResult = manifestSourceSchema.safeParse(source);
@@ -1126,7 +1069,12 @@ function parseManifestSource(
   if (apiHeaders && !domains) {
     throw new Error(`Plugin ${data.name} api-headers requires domains`);
   }
-  if (domains && !apiHeaders && !data.credentials) {
+  if (
+    domains &&
+    !apiHeaders &&
+    !data.credentials &&
+    options?.allowHookManagedEgress !== true
+  ) {
     throw new Error(
       `Plugin ${data.name} domains requires credentials or api-headers`,
     );
@@ -1166,13 +1114,8 @@ function parseManifestSource(
   };
 
   if (data.oauth) {
-    if (!credentials) {
+    if (!credentials && options?.allowHookManagedEgress !== true) {
       throw new Error(`Plugin ${data.name} oauth requires credentials`);
-    }
-    if (credentials.type !== "oauth-bearer") {
-      throw new Error(
-        `Plugin ${data.name} oauth requires credentials.type "oauth-bearer"`,
-      );
     }
 
     const result = oauthSourceSchema.safeParse(data.oauth);
@@ -1210,6 +1153,9 @@ function parseManifestSource(
         ? { tokenAuthMethod: result.data["token-auth-method"] }
         : {}),
       ...(tokenExtraHeaders ? { tokenExtraHeaders } : {}),
+      ...(result.data["treat-empty-scope-as-unreported"]
+        ? { treatEmptyScopeAsUnreported: true }
+        : {}),
     };
   }
 
@@ -1293,5 +1239,7 @@ export function parseInlinePluginManifest(
   dir: string,
   config?: PluginCatalogConfig,
 ): PluginManifest {
-  return parseManifestSource(inlineManifestSource(manifest), dir, config);
+  return parseManifestSource(inlineManifestSource(manifest), dir, config, {
+    allowHookManagedEgress: true,
+  });
 }

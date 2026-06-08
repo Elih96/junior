@@ -161,7 +161,7 @@ async function persistActiveTurn(
   });
 }
 
-describe("trusted plugin heartbeat", () => {
+describe("plugin heartbeat", () => {
   const originalFetch = global.fetch;
 
   beforeEach(async () => {
@@ -196,7 +196,7 @@ describe("trusted plugin heartbeat", () => {
     expect(waitUntil.pendingCount()).toBe(0);
   });
 
-  it("runs trusted plugin heartbeat hooks", async () => {
+  it("runs plugin heartbeat hooks", async () => {
     const seen: number[] = [];
     setAgentPlugins([
       defineJuniorPlugin({
@@ -895,7 +895,7 @@ describe("trusted plugin heartbeat", () => {
       (report) => report.pluginName === "scheduler",
     );
 
-    expect(feed.source).toBe("trusted_plugins");
+    expect(feed.source).toBe("plugins");
     expect(scheduler).toMatchObject({
       pluginName: "scheduler",
       title: "Scheduler",

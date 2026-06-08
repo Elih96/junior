@@ -1,47 +1,57 @@
 import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
+import type { CredentialContext } from "@/chat/credentials/context";
 import {
-  parseCredentialContext,
-  type CredentialContext,
-} from "@/chat/credentials/context";
-import type { CredentialHeaderTransform } from "@/chat/credentials/broker";
+  parseSandboxEgressAuthRequiredSignal,
+  parseSandboxEgressPermissionDeniedSignal,
+  sandboxEgressCredentialContextSchema,
+  sandboxEgressCredentialLeaseSchema,
+  type SandboxEgressAuthRequiredSignal,
+  type SandboxEgressCredentialContext,
+  type SandboxEgressCredentialLease,
+  type SandboxEgressPermissionDeniedSignal,
+} from "@/chat/sandbox/egress-schemas";
 import { getStateAdapter } from "@/chat/state/adapter";
 
 export const SANDBOX_EGRESS_PROXY_PATH = "/api/internal/sandbox-egress";
 
 const SANDBOX_EGRESS_TOKEN_VERSION = "v1";
 const SANDBOX_EGRESS_HMAC_CONTEXT = "junior.sandbox_egress.v1";
+const SANDBOX_EGRESS_AUTH_SIGNAL_PREFIX = "sandbox-egress-auth-required";
+const SANDBOX_EGRESS_PERMISSION_SIGNAL_PREFIX =
+  "sandbox-egress-permission-denied";
 const SANDBOX_EGRESS_LEASE_PREFIX = "sandbox-egress-lease";
 const DEFAULT_SESSION_TTL_MS = 30 * 60 * 1000;
 
-export interface SandboxEgressCredentialContext {
-  credentials: CredentialContext;
-  egressId: string;
-  expiresAtMs: number;
-  contextId: string;
-}
-
-export interface SandboxEgressCredentialLease {
-  provider: string;
-  expiresAt: string;
-  headerTransforms: CredentialHeaderTransform[];
-}
+export type {
+  SandboxEgressAuthRequiredSignal,
+  SandboxEgressCredentialContext,
+  SandboxEgressCredentialLease,
+  SandboxEgressPermissionDeniedSignal,
+};
 
 function leaseKey(
   provider: string,
+  grantName: string,
   context: SandboxEgressCredentialContext,
 ): string {
   const actor = context.credentials.actor;
   const actorKey =
     actor.type === "user" ? `user:${actor.userId}` : `system:${actor.id}`;
-  return `${SANDBOX_EGRESS_LEASE_PREFIX}:${provider}:${actorKey}:${context.egressId}:${context.contextId}`;
+  return `${SANDBOX_EGRESS_LEASE_PREFIX}:${provider}:${grantName}:${actorKey}:${context.egressId}:${context.contextId}`;
 }
 
-function getSandboxEgressSecret(): string {
-  const secret = process.env.JUNIOR_SECRET?.trim();
-  if (secret) {
-    return secret;
-  }
-  throw new Error("Cannot determine sandbox egress secret (set JUNIOR_SECRET)");
+function authSignalKey(
+  egressId: string,
+  access: SandboxEgressAuthRequiredSignal["grant"]["access"],
+): string {
+  return `${SANDBOX_EGRESS_AUTH_SIGNAL_PREFIX}:${egressId}:${access}`;
+}
+
+function permissionSignalKey(
+  egressId: string,
+  access: SandboxEgressPermissionDeniedSignal["grant"]["access"],
+): string {
+  return `${SANDBOX_EGRESS_PERMISSION_SIGNAL_PREFIX}:${egressId}:${access}`;
 }
 
 function base64Url(input: string): string {
@@ -70,66 +80,34 @@ function timingSafeMatch(expected: string, actual: string): boolean {
 function parseSandboxEgressContext(
   value: unknown,
 ): SandboxEgressCredentialContext | undefined {
-  if (!value || typeof value !== "object") {
+  const result = sandboxEgressCredentialContextSchema.safeParse(value);
+  if (!result.success) {
     return undefined;
   }
-  const record = value as Partial<SandboxEgressCredentialContext>;
-  const credentials = parseCredentialContext(record.credentials);
-  if (
-    !credentials ||
-    typeof record.egressId !== "string" ||
-    !record.egressId ||
-    typeof record.expiresAtMs !== "number" ||
-    !Number.isFinite(record.expiresAtMs) ||
-    typeof record.contextId !== "string" ||
-    !record.contextId
-  ) {
+  if (result.data.expiresAtMs <= Date.now()) {
     return undefined;
   }
-  if (record.expiresAtMs <= Date.now()) {
-    return undefined;
-  }
-  return {
-    credentials,
-    egressId: record.egressId,
-    expiresAtMs: record.expiresAtMs,
-    contextId: record.contextId,
-  };
+  return result.data;
 }
 
 function parseLease(value: unknown): SandboxEgressCredentialLease | undefined {
-  if (!value || typeof value !== "object") {
+  const result = sandboxEgressCredentialLeaseSchema.safeParse(value);
+  if (!result.success) {
     return undefined;
   }
-  const record = value as Partial<SandboxEgressCredentialLease>;
-  if (
-    typeof record.provider !== "string" ||
-    typeof record.expiresAt !== "string" ||
-    !Array.isArray(record.headerTransforms)
-  ) {
-    return undefined;
-  }
-  const expiresAtMs = Date.parse(record.expiresAt);
+  const expiresAtMs = Date.parse(result.data.expiresAt);
   if (!Number.isFinite(expiresAtMs) || expiresAtMs <= Date.now()) {
     return undefined;
   }
-  const headerTransforms = record.headerTransforms.filter(
-    (transform): transform is CredentialHeaderTransform =>
-      Boolean(
-        transform &&
-        typeof transform.domain === "string" &&
-        transform.headers &&
-        typeof transform.headers === "object",
-      ),
-  );
-  if (headerTransforms.length === 0) {
-    return undefined;
+  return result.data;
+}
+
+function getSandboxEgressSecret(): string {
+  const secret = process.env.JUNIOR_SECRET?.trim();
+  if (secret) {
+    return secret;
   }
-  return {
-    provider: record.provider,
-    expiresAt: record.expiresAt,
-    headerTransforms,
-  };
+  throw new Error("Cannot determine sandbox egress secret (set JUNIOR_SECRET)");
 }
 
 /** Create a signed actor/sandbox context token for lazy sandbox egress auth. */
@@ -179,7 +157,7 @@ export function parseSandboxEgressCredentialToken(
   }
 }
 
-/** Cache a short-lived credential lease for repeated forwarded requests for one actor/sandbox context. */
+/** Cache a short-lived credential lease for one actor/sandbox context and grant. */
 export async function setSandboxEgressCredentialLease(
   context: SandboxEgressCredentialContext,
   lease: SandboxEgressCredentialLease,
@@ -194,25 +172,130 @@ export async function setSandboxEgressCredentialLease(
   );
   const state = getStateAdapter();
   await state.connect();
-  await state.set(leaseKey(lease.provider, context), lease, ttlMs);
+  await state.set(
+    leaseKey(lease.provider, lease.grant.name, context),
+    lease,
+    ttlMs,
+  );
 }
 
-/** Load a cached egress credential lease for an actor/sandbox context/provider pair. */
+/** Load a cached egress credential lease for one actor/sandbox context and grant. */
 export async function getSandboxEgressCredentialLease(
   provider: string,
+  grantName: string,
   context: SandboxEgressCredentialContext,
 ): Promise<SandboxEgressCredentialLease | undefined> {
   const state = getStateAdapter();
   await state.connect();
-  return parseLease(await state.get(leaseKey(provider, context)));
+  return parseLease(await state.get(leaseKey(provider, grantName, context)));
 }
 
 /** Clear a cached egress credential lease after the provider rejects its headers. */
 export async function clearSandboxEgressCredentialLease(
   provider: string,
+  grantName: string,
   context: SandboxEgressCredentialContext,
 ): Promise<void> {
   const state = getStateAdapter();
   await state.connect();
-  await state.delete(leaseKey(provider, context));
+  await state.delete(leaseKey(provider, grantName, context));
+}
+
+/** Record that host-side sandbox egress returned an auth-required response. */
+export async function setSandboxEgressAuthRequiredSignal(
+  context: SandboxEgressCredentialContext,
+  signal: Omit<SandboxEgressAuthRequiredSignal, "createdAtMs">,
+): Promise<void> {
+  const ttlMs = Math.max(1, context.expiresAtMs - Date.now());
+  const state = getStateAdapter();
+  await state.connect();
+  await state.set(
+    authSignalKey(context.egressId, signal.grant.access),
+    {
+      ...signal,
+      createdAtMs: Date.now(),
+    },
+    ttlMs,
+  );
+}
+
+/** Record that host-side sandbox egress saw an upstream permission denial. */
+export async function setSandboxEgressPermissionDeniedSignal(
+  context: SandboxEgressCredentialContext,
+  signal: Omit<SandboxEgressPermissionDeniedSignal, "createdAtMs">,
+): Promise<void> {
+  const ttlMs = Math.max(1, context.expiresAtMs - Date.now());
+  const state = getStateAdapter();
+  await state.connect();
+  await state.set(
+    permissionSignalKey(context.egressId, signal.grant.access),
+    {
+      ...signal,
+      createdAtMs: Date.now(),
+    },
+    ttlMs,
+  );
+}
+
+/** Remove any pending host-side sandbox egress signals for a command. */
+export async function clearSandboxEgressSignals(
+  egressId: string | undefined,
+): Promise<void> {
+  if (!egressId) {
+    return;
+  }
+  const state = getStateAdapter();
+  await state.connect();
+  await Promise.all([
+    state.delete(authSignalKey(egressId, "read")),
+    state.delete(authSignalKey(egressId, "write")),
+    state.delete(permissionSignalKey(egressId, "read")),
+    state.delete(permissionSignalKey(egressId, "write")),
+  ]);
+}
+
+/** Consume the host-side sandbox egress auth signal produced during a command. */
+export async function consumeSandboxEgressAuthRequiredSignal(
+  egressId: string | undefined,
+): Promise<SandboxEgressAuthRequiredSignal | undefined> {
+  if (!egressId) {
+    return undefined;
+  }
+  const state = getStateAdapter();
+  await state.connect();
+  const [writeSignal, readSignal] = await Promise.all([
+    state.get(authSignalKey(egressId, "write")),
+    state.get(authSignalKey(egressId, "read")),
+  ]);
+  const signal =
+    parseSandboxEgressAuthRequiredSignal(writeSignal) ??
+    parseSandboxEgressAuthRequiredSignal(readSignal);
+  await Promise.all([
+    state.delete(authSignalKey(egressId, "read")),
+    state.delete(authSignalKey(egressId, "write")),
+  ]);
+  return signal;
+}
+
+/** Consume the host-side sandbox egress permission signal produced during a command. */
+export async function consumeSandboxEgressPermissionDeniedSignal(
+  egressId: string | undefined,
+): Promise<SandboxEgressPermissionDeniedSignal | undefined> {
+  if (!egressId) {
+    return undefined;
+  }
+  const state = getStateAdapter();
+  await state.connect();
+  const [writeSignal, readSignal] = await Promise.all([
+    state.get(permissionSignalKey(egressId, "write")),
+    state.get(permissionSignalKey(egressId, "read")),
+  ]);
+  const signal =
+    parseSandboxEgressPermissionDeniedSignal(writeSignal) ??
+    parseSandboxEgressPermissionDeniedSignal(readSignal);
+  await Promise.all([
+    state.delete(permissionSignalKey(egressId, "read")),
+    state.delete(permissionSignalKey(egressId, "write")),
+  ]);
+  return signal;
 }

@@ -91,6 +91,8 @@ import { createSandboxExecutor } from "@/chat/sandbox/sandbox";
 import {
   parseSandboxEgressCredentialToken,
   SANDBOX_EGRESS_PROXY_PATH,
+  setSandboxEgressAuthRequiredSignal,
+  setSandboxEgressPermissionDeniedSignal,
 } from "@/chat/sandbox/egress-session";
 import { createSandboxSessionManager } from "@/chat/sandbox/session";
 import { disconnectStateAdapter } from "@/chat/state/adapter";
@@ -855,6 +857,272 @@ describe("createSandboxExecutor", () => {
       "export SENTRY_AUTH_TOKEN='host_managed_credential'",
     );
     expect(invocation.args?.[1]).toContain("sentry-cli issues list");
+  });
+
+  it("clears stale sandbox egress signals before running bash commands", async () => {
+    const sandbox = makeSandbox("sbx_stale_auth_signal");
+    sandbox.runCommand.mockImplementationOnce(async () => ({
+      exitCode: 1,
+      stdout: async () => "",
+      stderr: async () => "command-controlled output",
+    }));
+    sandboxGetMock.mockResolvedValue(sandbox);
+    vi.mocked(createBashTool).mockResolvedValue({
+      tools: {
+        readFile: { execute: vi.fn(async () => ({ content: "" })) },
+        writeFile: { execute: vi.fn(async () => ({ success: true })) },
+      },
+    } as never);
+    await setSandboxEgressAuthRequiredSignal(
+      {
+        credentials: { actor: { type: "user", userId: "U123" } },
+        egressId: "sbx_stale_auth_signal_session",
+        expiresAtMs: Date.now() + 60_000,
+        contextId: "ctx-stale",
+      },
+      {
+        provider: "github",
+        grant: {
+          name: "user-write",
+          access: "write",
+        },
+      },
+    );
+    await setSandboxEgressPermissionDeniedSignal(
+      {
+        credentials: { actor: { type: "user", userId: "U123" } },
+        egressId: "sbx_stale_auth_signal_session",
+        expiresAtMs: Date.now() + 60_000,
+        contextId: "ctx-stale-permission",
+      },
+      {
+        provider: "github",
+        grant: {
+          name: "user-write",
+          access: "write",
+        },
+        message:
+          "github returned HTTP 403 after Junior injected the user-write grant. Junior forwarded the request; this is not a local runtime block.",
+        source: "upstream",
+        status: 403,
+        upstreamHost: "github.com",
+        upstreamPath: "/getsentry/junior.git/info/refs",
+      },
+    );
+
+    const executor = createSandboxExecutor({
+      sandboxId: "sbx_stale_auth_signal",
+    });
+    executor.configureSkills([]);
+
+    const response = await executor.execute<{
+      auth_required?: unknown;
+      exit_code: number;
+      permission_denied?: unknown;
+    }>({
+      toolName: "bash",
+      input: {
+        command: "printf stale",
+      },
+    });
+
+    expect(response.result.exit_code).toBe(1);
+    expect(response.result.auth_required).toBeUndefined();
+    expect(response.result.permission_denied).toBeUndefined();
+  });
+
+  it("attaches sandbox egress auth signals to failed bash results", async () => {
+    const sandbox = makeSandbox("sbx_fresh_auth_signal");
+    sandbox.runCommand.mockImplementationOnce(async () => {
+      await setSandboxEgressAuthRequiredSignal(
+        {
+          credentials: { actor: { type: "user", userId: "U123" } },
+          egressId: "sbx_fresh_auth_signal_session",
+          expiresAtMs: Date.now() + 60_000,
+          contextId: "ctx-fresh",
+        },
+        {
+          provider: "github",
+          grant: {
+            name: "user-write",
+            access: "write",
+          },
+        },
+      );
+      return {
+        exitCode: 1,
+        stdout: async () => "",
+        stderr: async () =>
+          "junior-auth-required provider=github grant=user-write access=write 401 unauthorized",
+      };
+    });
+    sandboxGetMock.mockResolvedValue(sandbox);
+    vi.mocked(createBashTool).mockResolvedValue({
+      tools: {
+        readFile: { execute: vi.fn(async () => ({ content: "" })) },
+        writeFile: { execute: vi.fn(async () => ({ success: true })) },
+      },
+    } as never);
+
+    const executor = createSandboxExecutor({
+      sandboxId: "sbx_fresh_auth_signal",
+    });
+    executor.configureSkills([]);
+
+    const response = await executor.execute<{
+      auth_required?: unknown;
+      exit_code: number;
+    }>({
+      toolName: "bash",
+      input: {
+        command: "gh issue create",
+      },
+    });
+
+    expect(response.result.exit_code).toBe(1);
+    expect(response.result.auth_required).toMatchObject({
+      provider: "github",
+      grant: {
+        name: "user-write",
+        access: "write",
+      },
+    });
+  });
+
+  it("attaches sandbox egress permission signals to failed bash results", async () => {
+    const sandbox = makeSandbox("sbx_permission_signal");
+    sandbox.runCommand.mockImplementationOnce(async () => {
+      await setSandboxEgressPermissionDeniedSignal(
+        {
+          credentials: { actor: { type: "user", userId: "U123" } },
+          egressId: "sbx_permission_signal_session",
+          expiresAtMs: Date.now() + 60_000,
+          contextId: "ctx-permission",
+        },
+        {
+          provider: "github",
+          grant: {
+            name: "user-write",
+            access: "write",
+            reason: "github.git-write",
+          },
+          message:
+            "github returned HTTP 403 after Junior injected the user-write grant. Junior forwarded the request; this is not a local runtime block.",
+          source: "upstream",
+          status: 403,
+          upstreamHost: "github.com",
+          upstreamPath: "/getsentry/junior.git/info/refs",
+          acceptedPermissions: "contents=write",
+        },
+      );
+      return {
+        exitCode: 1,
+        stdout: async () => "",
+        stderr: async () => "remote: Permission denied",
+      };
+    });
+    sandboxGetMock.mockResolvedValue(sandbox);
+    vi.mocked(createBashTool).mockResolvedValue({
+      tools: {
+        readFile: { execute: vi.fn(async () => ({ content: "" })) },
+        writeFile: { execute: vi.fn(async () => ({ success: true })) },
+      },
+    } as never);
+
+    const executor = createSandboxExecutor({
+      sandboxId: "sbx_permission_signal",
+    });
+    executor.configureSkills([]);
+
+    const response = await executor.execute<{
+      exit_code: number;
+      permission_denied?: unknown;
+    }>({
+      toolName: "bash",
+      input: {
+        command: "git push",
+      },
+    });
+
+    expect(response.result.exit_code).toBe(1);
+    expect(response.result.permission_denied).toMatchObject({
+      provider: "github",
+      grant: {
+        name: "user-write",
+        access: "write",
+        reason: "github.git-write",
+      },
+      message:
+        "github returned HTTP 403 after Junior injected the user-write grant. Junior forwarded the request; this is not a local runtime block.",
+      source: "upstream",
+      status: 403,
+      upstreamHost: "github.com",
+      upstreamPath: "/getsentry/junior.git/info/refs",
+      acceptedPermissions: "contents=write",
+    });
+  });
+
+  it("prefers write sandbox egress auth signals over read signals", async () => {
+    const sandbox = makeSandbox("sbx_mixed_auth_signal");
+    sandbox.runCommand.mockImplementationOnce(async () => {
+      const context = {
+        credentials: { actor: { type: "user" as const, userId: "U123" } },
+        egressId: "sbx_mixed_auth_signal_session",
+        expiresAtMs: Date.now() + 60_000,
+        contextId: "ctx-mixed",
+      };
+      await setSandboxEgressAuthRequiredSignal(context, {
+        provider: "github",
+        grant: {
+          name: "user-write",
+          access: "write",
+        },
+      });
+      await setSandboxEgressAuthRequiredSignal(context, {
+        provider: "github",
+        grant: {
+          name: "installation-read",
+          access: "read",
+        },
+      });
+      return {
+        exitCode: 1,
+        stdout: async () => "",
+        stderr: async () =>
+          "junior-auth-required provider=github grant=user-write access=write 401 unauthorized",
+      };
+    });
+    sandboxGetMock.mockResolvedValue(sandbox);
+    vi.mocked(createBashTool).mockResolvedValue({
+      tools: {
+        readFile: { execute: vi.fn(async () => ({ content: "" })) },
+        writeFile: { execute: vi.fn(async () => ({ success: true })) },
+      },
+    } as never);
+
+    const executor = createSandboxExecutor({
+      sandboxId: "sbx_mixed_auth_signal",
+    });
+    executor.configureSkills([]);
+
+    const response = await executor.execute<{
+      auth_required?: unknown;
+      exit_code: number;
+    }>({
+      toolName: "bash",
+      input: {
+        command: "gh issue create",
+      },
+    });
+
+    expect(response.result.exit_code).toBe(1);
+    expect(response.result.auth_required).toMatchObject({
+      provider: "github",
+      grant: {
+        name: "user-write",
+        access: "write",
+      },
+    });
   });
 
   it("configures lazy system actor credential context for sandbox egress", async () => {

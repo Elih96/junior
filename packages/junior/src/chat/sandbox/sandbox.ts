@@ -10,7 +10,14 @@ import {
   buildSandboxEgressNetworkPolicy,
   resolveSandboxCommandEnvironment,
 } from "@/chat/sandbox/egress-policy";
-import { createSandboxEgressCredentialToken } from "@/chat/sandbox/egress-session";
+import {
+  clearSandboxEgressSignals,
+  consumeSandboxEgressAuthRequiredSignal,
+  consumeSandboxEgressPermissionDeniedSignal,
+  createSandboxEgressCredentialToken,
+  type SandboxEgressAuthRequiredSignal,
+  type SandboxEgressPermissionDeniedSignal,
+} from "@/chat/sandbox/egress-session";
 import type { CredentialContext } from "@/chat/credentials/context";
 import {
   isSandboxCommandStreamInterruptedError,
@@ -63,6 +70,8 @@ export interface BashCustomCommandResult {
   stderr: string;
   stdout_truncated: boolean;
   stderr_truncated: boolean;
+  auth_required?: SandboxEgressAuthRequiredSignal;
+  permission_denied?: SandboxEgressPermissionDeniedSignal;
 }
 
 export interface SandboxAcquiredState {
@@ -225,6 +234,8 @@ export function createSandboxExecutor(options?: {
       "app.sandbox.command_length": command.length,
     });
     const executeBash = (await sessionManager.ensureToolExecutors()).bash;
+    const activeEgressId = sessionManager.getSandboxEgressId();
+    await clearSandboxEgressSignals(activeEgressId);
     const result = await withSandboxSpan(
       "bash",
       "process.exec",
@@ -265,6 +276,14 @@ export function createSandboxExecutor(options?: {
         }
       },
     );
+    const authRequired =
+      result.exitCode !== 0
+        ? await consumeSandboxEgressAuthRequiredSignal(activeEgressId)
+        : undefined;
+    const permissionDenied =
+      result.exitCode !== 0
+        ? await consumeSandboxEgressPermissionDeniedSignal(activeEgressId)
+        : undefined;
 
     return {
       result: {
@@ -278,6 +297,8 @@ export function createSandboxExecutor(options?: {
         stderr: result.stderr,
         stdout_truncated: result.stdoutTruncated,
         stderr_truncated: result.stderrTruncated,
+        ...(authRequired ? { auth_required: authRequired } : {}),
+        ...(permissionDenied ? { permission_denied: permissionDenied } : {}),
       } as T,
     };
   };

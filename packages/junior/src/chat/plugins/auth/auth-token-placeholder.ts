@@ -1,16 +1,12 @@
-import type { GitHubAppCredentials, OAuthBearerCredentials } from "../types";
+import type { OAuthBearerCredentials } from "../types";
 
-const DEFAULT_PLACEHOLDERS: Record<
-  OAuthBearerCredentials["type"] | GitHubAppCredentials["type"],
-  string
-> = {
+const DEFAULT_PLACEHOLDERS: Record<OAuthBearerCredentials["type"], string> = {
   "oauth-bearer": "host_managed_credential",
-  "github-app": "ghp_host_managed_credential",
 };
 
 /** Resolve the non-secret sandbox token placeholder for token-backed credentials. */
 export function resolveAuthTokenPlaceholder(
-  credentials: OAuthBearerCredentials | GitHubAppCredentials,
+  credentials: OAuthBearerCredentials,
 ): string {
   return (
     credentials.authTokenPlaceholder?.trim() ||

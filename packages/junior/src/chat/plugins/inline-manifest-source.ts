@@ -51,16 +51,6 @@ function inlineCredentialsSource(
     "auth-token-placeholder",
     credentials.authTokenPlaceholder,
   );
-  if (credentials.type === "github-app") {
-    setDefined(result, "app-id-env", credentials.appIdEnv);
-    setDefined(result, "private-key-env", credentials.privateKeyEnv);
-    setDefined(result, "installation-id-env", credentials.installationIdEnv);
-    setDefined(
-      result,
-      "system-read-permissions",
-      credentials.systemReadPermissions,
-    );
-  }
   return result;
 }
 
@@ -91,6 +81,11 @@ function inlineOauthSource(oauth: PluginManifest["oauth"]): unknown {
   setDefined(result, "authorize-params", oauth.authorizeParams);
   setDefined(result, "token-auth-method", oauth.tokenAuthMethod);
   setDefined(result, "token-extra-headers", oauth.tokenExtraHeaders);
+  setDefined(
+    result,
+    "treat-empty-scope-as-unreported",
+    oauth.treatEmptyScopeAsUnreported,
+  );
   return result;
 }
 

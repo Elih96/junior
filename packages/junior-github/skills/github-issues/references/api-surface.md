@@ -8,9 +8,9 @@ When the user omits `owner/repo`, resolve `github.repo` first with `jr-rpc confi
 Run `jr-rpc config get github.repo` as a standalone bash command. Never chain it with `cd`, `&&`, pipes, or a `gh` command.
 Treat explicit repo flags as command-targeting safety rails, not as a credential-scoping mechanism.
 
-## Capability to command mapping
+## GitHub App permission guidance
 
-| Capability            | Commands                                                                                    |
+| Permission capability | Commands                                                                                    |
 | --------------------- | ------------------------------------------------------------------------------------------- |
 | `github.issues.read`  | `gh issue view`, `gh api /repos/.../comments`                                               |
 | `github.issues.write` | `gh issue create`, `gh issue edit`, `gh issue comment`, `gh issue close`, `gh issue reopen` |
@@ -43,4 +43,4 @@ jr-rpc config set github.repo owner/repo
 - Use `gh api` for endpoints not fully covered by `gh issue` subcommands.
 - For automation, always fully specify `gh issue create` with `--title` and `--body` or `--body-file`; never rely on interactive prompts.
 - Keep `--repo owner/repo` explicit when working across repositories.
-- Return actionable errors for auth, permission, not-found, and validation failures.
+- Return actionable errors for access, permission, not-found, and validation failures.

@@ -20,6 +20,7 @@
   "files": [
     "index.d.ts",
     "index.js",
+    "permissions.js",
     "skills",
     "SETUP.md"
   ],

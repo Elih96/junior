@@ -129,7 +129,7 @@ describe("sentry credential broker (oauth-bearer plugin)", () => {
 
   it("merges plugin-level API headers with token-backed credential headers", async () => {
     process.env.SENTRY_AUTH_TOKEN = "static-env-token";
-    process.env.SENTRY_EXTRA_AUTH = "PluginManaged value";
+    process.env.SENTRY_EXTRA_AUTH = "ExtraHeader value";
     const manifest: PluginManifest = {
       ...SENTRY_MANIFEST,
       domains: ["uploads.sentry.io", "us.sentry.io"],
@@ -153,7 +153,7 @@ describe("sentry credential broker (oauth-bearer plugin)", () => {
       {
         domain: "uploads.sentry.io",
         headers: {
-          Authorization: "PluginManaged value",
+          Authorization: "ExtraHeader value",
           "X-Sentry-Mode": "sandbox",
         },
       },
@@ -225,6 +225,64 @@ describe("sentry credential broker (oauth-bearer plugin)", () => {
     const stored = await tokenStore.get("U123", "sentry");
     expect(stored?.accessToken).toBe("new-access-token");
     expect(stored?.refreshToken).toBe("new-refresh-token");
+  });
+
+  it("does not issue a stale lease when token refresh is rejected", async () => {
+    process.env.SENTRY_CLIENT_ID = "client-id";
+    process.env.SENTRY_CLIENT_SECRET = "client-secret";
+
+    const tokenStore = createMockTokenStore({
+      "U123:sentry": {
+        accessToken: "old-access-token",
+        refreshToken: "old-refresh-token",
+        expiresAt: Date.now() + 2 * 60 * 1000,
+        scope: SENTRY_SCOPE,
+      },
+    });
+
+    globalThis.fetch = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ error: "invalid_grant" }), {
+          status: 400,
+        }),
+    ) as unknown as typeof fetch;
+
+    const broker = createBroker(tokenStore);
+    await expect(
+      broker.issue({
+        context: USER_CREDENTIAL_CONTEXT,
+        reason: "test:refresh-failure",
+      }),
+    ).rejects.toThrow(CredentialUnavailableError);
+  });
+
+  it("surfaces operational token refresh failures", async () => {
+    process.env.SENTRY_CLIENT_ID = "client-id";
+    process.env.SENTRY_CLIENT_SECRET = "client-secret";
+
+    const tokenStore = createMockTokenStore({
+      "U123:sentry": {
+        accessToken: "old-access-token",
+        refreshToken: "old-refresh-token",
+        expiresAt: Date.now() + 2 * 60 * 1000,
+        scope: SENTRY_SCOPE,
+      },
+    });
+
+    globalThis.fetch = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ error: "server_error" }), {
+          status: 500,
+        }),
+    ) as unknown as typeof fetch;
+
+    const broker = createBroker(tokenStore);
+    await expect(
+      broker.issue({
+        context: USER_CREDENTIAL_CONTEXT,
+        reason: "test:refresh-failure",
+      }),
+    ).rejects.toThrow("Token refresh failed: 500 server_error");
   });
 
   it("requires stored tokens to include the configured OAuth scope", async () => {

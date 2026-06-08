@@ -156,7 +156,7 @@ function reporting(): JuniorReporting {
     },
     async getPluginOperationalReports() {
       return {
-        source: "trusted_plugins",
+        source: "plugins",
         generatedAt: "2026-05-29T00:00:00.000Z",
         reports: [
           {
@@ -577,7 +577,7 @@ describe("dashboard routes", () => {
           metrics: [{ label: "active", value: "1" }],
         },
       ],
-      source: "trusted_plugins",
+      source: "plugins",
     });
   });
 
@@ -663,7 +663,7 @@ describe("dashboard routes", () => {
     expect(pluginReports.status).toBe(200);
     expect(await pluginReports.json()).toMatchObject({
       reports: [],
-      source: "trusted_plugins",
+      source: "plugins",
     });
   });
 
@@ -691,7 +691,7 @@ describe("dashboard routes", () => {
 
     expect(pluginReports.status).toBe(500);
     expect(await pluginReports.json()).toEqual({
-      error: "Trusted plugin stats failed to load.",
+      error: "Plugin stats failed to load.",
     });
   });
 
@@ -958,7 +958,7 @@ describe("dashboard routes", () => {
     expect(oldInfo.status).toBe(404);
   });
 
-  it("mounts dashboard routes through the trusted plugin array", async () => {
+  it("mounts dashboard routes through the plugin array", async () => {
     const app = await createApp({
       plugins: defineJuniorPlugins([
         juniorDashboardPlugin({
