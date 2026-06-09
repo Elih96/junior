@@ -27,10 +27,7 @@ import { isExternalSlackUser } from "@/chat/ingress/workspace-membership";
 import { runWithWorkspaceTeamId } from "@/chat/slack/workspace-context";
 import { getStateAdapter } from "@/chat/state/adapter";
 import { handleSlashCommand } from "@/chat/ingress/slash-command";
-import {
-  buildActorIdentity,
-  parseActorUserId,
-} from "@/chat/services/requester-identity";
+import { createRequester, parseActorUserId } from "@/chat/requester";
 import { createUserTokenStore } from "@/chat/capabilities/factory";
 import { unlinkProvider } from "@/chat/credentials/unlink-provider";
 import type { UserTokenStore } from "@/chat/credentials/user-token-store";
@@ -443,13 +440,16 @@ async function handleSlashCommandForm(args: {
     args.params.get("user_id"),
     "Slack slash command payload",
   );
-  const userIdentity = buildActorIdentity(
+  const teamId = args.params.get("team_id") ?? undefined;
+  const userIdentity = createRequester(
     {
+      platform: "slack",
+      teamId,
       userId,
       userName: args.params.get("user_name") ?? undefined,
       fullName: args.params.get("user_name") ?? undefined,
     },
-    userId,
+    { teamId, userId },
   );
   if (!userIdentity?.userId) {
     throw new Error("Slack slash command payload actor identity is invalid");

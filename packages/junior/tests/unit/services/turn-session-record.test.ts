@@ -149,6 +149,122 @@ describe("persistAuthPauseSessionRecord", () => {
     });
   });
 
+  it("persists requester identity when updating an unchanged projection", async () => {
+    const { getAgentTurnSessionRecord, upsertAgentTurnSessionRecord } =
+      await import("@/chat/state/turn-session");
+
+    const userMessage: PiMessage = {
+      role: "user",
+      content: [{ type: "text", text: "keep going" }],
+      timestamp: 1,
+    } as PiMessage;
+
+    await upsertAgentTurnSessionRecord({
+      conversationId: "conversation-requester-empty-commit",
+      sessionId: "turn-requester-empty-commit",
+      sliceId: 1,
+      state: "awaiting_resume",
+      piMessages: [userMessage],
+      resumeReason: "timeout",
+    });
+    await upsertAgentTurnSessionRecord({
+      conversationId: "conversation-requester-empty-commit",
+      sessionId: "turn-requester-empty-commit",
+      sliceId: 2,
+      state: "awaiting_resume",
+      piMessages: [userMessage],
+      requester: {
+        slackUserId: "U123",
+        slackUserName: "alice",
+        fullName: "Alice Example",
+        email: "alice@sentry.io",
+      },
+      resumeReason: "timeout",
+    });
+
+    await expect(
+      getAgentTurnSessionRecord(
+        "conversation-requester-empty-commit",
+        "turn-requester-empty-commit",
+      ),
+    ).resolves.toMatchObject({
+      requester: {
+        slackUserId: "U123",
+        slackUserName: "alice",
+        fullName: "Alice Example",
+        email: "alice@sentry.io",
+      },
+      piMessages: [userMessage],
+    });
+  });
+
+  it("persists turn transcript scope and requester in the session log", async () => {
+    const {
+      getAgentTurnSessionRecord,
+      listAgentTurnSessionSummariesForConversation,
+      upsertAgentTurnSessionRecord,
+    } = await import("@/chat/state/turn-session");
+    const { loadProjectionWithRequester } =
+      await import("@/chat/state/session-log");
+
+    const previousQuestion: PiMessage = {
+      role: "user",
+      content: [{ type: "text", text: "previous question" }],
+      timestamp: 1,
+    } as PiMessage;
+    const currentQuestion: PiMessage = {
+      role: "user",
+      content: [{ type: "text", text: "current question" }],
+      timestamp: 2,
+    } as PiMessage;
+
+    await upsertAgentTurnSessionRecord({
+      conversationId: "conversation-turn-scope",
+      sessionId: "turn-scope",
+      sliceId: 1,
+      state: "running",
+      piMessages: [previousQuestion, currentQuestion],
+      requester: {
+        slackUserId: "U123",
+        slackUserName: "alice",
+      },
+      turnStartMessageIndex: 1,
+    });
+    await upsertAgentTurnSessionRecord({
+      conversationId: "conversation-turn-scope",
+      sessionId: "turn-scope",
+      sliceId: 2,
+      state: "completed",
+      piMessages: [previousQuestion, currentQuestion],
+    });
+
+    await expect(
+      getAgentTurnSessionRecord("conversation-turn-scope", "turn-scope"),
+    ).resolves.toMatchObject({
+      requester: {
+        slackUserId: "U123",
+        slackUserName: "alice",
+      },
+      turnStartMessageIndex: 1,
+      piMessages: [previousQuestion, currentQuestion],
+    });
+    await expect(
+      loadProjectionWithRequester({
+        conversationId: "conversation-turn-scope",
+      }),
+    ).resolves.toMatchObject({
+      requester: {
+        slackUserId: "U123",
+        slackUserName: "alice",
+      },
+      messages: [previousQuestion, currentQuestion],
+    });
+    const summaries = await listAgentTurnSessionSummariesForConversation(
+      "conversation-turn-scope",
+    );
+    expect(summaries[0]).not.toHaveProperty("turnStartMessageIndex");
+  });
+
   it("carries cumulative diagnostics across pause records", async () => {
     const { persistTimeoutSessionRecord } =
       await import("@/chat/services/turn-session-record");
@@ -206,10 +322,8 @@ describe("persistAuthPauseSessionRecord", () => {
   });
 
   it("fails timeout sessions instead of scheduling beyond the slice cap", async () => {
-    const {
-      AGENT_TURN_TIMEOUT_RESUME_MAX_SLICES,
-      persistTimeoutSessionRecord,
-    } = await import("@/chat/services/turn-session-record");
+    const { AGENT_CONTINUE_MAX_SLICES, persistTimeoutSessionRecord } =
+      await import("@/chat/services/turn-session-record");
     const { getAgentTurnSessionRecord, upsertAgentTurnSessionRecord } =
       await import("@/chat/state/turn-session");
 
@@ -224,7 +338,7 @@ describe("persistAuthPauseSessionRecord", () => {
     await upsertAgentTurnSessionRecord({
       conversationId: "conversation-timeout-cap",
       sessionId: "turn-timeout-cap",
-      sliceId: AGENT_TURN_TIMEOUT_RESUME_MAX_SLICES,
+      sliceId: AGENT_CONTINUE_MAX_SLICES,
       state: "awaiting_resume",
       piMessages,
       resumeReason: "timeout",
@@ -235,7 +349,7 @@ describe("persistAuthPauseSessionRecord", () => {
       persistTimeoutSessionRecord({
         conversationId: "conversation-timeout-cap",
         sessionId: "turn-timeout-cap",
-        currentSliceId: AGENT_TURN_TIMEOUT_RESUME_MAX_SLICES,
+        currentSliceId: AGENT_CONTINUE_MAX_SLICES,
         currentDurationMs: 3_000,
         messages: piMessages,
         errorMessage: "timed out again",
@@ -245,7 +359,7 @@ describe("persistAuthPauseSessionRecord", () => {
       }),
     ).resolves.toMatchObject({
       state: "failed",
-      sliceId: AGENT_TURN_TIMEOUT_RESUME_MAX_SLICES,
+      sliceId: AGENT_CONTINUE_MAX_SLICES,
       cumulativeDurationMs: 15_000,
       errorMessage: expect.stringContaining("slice limit"),
       piMessages,
@@ -255,7 +369,7 @@ describe("persistAuthPauseSessionRecord", () => {
       getAgentTurnSessionRecord("conversation-timeout-cap", "turn-timeout-cap"),
     ).resolves.toMatchObject({
       state: "failed",
-      sliceId: AGENT_TURN_TIMEOUT_RESUME_MAX_SLICES,
+      sliceId: AGENT_CONTINUE_MAX_SLICES,
       cumulativeDurationMs: 15_000,
       errorMessage: expect.stringContaining("slice limit"),
       piMessages,

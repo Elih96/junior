@@ -49,10 +49,13 @@ import {
 } from "@/chat/state/turn-session";
 import { recordAuthorizationCompleted } from "@/chat/state/session-log";
 import { isRetryableTurnError, markTurnFailed } from "@/chat/runtime/turn";
-import { scheduleTurnTimeoutResume } from "@/chat/services/timeout-resume";
+import { scheduleAgentContinue } from "@/chat/services/agent-continue";
 import { htmlCallbackResponse } from "@/handlers/oauth-html";
 import type { WaitUntilFn } from "@/handlers/types";
-import { lookupSlackActorIdentity } from "@/chat/slack/user";
+import {
+  createRequesterFromStoredSlackRequester,
+  type Requester,
+} from "@/chat/requester";
 
 const CALLBACK_PAGES = {
   missing_state: {
@@ -294,6 +297,23 @@ async function resumeAuthorizedMcpTurn(args: {
       const lockedChannelConfiguration = getChannelConfigurationServiceById(
         authSession.channelId!,
       );
+      let requester: Requester;
+      try {
+        requester = createRequesterFromStoredSlackRequester({
+          requester: lockedSessionRecord.requester,
+          teamId: destination.teamId,
+          userId: authSession.userId,
+        });
+      } catch {
+        await failAgentTurnSessionRecord({
+          conversationId: authSession.conversationId,
+          expectedVersion: lockedSessionRecord.version,
+          sessionId: lockedSessionId,
+          errorMessage:
+            "Stored Slack requester identity did not match OAuth requester",
+        });
+        return false;
+      }
 
       await recordAuthorizationCompleted({
         conversationId: authSession.conversationId,
@@ -306,14 +326,13 @@ async function resumeAuthorizedMcpTurn(args: {
         }),
         ttlMs: THREAD_STATE_TTL_MS,
       });
-      const requester = await lookupSlackActorIdentity(authSession.userId);
 
       return {
         messageText: lockedUserMessage.text,
         messageTs: getTurnUserSlackMessageTs(lockedUserMessage),
         replyContext: {
           credentialContext: {
-            actor: { type: "user", userId: authSession.userId },
+            actor: { type: "user", userId: requester.userId },
           },
           requester,
           destination,
@@ -322,7 +341,7 @@ async function resumeAuthorizedMcpTurn(args: {
             turnId: lockedSessionId,
             channelId: authSession.channelId,
             threadTs: authSession.threadTs,
-            requesterId: authSession.userId,
+            requesterId: requester.userId,
           },
           toolChannelId:
             authSession.toolChannelId ??
@@ -400,16 +419,16 @@ async function resumeAuthorizedMcpTurn(args: {
           );
         },
         onTimeoutPause: async (error: unknown) => {
-          if (!isRetryableTurnError(error, "turn_timeout_resume")) {
+          if (!isRetryableTurnError(error, "agent_continue")) {
             throw error;
           }
           const version = error.metadata?.version;
           if (typeof version !== "number") {
             throw new Error(
-              "Timed-out MCP resume did not include a turn-session version",
+              "MCP OAuth agent continuation did not include a session record version",
             );
           }
-          await scheduleTurnTimeoutResume({
+          await scheduleAgentContinue({
             conversationId: authSession.conversationId,
             destination,
             sessionId: lockedSessionId,

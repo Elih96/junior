@@ -2,9 +2,9 @@ import {
   getAgentTurnSessionRecord,
   upsertAgentTurnSessionRecord,
   type AgentTurnSessionRecord,
-  type AgentTurnRequester,
   type AgentTurnSurface,
 } from "@/chat/state/turn-session";
+import type { StoredSlackRequester } from "@/chat/requester";
 import type { Destination } from "@sentry/junior-plugin-api";
 import { getActiveTraceId, logException } from "@/chat/logging";
 import type { PiMessage } from "@/chat/pi/messages";
@@ -14,7 +14,7 @@ import {
 } from "@/chat/respond-helpers";
 import { addAgentTurnUsage, type AgentTurnUsage } from "@/chat/usage";
 
-export const AGENT_TURN_TIMEOUT_RESUME_MAX_SLICES = 48;
+export const AGENT_CONTINUE_MAX_SLICES = 48;
 
 export interface TurnSessionContext {
   conversationId?: string;
@@ -136,8 +136,9 @@ export async function persistRunningSessionRecord(args: {
   messages: PiMessage[];
   loadedSkillNames?: string[];
   logContext: SessionRecordLogContext;
-  requester?: AgentTurnRequester;
+  requester?: StoredSlackRequester;
   surface?: AgentTurnSurface;
+  turnStartMessageIndex?: number;
 }): Promise<boolean> {
   if (args.messages.length === 0 || !isContinuableBoundary(args.messages)) {
     return false;
@@ -174,6 +175,14 @@ export async function persistRunningSessionRecord(args: {
       ...((getActiveTraceId() ?? latestSessionRecord?.traceId)
         ? { traceId: getActiveTraceId() ?? latestSessionRecord?.traceId }
         : {}),
+      ...((args.turnStartMessageIndex ??
+        latestSessionRecord?.turnStartMessageIndex) !== undefined
+        ? {
+            turnStartMessageIndex:
+              args.turnStartMessageIndex ??
+              latestSessionRecord?.turnStartMessageIndex,
+          }
+        : {}),
     });
     return true;
   } catch (recordError) {
@@ -202,8 +211,9 @@ export async function persistCompletedSessionRecord(args: {
   allMessages: PiMessage[];
   loadedSkillNames?: string[];
   logContext: SessionRecordLogContext;
-  requester?: AgentTurnRequester;
+  requester?: StoredSlackRequester;
   surface?: AgentTurnSurface;
+  turnStartMessageIndex?: number;
 }): Promise<void> {
   try {
     const latestSessionRecord = await getAgentTurnSessionRecord(
@@ -242,6 +252,14 @@ export async function persistCompletedSessionRecord(args: {
       ...((getActiveTraceId() ?? latestSessionRecord?.traceId)
         ? { traceId: getActiveTraceId() ?? latestSessionRecord?.traceId }
         : {}),
+      ...((args.turnStartMessageIndex ??
+        latestSessionRecord?.turnStartMessageIndex) !== undefined
+        ? {
+            turnStartMessageIndex:
+              args.turnStartMessageIndex ??
+              latestSessionRecord?.turnStartMessageIndex,
+          }
+        : {}),
     });
   } catch (recordError) {
     logSessionRecordError(
@@ -272,7 +290,7 @@ export async function persistAuthPauseSessionRecord(args: {
   loadedSkillNames?: string[];
   errorMessage: string;
   logContext: SessionRecordLogContext;
-  requester?: AgentTurnRequester;
+  requester?: StoredSlackRequester;
   surface?: AgentTurnSurface;
 }): Promise<AgentTurnSessionRecord | undefined> {
   const nextSliceId = args.currentSliceId + 1;
@@ -355,7 +373,7 @@ export async function persistTimeoutSessionRecord(args: {
   loadedSkillNames?: string[];
   errorMessage: string;
   logContext: SessionRecordLogContext;
-  requester?: AgentTurnRequester;
+  requester?: StoredSlackRequester;
   surface?: AgentTurnSurface;
 }): Promise<AgentTurnSessionRecord | undefined> {
   const nextSliceId = args.currentSliceId + 1;
@@ -380,7 +398,7 @@ export async function persistTimeoutSessionRecord(args: {
       latestSessionRecord?.cumulativeUsage,
       args.currentUsage,
     );
-    if (nextSliceId > AGENT_TURN_TIMEOUT_RESUME_MAX_SLICES) {
+    if (nextSliceId > AGENT_CONTINUE_MAX_SLICES) {
       return await upsertAgentTurnSessionRecord({
         ...((args.channelName ?? latestSessionRecord?.channelName)
           ? {
@@ -407,7 +425,7 @@ export async function persistTimeoutSessionRecord(args: {
           : {}),
         resumeReason: "timeout",
         resumedFromSliceId: latestSessionRecord?.resumedFromSliceId,
-        errorMessage: `Turn exceeded timeout resume slice limit (${AGENT_TURN_TIMEOUT_RESUME_MAX_SLICES})`,
+        errorMessage: `Agent continuation exceeded slice limit (${AGENT_CONTINUE_MAX_SLICES})`,
         ...((args.requester ?? latestSessionRecord?.requester)
           ? { requester: args.requester ?? latestSessionRecord?.requester }
           : {}),
@@ -449,13 +467,13 @@ export async function persistTimeoutSessionRecord(args: {
   } catch (recordError) {
     logSessionRecordError(
       recordError,
-      "agent_turn_timeout_resume_session_record_failed",
+      "agent_continue_session_record_failed",
       args,
       {
         "app.ai.resume_from_slice_id": args.currentSliceId,
         "app.ai.resume_next_slice_id": nextSliceId,
       },
-      "Failed to persist timeout session record before scheduling resume",
+      "Failed to persist session record before scheduling agent continuation",
     );
     return undefined;
   }
@@ -476,7 +494,7 @@ export async function persistYieldSessionRecord(args: {
   loadedSkillNames?: string[];
   errorMessage: string;
   logContext: SessionRecordLogContext;
-  requester?: AgentTurnRequester;
+  requester?: StoredSlackRequester;
   surface?: AgentTurnSurface;
 }): Promise<AgentTurnSessionRecord | undefined> {
   try {

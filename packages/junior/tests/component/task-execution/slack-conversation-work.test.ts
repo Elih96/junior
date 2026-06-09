@@ -16,6 +16,7 @@ import { createSlackConversationWorker } from "@/chat/task-execution/slack-work"
 import { getMessageActorIdentity } from "@/chat/services/message-actor-identity";
 import { disconnectStateAdapter, getStateAdapter } from "@/chat/state/adapter";
 import {
+  failAgentTurnSessionRecord,
   getAgentTurnSessionRecord,
   upsertAgentTurnSessionRecord,
 } from "@/chat/state/turn-session";
@@ -53,7 +54,8 @@ function processNextQueuedSlackWork(args: ProcessQueuedSlackWorkArgs) {
     run: createSlackConversationWorker({
       getSlackAdapter: args.getSlackAdapter,
       lookupSlackUser: args.lookupSlackUser,
-      resumeAwaitingContinuation: args.resumeAwaitingContinuation,
+      resumeAwaitingContinuation:
+        args.resumeAwaitingContinuation ?? (async () => false),
       runtime: args.runtime,
       state: args.state,
     }),
@@ -323,7 +325,7 @@ describe("Slack conversation work execution", () => {
     });
   });
 
-  it("binds resolved Slack actor identity before runtime handling", async () => {
+  it("binds resolved Slack requester before runtime handling", async () => {
     const queue = createConversationWorkQueueTestAdapter();
     const state = getStateAdapter();
     await state.connect();
@@ -377,6 +379,8 @@ describe("Slack conversation work execution", () => {
     expect(getMessageActorIdentity(capturedMessage!)).toEqual({
       email: "david@example.com",
       fullName: "David Cramer",
+      platform: "slack",
+      teamId: "T123",
       userId: "U123",
       userName: "dcramer",
     });
@@ -470,7 +474,7 @@ describe("Slack conversation work execution", () => {
     });
   });
 
-  it("processes pending Slack follow-ups when no continuation starts", async () => {
+  it("processes pending Slack follow-ups before checking idle continuations", async () => {
     const queue = createConversationWorkQueueTestAdapter();
     const state = getStateAdapter();
     await state.connect();
@@ -512,7 +516,7 @@ describe("Slack conversation work execution", () => {
       }),
     ).resolves.toEqual({ status: "completed" });
 
-    expect(resumeAwaitingContinuation).toHaveBeenCalledWith(CONVERSATION_ID);
+    expect(resumeAwaitingContinuation).not.toHaveBeenCalled();
     expect(calls).toEqual([expect.stringContaining("follow-up")]);
     const work = await getConversationWorkState({
       conversationId: CONVERSATION_ID,
@@ -521,12 +525,13 @@ describe("Slack conversation work execution", () => {
     expect(work ? countPendingConversationMessages(work) : 0).toBe(0);
   });
 
-  it("resumes awaiting continuations before routing pending Slack follow-ups", async () => {
+  it("routes pending Slack follow-ups before awaiting continuations", async () => {
     const queue = createConversationWorkQueueTestAdapter();
     const state = getStateAdapter();
     await state.connect();
     const slackAdapter = createSlackAdapterFixture();
     const resumeAwaitingContinuation = vi.fn(async () => true);
+    const calls: string[] = [];
 
     await handleSlackWebhookAndFlush({
       request: slackWebhookRequest(
@@ -552,8 +557,9 @@ describe("Slack conversation work execution", () => {
         queue,
         resumeAwaitingContinuation,
         runtime: {
-          handleNewMention: async () => {
-            throw new Error("pending follow-up should wait for resume");
+          handleNewMention: async (_thread, message, hooks) => {
+            await hooks.onInputCommitted?.();
+            calls.push(message.text);
           },
           handleSubscribedMessage: async () => {
             throw new Error("unexpected subscribed route");
@@ -561,23 +567,18 @@ describe("Slack conversation work execution", () => {
         },
         state,
       }),
-    ).resolves.toEqual({ status: "pending_requeued" });
+    ).resolves.toEqual({ status: "completed" });
 
-    expect(resumeAwaitingContinuation).toHaveBeenCalledWith(CONVERSATION_ID);
-    expect(queue.sentRecords()).toEqual([
-      expect.objectContaining({
-        conversationId: CONVERSATION_ID,
-        idempotencyKey: `pending:${CONVERSATION_ID}:3500`,
-      }),
-    ]);
+    expect(resumeAwaitingContinuation).not.toHaveBeenCalled();
+    expect(calls).toEqual([expect.stringContaining("follow-up")]);
+    expect(queue.sentRecords()).toEqual([]);
     const work = await getConversationWorkState({
       conversationId: CONVERSATION_ID,
       state,
     });
     expect(work?.lease).toBeUndefined();
-    expect(work?.needsRun).toBe(true);
-    expect(work ? countPendingConversationMessages(work) : 0).toBe(1);
-    expect(work?.messages[0]?.injectedAtMs).toBeUndefined();
+    expect(work?.needsRun).toBe(false);
+    expect(work ? countPendingConversationMessages(work) : 0).toBe(0);
   });
 
   it("drains Slack messages that arrive during an active turn into steering", async () => {
@@ -641,9 +642,10 @@ describe("Slack conversation work execution", () => {
       conversationId: CONVERSATION_ID,
       state,
     });
-    expect(work?.messages.map((message) => message.injectedAtMs)).toEqual([
-      expect.any(Number),
-      expect.any(Number),
+    expect(work?.messages).toEqual([]);
+    expect(work?.execution.inboundMessageIds).toEqual([
+      "slack:T123:slack:C123:1712345.0001:1712345.0001",
+      "slack:T123:slack:C123:1712345.0001:1712345.0002",
     ]);
     expect(work ? countPendingConversationMessages(work) : 0).toBe(0);
     await expectRemainingQueuedSlackWorkIsNoop({
@@ -737,7 +739,7 @@ describe("Slack conversation work execution", () => {
       nowMs: 1_000,
       state,
     });
-    await upsertAgentTurnSessionRecord({
+    const sessionRecord = await upsertAgentTurnSessionRecord({
       conversationId: CONVERSATION_ID,
       sessionId: "turn-invalid-timeout",
       sliceId: 1,
@@ -753,6 +755,16 @@ describe("Slack conversation work execution", () => {
         state,
         run: createSlackConversationWorker({
           getSlackAdapter: () => slackAdapter,
+          resumeAwaitingContinuation: async () => {
+            await failAgentTurnSessionRecord({
+              conversationId: CONVERSATION_ID,
+              expectedVersion: sessionRecord.version,
+              sessionId: "turn-invalid-timeout",
+              errorMessage:
+                "Awaiting agent continuation metadata could not be materialized",
+            });
+            return false;
+          },
           runtime: {
             handleNewMention: async () => {
               throw new Error("injected messages should not replay");
@@ -778,7 +790,7 @@ describe("Slack conversation work execution", () => {
     ).resolves.toMatchObject({
       state: "failed",
       errorMessage:
-        "Awaiting turn continuation metadata could not be materialized",
+        "Awaiting agent continuation metadata could not be materialized",
     });
   });
 
@@ -795,7 +807,7 @@ describe("Slack conversation work execution", () => {
       nowMs: 1_000,
       state,
     });
-    await upsertAgentTurnSessionRecord({
+    const sessionRecord = await upsertAgentTurnSessionRecord({
       conversationId: CONVERSATION_ID,
       sessionId,
       sliceId: 2,
@@ -851,6 +863,16 @@ describe("Slack conversation work execution", () => {
         state,
         run: createSlackConversationWorker({
           getSlackAdapter: () => slackAdapter,
+          resumeAwaitingContinuation: async () => {
+            await failAgentTurnSessionRecord({
+              conversationId: CONVERSATION_ID,
+              expectedVersion: sessionRecord.version,
+              sessionId,
+              errorMessage:
+                "Awaiting agent continuation was stale before it could run",
+            });
+            return false;
+          },
           runtime: {
             handleNewMention: async () => {
               throw new Error("injected messages should not replay");
@@ -875,7 +897,7 @@ describe("Slack conversation work execution", () => {
       getAgentTurnSessionRecord(CONVERSATION_ID, sessionId),
     ).resolves.toMatchObject({
       state: "failed",
-      errorMessage: "Awaiting turn continuation was stale before resuming",
+      errorMessage: "Awaiting agent continuation was stale before it could run",
     });
   });
 
@@ -913,7 +935,7 @@ describe("Slack conversation work execution", () => {
         },
         state,
       }),
-    ).resolves.toEqual({ status: "pending_requeued" });
+    ).rejects.toThrow("runtime failed before input commit");
 
     const work = await getConversationWorkState({
       conversationId: CONVERSATION_ID,
@@ -922,7 +944,6 @@ describe("Slack conversation work execution", () => {
     expect(work?.lease).toBeUndefined();
     expect(work ? countPendingConversationMessages(work) : 0).toBe(1);
     expect(work?.messages[0]?.injectedAtMs).toBeUndefined();
-    expect(work?.consecutiveFailureCount).toBe(1);
   });
 
   it("requeues Slack mailbox records when the runtime returns without input commit", async () => {
@@ -1144,8 +1165,11 @@ describe("Slack conversation work execution", () => {
     });
     expect(work?.lease).toBeUndefined();
     expect(work?.needsRun).toBe(true);
-    expect(work?.messages.map((message) => message.injectedAtMs)).toEqual([
-      expect.any(Number),
-    ]);
+    expect(work?.messages).toEqual([]);
+    expect(work?.execution.inboundMessageIds).toEqual(
+      expect.arrayContaining([
+        "slack:T123:slack:C123:1712345.0001:1712345.0001",
+      ]),
+    );
   });
 });

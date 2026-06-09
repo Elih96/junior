@@ -127,15 +127,17 @@ import {
   persistTimeoutSessionRecord,
   persistYieldSessionRecord,
 } from "@/chat/services/turn-session-record";
-import type {
-  AgentTurnRequester,
-  AgentTurnSurface,
-} from "@/chat/state/turn-session";
+import type { AgentTurnSurface } from "@/chat/state/turn-session";
 import type { CredentialContext } from "@/chat/credentials/context";
 import { parseSlackThreadId } from "@/chat/slack/context";
 import { createMcpAuthOrchestration } from "@/chat/services/mcp-auth-orchestration";
 import { createPluginAuthOrchestration } from "@/chat/services/plugin-auth-orchestration";
-import { buildActorIdentity } from "@/chat/services/requester-identity";
+import {
+  createRequester,
+  toStoredSlackRequester,
+  type Requester,
+  type StoredSlackRequester,
+} from "@/chat/requester";
 import {
   AuthorizationFlowDisabledError,
   AuthorizationPauseError,
@@ -193,12 +195,7 @@ function waitForAbortSettlement(
 export interface ReplyRequestContext {
   skillDirs?: string[];
   credentialContext?: CredentialContext;
-  requester?: {
-    userId?: string;
-    userName?: string;
-    fullName?: string;
-    email?: string;
-  };
+  requester?: Requester;
   slackConversation?: SlackConversationContext;
   destination?: Destination;
   surface?: AgentTurnSurface;
@@ -316,24 +313,22 @@ function extractSliceUsage(
 }
 
 function requesterFromContext(
-  requester: ReplyRequestContext["requester"],
-  requesterId: string | undefined,
-): AgentTurnRequester | undefined {
-  const identity = actorRequesterFromContext(requester, requesterId);
-  const agentRequester: AgentTurnRequester = {
-    ...(identity?.email ? { email: identity.email } : {}),
-    ...(identity?.fullName ? { fullName: identity.fullName } : {}),
-    ...(identity?.userId ? { slackUserId: identity.userId } : {}),
-    ...(identity?.userName ? { slackUserName: identity.userName } : {}),
-  };
-  return Object.keys(agentRequester).length > 0 ? agentRequester : undefined;
+  context: ReplyRequestContext,
+): StoredSlackRequester | undefined {
+  const identity = actorRequesterFromContext(context);
+  return identity ? toStoredSlackRequester(identity) : undefined;
 }
 
 function actorRequesterFromContext(
-  requester: ReplyRequestContext["requester"],
-  requesterId: string | undefined,
-): ReplyRequestContext["requester"] | undefined {
-  return buildActorIdentity(requester, requesterId);
+  context: ReplyRequestContext,
+): Requester | undefined {
+  return createRequester(context.requester, {
+    teamId:
+      context.destination?.teamId ??
+      context.correlation?.teamId ??
+      context.requester?.teamId,
+    userId: context.correlation?.requesterId,
+  });
 }
 
 function surfaceFromContext(
@@ -500,6 +495,7 @@ export async function generateAssistantReply(
   let timeoutResumeSliceId = 1;
   let timeoutResumeMessages: PiMessage[] = [];
   let beforeMessageCount = 0;
+  let turnStartMessageIndex: number | undefined;
   let lastKnownSandboxId: string | undefined = context.sandbox?.sandboxId;
   let lastKnownSandboxDependencyProfileHash: string | undefined =
     context.sandbox?.sandboxDependencyProfileHash;
@@ -513,14 +509,8 @@ export async function generateAssistantReply(
   let inputCommitted = false;
   let turnUsage: AgentTurnUsage | undefined;
   let thinkingSelection: TurnThinkingSelection | undefined;
-  const requester = requesterFromContext(
-    context.requester,
-    context.correlation?.requesterId,
-  );
-  const actorRequester = actorRequesterFromContext(
-    context.requester,
-    context.correlation?.requesterId,
-  );
+  const requester = requesterFromContext(context);
+  const actorRequester = actorRequesterFromContext(context);
   const surface = surfaceFromContext(context);
   const credentialActor = context.credentialContext?.actor;
   const credentialActorLogContext = credentialActor
@@ -1182,6 +1172,9 @@ export async function generateAssistantReply(
         logContext: sessionRecordLogContext,
         requester,
         ...(surface ? { surface } : {}),
+        ...(turnStartMessageIndex !== undefined
+          ? { turnStartMessageIndex }
+          : {}),
       });
       if (!persisted) {
         return false;
@@ -1338,10 +1331,14 @@ export async function generateAssistantReply(
               turnContextPrompt,
             )
           : existingSessionRecord!.piMessages;
+        turnStartMessageIndex = existingSessionRecord!.turnStartMessageIndex;
       } else if (context.piMessages && context.piMessages.length > 0) {
         agent.state.messages = [...context.piMessages];
       }
       beforeMessageCount = agent.state.messages.length;
+      if (!resumedFromSessionRecord) {
+        turnStartMessageIndex = beforeMessageCount;
+      }
 
       await withSpan(
         `invoke_agent ${botConfig.modelId}`,
@@ -1551,6 +1548,9 @@ export async function generateAssistantReply(
         logContext: sessionRecordLogContext,
         requester,
         ...(surface ? { surface } : {}),
+        ...(turnStartMessageIndex !== undefined
+          ? { turnStartMessageIndex }
+          : {}),
       });
     }
 
@@ -1634,7 +1634,7 @@ export async function generateAssistantReply(
       }
       if (sessionRecord.state === "awaiting_resume") {
         throw new RetryableTurnError(
-          "turn_timeout_resume",
+          "agent_continue",
           `conversation=${timeoutResumeConversationId} session=${timeoutResumeSessionId} slice=${sessionRecord.sliceId} version=${sessionRecord.version}`,
           {
             conversationId: timeoutResumeConversationId,

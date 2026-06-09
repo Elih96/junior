@@ -43,7 +43,11 @@ import {
 import { isRetryableTurnError, markTurnFailed } from "@/chat/runtime/turn";
 import { publishAppHomeView } from "@/chat/slack/app-home";
 import { getSlackClient } from "@/chat/slack/client";
-import { lookupSlackActorIdentity } from "@/chat/slack/user";
+import {
+  createRequesterFromStoredSlackRequester,
+  type Requester,
+} from "@/chat/requester";
+import { lookupSlackRequester } from "@/chat/slack/user";
 import { getStateAdapter } from "@/chat/state/adapter";
 import { coerceThreadArtifactsState } from "@/chat/state/artifacts";
 import {
@@ -60,7 +64,7 @@ import {
 } from "@/chat/services/pending-auth";
 import { escapeXml } from "@/chat/xml";
 import type { WaitUntilFn } from "@/handlers/types";
-import { scheduleTurnTimeoutResume } from "@/chat/services/timeout-resume";
+import { scheduleAgentContinue } from "@/chat/services/agent-continue";
 import type { AssistantReply } from "@/chat/respond";
 
 /**
@@ -318,6 +322,23 @@ async function resumeOAuthSessionRecordTurn(
       const lockedChannelConfiguration = getChannelConfigurationServiceById(
         stored.channelId!,
       );
+      let requester: Requester;
+      try {
+        requester = createRequesterFromStoredSlackRequester({
+          requester: lockedSessionRecord.requester,
+          teamId: destination.teamId,
+          userId: lockedUserMessage.author.userId,
+        });
+      } catch {
+        await failAgentTurnSessionRecord({
+          conversationId: stored.resumeConversationId!,
+          expectedVersion: lockedSessionRecord.version,
+          sessionId: lockedSessionId,
+          errorMessage:
+            "Stored Slack requester identity did not match OAuth requester",
+        });
+        return false;
+      }
 
       await recordAuthorizationCompleted({
         conversationId: stored.resumeConversationId!,
@@ -330,9 +351,6 @@ async function resumeOAuthSessionRecordTurn(
         }),
         ttlMs: THREAD_STATE_TTL_MS,
       });
-      const requester = await lookupSlackActorIdentity(
-        lockedUserMessage.author.userId,
-      );
 
       return {
         messageText: lockedPendingAuth
@@ -343,7 +361,7 @@ async function resumeOAuthSessionRecordTurn(
           credentialContext: {
             actor: {
               type: "user",
-              userId: lockedUserMessage.author.userId,
+              userId: requester.userId,
             },
           },
           requester,
@@ -353,7 +371,7 @@ async function resumeOAuthSessionRecordTurn(
             turnId: lockedSessionId,
             channelId: stored.channelId!,
             threadTs: stored.threadTs!,
-            requesterId: lockedUserMessage.author.userId,
+            requesterId: requester.userId,
           },
           toolChannelId:
             lockedArtifacts.assistantContextChannelId ?? stored.channelId!,
@@ -415,16 +433,16 @@ async function resumeOAuthSessionRecordTurn(
           });
         },
         onTimeoutPause: async (error: unknown) => {
-          if (!isRetryableTurnError(error, "turn_timeout_resume")) {
+          if (!isRetryableTurnError(error, "agent_continue")) {
             throw error;
           }
           const version = error.metadata?.version;
           if (typeof version !== "number") {
             throw new Error(
-              "Timed-out OAuth resume did not include a turn-session version",
+              "OAuth agent continuation did not include a session record version",
             );
           }
-          await scheduleTurnTimeoutResume({
+          await scheduleAgentContinue({
             conversationId: stored.resumeConversationId!,
             destination,
             sessionId: lockedSessionId,
@@ -460,7 +478,10 @@ async function resumePendingOAuthMessage(
   const conversationContext = buildConversationContext(conversation, {
     excludeMessageId: latestUserMessage?.id,
   });
-  const requester = await lookupSlackActorIdentity(stored.userId);
+  const requester = await lookupSlackRequester(
+    stored.destination.teamId,
+    stored.userId,
+  );
   await resumeAuthorizedRequest({
     messageText: stored.pendingMessage,
     channelId: stored.channelId,

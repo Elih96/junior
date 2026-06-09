@@ -1,9 +1,6 @@
 import { getSlackBotToken } from "@/chat/config";
 import { logWarn } from "@/chat/logging";
-import {
-  slackActorIdentity,
-  type ActorIdentityInput,
-} from "@/chat/services/requester-identity";
+import { createSlackRequester, type Requester } from "@/chat/requester";
 
 interface SlackUserLookupResult {
   userName?: string;
@@ -17,18 +14,29 @@ const userCache = new Map<
   { value: SlackUserLookupResult; expiresAt: number }
 >();
 
-function readFromCache(userId: string): SlackUserLookupResult | null {
-  const hit = userCache.get(userId);
+function userCacheKey(teamId: string, userId: string): string {
+  return `${teamId}:${userId}`;
+}
+
+function readFromCache(
+  teamId: string,
+  userId: string,
+): SlackUserLookupResult | null {
+  const hit = userCache.get(userCacheKey(teamId, userId));
   if (!hit) return null;
   if (hit.expiresAt < Date.now()) {
-    userCache.delete(userId);
+    userCache.delete(userCacheKey(teamId, userId));
     return null;
   }
   return hit.value;
 }
 
-function writeToCache(userId: string, value: SlackUserLookupResult): void {
-  userCache.set(userId, {
+function writeToCache(
+  teamId: string,
+  userId: string,
+  value: SlackUserLookupResult,
+): void {
+  userCache.set(userCacheKey(teamId, userId), {
     value,
     expiresAt: Date.now() + USER_CACHE_TTL_MS,
   });
@@ -36,13 +44,14 @@ function writeToCache(userId: string, value: SlackUserLookupResult): void {
 
 /** Fetch Slack user profile info with in-memory TTL cache to avoid repeated API calls. */
 export async function lookupSlackUser(
+  teamId: string,
   userId?: string,
 ): Promise<SlackUserLookupResult | null> {
-  if (!userId) {
+  if (!teamId || !userId) {
     return null;
   }
 
-  const cached = readFromCache(userId);
+  const cached = readFromCache(teamId, userId);
   if (cached) {
     return cached;
   }
@@ -68,6 +77,7 @@ export async function lookupSlackUser(
         {},
         {
           "enduser.id": userId,
+          "app.slack.team_id": teamId,
           "http.response.status_code": response.status,
         },
         "Slack user lookup request failed",
@@ -104,7 +114,7 @@ export async function lookupSlackUser(
       fullName,
       email: payload.user.profile?.email?.trim() || undefined,
     };
-    writeToCache(userId, result);
+    writeToCache(teamId, userId, result);
     return result;
   } catch (error) {
     logWarn(
@@ -112,6 +122,7 @@ export async function lookupSlackUser(
       {},
       {
         "enduser.id": userId,
+        "app.slack.team_id": teamId,
         "exception.message":
           error instanceof Error ? error.message : String(error),
       },
@@ -121,9 +132,14 @@ export async function lookupSlackUser(
   }
 }
 
-/** Resolve the canonical Slack actor identity from Slack profile data. */
-export async function lookupSlackActorIdentity(
+/** Resolve the canonical Slack requester from Slack profile data. */
+export async function lookupSlackRequester(
+  teamId: string,
   userId: string,
-): Promise<ActorIdentityInput> {
-  return slackActorIdentity(userId, await lookupSlackUser(userId));
+): Promise<Requester> {
+  return createSlackRequester(
+    teamId,
+    userId,
+    await lookupSlackUser(teamId, userId),
+  );
 }

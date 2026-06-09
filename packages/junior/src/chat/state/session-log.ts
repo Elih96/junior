@@ -12,6 +12,10 @@ import { z } from "zod";
 import { getChatConfig } from "@/chat/config";
 import type { PiMessage } from "@/chat/pi/messages";
 import {
+  storedSlackRequesterSchema,
+  type StoredSlackRequester,
+} from "@/chat/requester";
+import {
   getConnectedStateContext,
   getStateAdapter,
 } from "@/chat/state/adapter";
@@ -33,6 +37,7 @@ const piMessageEntrySchema = z.object({
   type: z.literal("pi_message"),
   sessionId: z.string().min(1).default(INITIAL_SESSION_ID),
   message: piMessageSchema,
+  requester: storedSlackRequesterSchema.optional(),
 });
 
 const projectionResetEntrySchema = z.object({
@@ -40,6 +45,14 @@ const projectionResetEntrySchema = z.object({
   type: z.literal("projection_reset"),
   sessionId: z.string().min(1).default(INITIAL_SESSION_ID),
   messages: z.array(piMessageSchema),
+  requester: storedSlackRequesterSchema.optional(),
+});
+
+const requesterRecordedEntrySchema = z.object({
+  schemaVersion: z.literal(AGENT_SESSION_LOG_SCHEMA_VERSION),
+  type: z.literal("requester_recorded"),
+  sessionId: z.string().min(1).default(INITIAL_SESSION_ID),
+  requester: storedSlackRequesterSchema,
 });
 
 const mcpProviderConnectedEntrySchema = z.object({
@@ -83,11 +96,13 @@ const authorizationCompletedEntrySchema = z.object({
 const sessionLogEntrySchema = z.discriminatedUnion("type", [
   piMessageEntrySchema,
   projectionResetEntrySchema,
+  requesterRecordedEntrySchema,
   mcpProviderConnectedEntrySchema,
   authorizationRequestedEntrySchema,
   authorizationCompletedEntrySchema,
 ]);
 
+/** Requester identity stored with turn-start messages for durable continuation. */
 export type SessionLogEntry = z.infer<typeof sessionLogEntrySchema>;
 export type AuthorizationKind = z.infer<typeof authorizationKindSchema>;
 
@@ -201,21 +216,53 @@ function projectionEntries(
     .filter((entry) => entrySessionId(entry) === currentId);
 }
 
-function piEntry(message: PiMessage, sessionId: string): SessionLogEntry {
+function findLastIndex<T>(
+  values: T[],
+  predicate: (value: T) => boolean,
+): number {
+  for (let index = values.length - 1; index >= 0; index -= 1) {
+    if (predicate(values[index]!)) return index;
+  }
+  return -1;
+}
+
+function piEntry(
+  message: PiMessage,
+  sessionId: string,
+  requester?: StoredSlackRequester,
+): SessionLogEntry {
   return {
     schemaVersion: AGENT_SESSION_LOG_SCHEMA_VERSION,
     type: "pi_message",
     sessionId,
     message,
+    ...(requester ? { requester } : {}),
   };
 }
 
-function resetEntry(messages: PiMessage[], sessionId: string): SessionLogEntry {
+function resetEntry(
+  messages: PiMessage[],
+  sessionId: string,
+  requester?: StoredSlackRequester,
+): SessionLogEntry {
   return {
     schemaVersion: AGENT_SESSION_LOG_SCHEMA_VERSION,
     type: "projection_reset",
     sessionId,
     messages,
+    ...(requester ? { requester } : {}),
+  };
+}
+
+function requesterRecordedEntry(
+  requester: StoredSlackRequester,
+  sessionId: string,
+): SessionLogEntry {
+  return {
+    schemaVersion: AGENT_SESSION_LOG_SCHEMA_VERSION,
+    type: "requester_recorded",
+    sessionId,
+    requester,
   };
 }
 
@@ -304,12 +351,33 @@ function decode(value: unknown): SessionLogEntry {
   return piEntry(piMessageSchema.parse(value), INITIAL_SESSION_ID);
 }
 
-/** Materialize Pi messages from log entries for the selected projection. */
-function project(entries: SessionLogEntry[], sessionId?: string): PiMessage[] {
+export interface SessionProjection {
+  messages: PiMessage[];
+  requester?: StoredSlackRequester;
+}
+
+/**
+ * Materialize Pi messages and requester identity from log entries.
+ *
+ * Requester is taken from the latest requester-bearing user pi_message,
+ * requester_recorded event, or projection_reset event.
+ */
+function project(
+  entries: SessionLogEntry[],
+  sessionId?: string,
+): SessionProjection {
   let messages: PiMessage[] = [];
+  let requester: StoredSlackRequester | undefined;
   for (const entry of projectionEntries(entries, sessionId)) {
     if (entry.type === "pi_message") {
       messages.push(entry.message);
+      if (entry.message.role === "user" && entry.requester) {
+        requester = entry.requester;
+      }
+      continue;
+    }
+    if (entry.type === "requester_recorded") {
+      requester = entry.requester;
       continue;
     }
     if (entry.type === "authorization_completed") {
@@ -323,8 +391,18 @@ function project(entries: SessionLogEntry[], sessionId?: string): PiMessage[] {
       continue;
     }
     messages = [...entry.messages];
+    if (entry.requester) {
+      requester = entry.requester;
+    }
   }
-  return messages;
+  return { messages, requester };
+}
+
+function projectMessages(
+  entries: SessionLogEntry[],
+  sessionId?: string,
+): PiMessage[] {
+  return project(entries, sessionId).messages;
 }
 
 function connectedMcpProviders(
@@ -349,14 +427,40 @@ function commitEntries(
   nextMessages: PiMessage[],
   sessionId: string,
   entries: SessionLogEntry[],
+  existingRequester?: StoredSlackRequester,
+  requester?: StoredSlackRequester,
 ): SessionLogEntry[] {
   const matchingPrefix = countMatchingPrefix(existingMessages, nextMessages);
   if (matchingPrefix === existingMessages.length) {
-    return nextMessages
-      .slice(matchingPrefix)
-      .map((message) => piEntry(message, sessionId));
+    const newMessages = nextMessages.slice(matchingPrefix);
+    if (
+      newMessages.length === 0 &&
+      requester &&
+      !isDeepStrictEqual(existingRequester, requester)
+    ) {
+      return [requesterRecordedEntry(requester, sessionId)];
+    }
+    // Attach requester to the last new user message — the current turn's
+    // input. Using last rather than first avoids tagging older context
+    // messages that may be included at the head of a fresh commit.
+    const requesterIndex = requester
+      ? findLastIndex(newMessages, (m) => m.role === "user")
+      : -1;
+    return newMessages.map((message, index) =>
+      piEntry(
+        message,
+        sessionId,
+        index === requesterIndex ? requester : undefined,
+      ),
+    );
   }
-  return [resetEntry(nextMessages, nextSessionId(entries))];
+  return [
+    resetEntry(
+      nextMessages,
+      nextSessionId(entries),
+      requester ?? existingRequester,
+    ),
+  ];
 }
 
 function redisStore(redisStateAdapter: RedisStateAdapter): SessionLogStore {
@@ -431,7 +535,7 @@ export async function loadMessages(
   }
 
   const store = args.store ?? (await defaultStore());
-  const messages = project(await store.read(args), args.sessionId);
+  const messages = projectMessages(await store.read(args), args.sessionId);
   return messages.length >= messageCount
     ? messages.slice(0, messageCount)
     : undefined;
@@ -444,6 +548,20 @@ export async function loadProjection(
     sessionId?: string;
   },
 ): Promise<PiMessage[]> {
+  const store = args.store ?? (await defaultStore());
+  return project(await store.read(args), args.sessionId).messages;
+}
+
+/**
+ * Load the Pi-message projection and derived requester identity in one read.
+ * Used at continuation boundaries to avoid a second log scan.
+ */
+export async function loadProjectionWithRequester(
+  args: Scope & {
+    store?: SessionLogStore;
+    sessionId?: string;
+  },
+): Promise<SessionProjection> {
   const store = args.store ?? (await defaultStore());
   return project(await store.read(args), args.sessionId);
 }
@@ -570,17 +688,20 @@ export async function commitMessages(
     store?: SessionLogStore;
     messages: PiMessage[];
     ttlMs: number;
+    requester?: StoredSlackRequester;
   },
 ): Promise<{ sessionId: string }> {
   const store = args.store ?? (await defaultStore());
   const entries = await store.read(args);
-  const existingMessages = project(entries);
+  const existingProjection = project(entries);
   const currentId = currentSessionId(entries);
   const nextEntries = commitEntries(
-    existingMessages,
+    existingProjection.messages,
     args.messages,
     currentId,
     entries,
+    existingProjection.requester,
+    args.requester,
   );
   await store.append({
     scope: args,
