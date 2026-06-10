@@ -98,6 +98,43 @@ describe("createApp plugin config", () => {
     expect(getAgentPlugins().map((plugin) => plugin.name)).toEqual([]);
   });
 
+  it("validates sandbox egress trace propagation domains from app options", async () => {
+    await createApp({
+      plugins: defineJuniorPlugins([
+        defineJuniorPlugin({
+          manifest: {
+            name: "base",
+            description: "Base plugin",
+          },
+          hooks: {},
+        }),
+      ]),
+    });
+
+    await expect(
+      createApp({
+        plugins: defineJuniorPlugins([
+          defineJuniorPlugin({
+            manifest: {
+              name: "next",
+              description: "Next plugin",
+            },
+            hooks: {},
+          }),
+        ]),
+        sandbox: {
+          egressTracePropagationDomains: ["api.*.sentry.io"],
+        },
+      }),
+    ).rejects.toThrow(
+      "sandbox.egressTracePropagationDomains entries must be exact domains or leading wildcard domains",
+    );
+    expect(getPluginProviders().map((plugin) => plugin.manifest.name)).toEqual([
+      "base",
+    ]);
+    expect(getAgentPlugins().map((plugin) => plugin.name)).toEqual(["base"]);
+  });
+
   it("loads package plugins with runtime hook plugins", async () => {
     const tempRoot = await makeTempDir();
     await writePluginPackage(tempRoot, "@acme/env-plugin", "env");

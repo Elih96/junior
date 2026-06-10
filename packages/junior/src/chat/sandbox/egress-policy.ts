@@ -1,6 +1,11 @@
 import type { NetworkPolicy, NetworkPolicyRule } from "@vercel/sandbox";
 import { resolveBaseUrl } from "@/chat/oauth-flow";
+import type { TracePropagationHeaders } from "@/chat/logging";
 import { SANDBOX_EGRESS_PROXY_PATH } from "@/chat/sandbox/egress-session";
+import {
+  shouldPropagateSandboxEgressTrace,
+  type SandboxEgressTracePropagationConfig,
+} from "@/chat/sandbox/egress-tracing";
 import { resolveAuthTokenPlaceholder } from "@/chat/plugins/auth/auth-token-placeholder";
 import { resolvePluginCommandEnv } from "@/chat/plugins/command-env";
 import { getPluginProviders } from "@/chat/plugins/registry";
@@ -54,23 +59,63 @@ function sandboxProxyUrl(credentialToken?: string): string {
   return new URL(path, baseUrl).toString();
 }
 
-/** Build the policy that forwards provider requests back to Junior for credentials. */
+/** Build the policy that forwards credentials and configured trace headers. */
 export function buildSandboxEgressNetworkPolicy(input?: {
   credentialToken?: string;
+  traceConfig?: SandboxEgressTracePropagationConfig;
+  traceHeaders?: TracePropagationHeaders;
 }): NetworkPolicy {
   const allow: Record<string, NetworkPolicyRule[]> = {
     "*": [],
   };
   const entries = providerEntries();
-  if (entries.length === 0) {
+  const traceHeaders = Object.fromEntries(
+    Object.entries(input?.traceHeaders ?? {}).filter(
+      ([, value]) => typeof value === "string" && value.trim(),
+    ),
+  );
+  const hasTraceHeaders = Object.keys(traceHeaders).length > 0;
+  if (
+    entries.length === 0 &&
+    (!hasTraceHeaders || (input?.traceConfig?.domains ?? []).length === 0)
+  ) {
     return { allow };
   }
 
-  const forwardURL = sandboxProxyUrl(input?.credentialToken);
-  for (const entry of entries) {
-    for (const domain of entry.domains) {
-      allow[domain] = [{ forwardURL }];
+  const forwardURL = input?.credentialToken
+    ? sandboxProxyUrl(input.credentialToken)
+    : undefined;
+  const domains = new Map<string, { forward: boolean }>();
+  // Provider domains are proxied for credentials; configured trace-only domains
+  // get transform-only rules so wildcard trace configs are not limited to plugins.
+  if (forwardURL) {
+    for (const entry of entries) {
+      for (const domain of entry.domains) {
+        domains.set(domain, { forward: true });
+      }
     }
+  }
+  if (hasTraceHeaders) {
+    for (const domain of input?.traceConfig?.domains ?? []) {
+      domains.set(domain, { forward: domains.get(domain)?.forward ?? false });
+    }
+  }
+
+  for (const [domain, policy] of [...domains.entries()].sort(
+    ([left], [right]) => left.localeCompare(right),
+  )) {
+    const shouldPropagateTrace = shouldPropagateSandboxEgressTrace(
+      domain,
+      input?.traceConfig,
+    );
+    allow[domain] = [
+      {
+        ...(shouldPropagateTrace && hasTraceHeaders
+          ? { transform: [{ headers: traceHeaders }] }
+          : {}),
+        ...(policy.forward && forwardURL ? { forwardURL } : {}),
+      },
+    ];
   }
 
   return { allow };

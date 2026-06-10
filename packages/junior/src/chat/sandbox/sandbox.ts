@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import {
+  getTracePropagationHeaders,
   logInfo,
   setSpanAttributes,
   setSpanStatus,
@@ -18,6 +19,7 @@ import {
   type SandboxEgressAuthRequiredSignal,
   type SandboxEgressPermissionDeniedSignal,
 } from "@/chat/sandbox/egress-session";
+import type { SandboxEgressTracePropagationConfig } from "@/chat/sandbox/egress-tracing";
 import type { CredentialContext } from "@/chat/credentials/context";
 import {
   isSandboxCommandStreamInterruptedError,
@@ -136,6 +138,7 @@ export function createSandboxExecutor(options?: {
   sandboxDependencyProfileHash?: string;
   timeoutMs?: number;
   traceContext?: LogContext;
+  tracePropagation?: SandboxEgressTracePropagationConfig;
   credentialEgress?: CredentialContext;
   agentHooks?: AgentPluginHookRunner;
   onSandboxAcquired?: (sandbox: SandboxAcquiredState) => void | Promise<void>;
@@ -146,6 +149,9 @@ export function createSandboxExecutor(options?: {
   let availableSkills: SkillMetadata[] = [];
   let referenceFiles: string[] = [];
   const traceContext = options?.traceContext ?? {};
+  const tracePropagation = options?.tracePropagation;
+  const hasTracePropagationDomains =
+    (tracePropagation?.domains?.length ?? 0) > 0;
   const credentialEgress = options?.credentialEgress;
   const sandboxEgressTokenTtlMs = Math.max(
     1,
@@ -183,12 +189,17 @@ export function createSandboxExecutor(options?: {
     commandEnv: credentialEgress
       ? async () => await resolveSandboxCommandEnvironment()
       : undefined,
-    createNetworkPolicy: credentialEgress
-      ? (egressId) =>
-          buildSandboxEgressNetworkPolicy({
-            credentialToken: sandboxEgressCredentialTokenFor(egressId),
-          })
-      : undefined,
+    createNetworkPolicy:
+      credentialEgress || hasTracePropagationDomains
+        ? (egressId, traceHeaders) =>
+            buildSandboxEgressNetworkPolicy({
+              ...(credentialEgress
+                ? { credentialToken: sandboxEgressCredentialTokenFor(egressId) }
+                : {}),
+              traceConfig: tracePropagation,
+              traceHeaders,
+            })
+        : undefined,
     onSandboxPrepare: async (sandbox) => {
       await options?.agentHooks?.prepareSandbox(sandbox);
     },
@@ -203,6 +214,18 @@ export function createSandboxExecutor(options?: {
     attributes: Record<string, unknown>,
     callback: () => Promise<T>,
   ): Promise<T> => withSpan(name, op, traceContext, callback, attributes);
+
+  // Network-policy header transforms need the current tool span's trace headers.
+  const withSandboxToolSpan = <T>(
+    name: string,
+    op: string,
+    attributes: Record<string, unknown>,
+    callback: () => Promise<T>,
+  ): Promise<T> =>
+    withSandboxSpan(name, op, attributes, async () => {
+      await sessionManager.refreshNetworkPolicy(getTracePropagationHeaders());
+      return await callback();
+    });
 
   const logSandboxBootRequest = (
     trigger: string,
@@ -236,7 +259,7 @@ export function createSandboxExecutor(options?: {
     const executeBash = (await sessionManager.ensureToolExecutors()).bash;
     const activeEgressId = sessionManager.getSandboxEgressId();
     await clearSandboxEgressSignals(activeEgressId);
-    const result = await withSandboxSpan(
+    const result = await withSandboxToolSpan(
       "bash",
       "process.exec",
       {
@@ -348,7 +371,7 @@ export function createSandboxExecutor(options?: {
     });
     const executeReadFile = (await sessionManager.ensureToolExecutors())
       .readFile;
-    const result = await withSandboxSpan(
+    const result = await withSandboxToolSpan(
       "sandbox.readFile",
       "sandbox.fs.read",
       {
@@ -399,7 +422,7 @@ export function createSandboxExecutor(options?: {
     });
     const executeWriteFile = (await sessionManager.ensureToolExecutors())
       .writeFile;
-    await withSandboxSpan(
+    await withSandboxToolSpan(
       "sandbox.writeFile",
       "sandbox.fs.write",
       {
@@ -440,7 +463,7 @@ export function createSandboxExecutor(options?: {
       "file.path": filePath,
     });
     const executors = await sessionManager.ensureToolExecutors();
-    const result = await withSandboxSpan(
+    const result = await withSandboxToolSpan(
       "sandbox.editFile",
       "sandbox.fs.edit",
       {
@@ -473,7 +496,7 @@ export function createSandboxExecutor(options?: {
     const contextLines = positiveInteger(rawInput.context);
     const limit = positiveInteger(rawInput.limit);
     const executors = await sessionManager.ensureToolExecutors();
-    const result = await withSandboxSpan(
+    const result = await withSandboxToolSpan(
       "sandbox.grep",
       "sandbox.fs.search",
       {
@@ -513,7 +536,7 @@ export function createSandboxExecutor(options?: {
     logSandboxBootRequest("tool.findFiles");
     const limit = positiveInteger(rawInput.limit);
     const executors = await sessionManager.ensureToolExecutors();
-    const result = await withSandboxSpan(
+    const result = await withSandboxToolSpan(
       "sandbox.findFiles",
       "sandbox.fs.find",
       {
@@ -540,7 +563,7 @@ export function createSandboxExecutor(options?: {
     logSandboxBootRequest("tool.listDir");
     const limit = positiveInteger(rawInput.limit);
     const executors = await sessionManager.ensureToolExecutors();
-    const result = await withSandboxSpan(
+    const result = await withSandboxToolSpan(
       "sandbox.listDir",
       "sandbox.fs.list",
       {},

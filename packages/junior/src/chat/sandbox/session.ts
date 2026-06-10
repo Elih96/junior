@@ -7,6 +7,7 @@ import {
   setSpanAttributes,
   withSpan,
   type LogContext,
+  type TracePropagationHeaders,
 } from "@/chat/logging";
 import { getVercelSandboxCredentials } from "@/chat/sandbox/credentials";
 import {
@@ -113,6 +114,7 @@ interface SandboxSessionManager {
   getDependencyProfileHash(): string | undefined;
   createSandbox(): Promise<SandboxInstance>;
   ensureToolExecutors(): Promise<SandboxToolExecutors>;
+  refreshNetworkPolicy(traceHeaders?: TracePropagationHeaders): Promise<void>;
   dispose(): Promise<void>;
 }
 
@@ -186,7 +188,10 @@ export function createSandboxSessionManager(options?: {
   timeoutMs?: number;
   traceContext?: LogContext;
   commandEnv?: () => Promise<Record<string, string>>;
-  createNetworkPolicy?: (egressId: string) => NetworkPolicy | undefined;
+  createNetworkPolicy?: (
+    egressId: string,
+    traceHeaders?: TracePropagationHeaders,
+  ) => NetworkPolicy | undefined;
   onSandboxPrepare?: (sandbox: SandboxInstance) => void | Promise<void>;
   onSandboxAcquired?: (sandbox: {
     sandboxId: string;
@@ -278,11 +283,13 @@ export function createSandboxSessionManager(options?: {
     preparedSandboxId = targetSandbox.sandboxId;
   };
 
-  const refreshNetworkPolicy = async (
+  const applyNetworkPolicy = async (
     targetSandbox: SandboxInstance,
+    traceHeaders?: TracePropagationHeaders,
   ): Promise<void> => {
     const networkPolicy = options?.createNetworkPolicy?.(
       targetSandbox.sandboxEgressId,
+      traceHeaders,
     );
     if (!networkPolicy) {
       return;
@@ -494,7 +501,7 @@ export function createSandboxSessionManager(options?: {
     }
 
     try {
-      await refreshNetworkPolicy(createdSandbox);
+      await applyNetworkPolicy(createdSandbox);
       await prepareSandbox(createdSandbox);
     } catch (error) {
       return failSetup(error);
@@ -552,7 +559,7 @@ export function createSandboxSessionManager(options?: {
 
     try {
       await ensureSandboxReachable(cachedSandbox, "memory");
-      await refreshNetworkPolicy(cachedSandbox);
+      await applyNetworkPolicy(cachedSandbox);
       await prepareSandbox(cachedSandbox);
       return cachedSandbox;
     } catch (error) {
@@ -602,7 +609,7 @@ export function createSandboxSessionManager(options?: {
     }
 
     try {
-      await refreshNetworkPolicy(hintedSandbox);
+      await applyNetworkPolicy(hintedSandbox);
       await prepareSandbox(hintedSandbox);
       return await rememberSandbox(hintedSandbox);
     } catch (error) {
@@ -880,6 +887,13 @@ export function createSandboxSessionManager(options?: {
     },
     async ensureToolExecutors() {
       return await loadToolExecutors(await ensureReadySandbox());
+    },
+    async refreshNetworkPolicy(traceHeaders) {
+      const activeSandbox = sandbox;
+      if (!activeSandbox) {
+        return;
+      }
+      await applyNetworkPolicy(activeSandbox, traceHeaders);
     },
     async dispose() {
       const activeSandbox = sandbox;

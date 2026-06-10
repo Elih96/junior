@@ -1,5 +1,5 @@
 import { CredentialUnavailableError } from "@/chat/credentials/broker";
-import { logInfo, logWarn } from "@/chat/logging";
+import { logInfo, logWarn, withSpan } from "@/chat/logging";
 import { onPluginEgressResponse } from "@/chat/plugins/credential-hooks";
 import {
   matchesSandboxEgressDomain,
@@ -19,10 +19,16 @@ import {
   SANDBOX_EGRESS_PROXY_PATH,
   setSandboxEgressAuthRequiredSignal,
   setSandboxEgressPermissionDeniedSignal,
+  type SandboxEgressCredentialContext,
   type SandboxEgressCredentialLease,
 } from "@/chat/sandbox/egress-session";
+import {
+  shouldPropagateSandboxEgressTrace,
+  type SandboxEgressTracePropagationConfig,
+} from "@/chat/sandbox/egress-tracing";
 import { EgressAuthRequired } from "@sentry/junior-plugin-api";
 import type { JWTPayload } from "jose";
+import * as Sentry from "@/chat/sentry";
 
 const OIDC_TOKEN_HEADER = "vercel-sandbox-oidc-token";
 const FORWARDED_HOST_HEADER = "vercel-forwarded-host";
@@ -47,6 +53,11 @@ const PROXY_ONLY_HEADERS = new Set([
   FORWARDED_PORT_HEADER,
   FORWARDED_PATH_HEADER,
 ]);
+const TRACE_PROPAGATION_HEADERS = new Set([
+  "baggage",
+  "sentry-trace",
+  "traceparent",
+]);
 const DECODED_RESPONSE_HEADERS = new Set([
   "content-encoding",
   "content-length",
@@ -66,6 +77,7 @@ export type SandboxEgressHttpInterceptor = (input: {
 interface ProxyDeps {
   fetch?: typeof fetch;
   interceptHttp?: SandboxEgressHttpInterceptor;
+  tracePropagation?: SandboxEgressTracePropagationConfig;
   verifyOidc?: (token: string) => Promise<JWTPayload>;
 }
 
@@ -465,18 +477,27 @@ async function responseTextWithinLimit(
   return new TextDecoder().decode(combined);
 }
 
+/** Build sanitized upstream headers and preserve trace headers only for configured hosts. */
 function requestHeaders(
   request: Request,
   lease: SandboxEgressCredentialLease,
   upstreamHost: string,
+  tracePropagation: SandboxEgressTracePropagationConfig,
 ): Headers {
   const headers = new Headers();
+  const mayPropagateTrace = shouldPropagateSandboxEgressTrace(
+    upstreamHost,
+    tracePropagation,
+  );
   request.headers.forEach((value, key) => {
     const normalized = key.toLowerCase();
     if (
       HOP_BY_HOP_HEADERS.has(normalized) ||
       PROXY_ONLY_HEADERS.has(normalized)
     ) {
+      return;
+    }
+    if (TRACE_PROPAGATION_HEADERS.has(normalized) && !mayPropagateTrace) {
       return;
     }
     headers.append(key, value);
@@ -487,6 +508,12 @@ function requestHeaders(
       continue;
     }
     for (const [key, value] of Object.entries(transform.headers)) {
+      if (
+        TRACE_PROPAGATION_HEADERS.has(key.toLowerCase()) &&
+        !mayPropagateTrace
+      ) {
+        continue;
+      }
       headers.set(key, value);
     }
   }
@@ -507,6 +534,29 @@ function responseHeaders(upstream: Response): Headers {
   return headers;
 }
 
+/** Continue inbound trace context only after sandbox egress verification succeeds. */
+function continueSandboxEgressTrace<T>(
+  request: Request,
+  upstreamHost: string,
+  tracePropagation: SandboxEgressTracePropagationConfig,
+  callback: () => Promise<T>,
+): Promise<T> {
+  const sentryTrace = request.headers.get("sentry-trace") ?? undefined;
+  const baggage = request.headers.get("baggage") ?? undefined;
+  const run = () =>
+    withSpan("sandbox.egress", "http.server", {}, callback, {
+      "http.request.method": request.method,
+      "url.path": redactedProxyPath(new URL(request.url).pathname),
+    });
+  if (
+    !shouldPropagateSandboxEgressTrace(upstreamHost, tracePropagation) ||
+    (!sentryTrace && !baggage)
+  ) {
+    return run();
+  }
+  return Sentry.continueTrace({ sentryTrace, baggage }, run);
+}
+
 /** Return whether a request appears to be from the Vercel Sandbox egress proxy. */
 export function isSandboxEgressForwardedRequest(request: Request): boolean {
   return Boolean(
@@ -520,6 +570,13 @@ export function isSandboxEgressForwardedRequest(request: Request): boolean {
 export async function proxySandboxEgressRequest(
   request: Request,
   deps: ProxyDeps = {},
+): Promise<Response> {
+  return await proxySandboxEgressRequestImpl(request, deps);
+}
+
+async function proxySandboxEgressRequestImpl(
+  request: Request,
+  deps: ProxyDeps,
 ): Promise<Response> {
   const oidcToken = request.headers.get(OIDC_TOKEN_HEADER)?.trim();
   if (!oidcToken) {
@@ -630,6 +687,39 @@ export async function proxySandboxEgressRequest(
     );
   }
 
+  return await continueSandboxEgressTrace(
+    request,
+    upstreamUrl.hostname,
+    deps.tracePropagation ?? {},
+    async () =>
+      await proxySandboxEgressVerifiedRequest({
+        activeEgressId,
+        credentialContext,
+        deps,
+        provider,
+        request,
+        upstreamUrl,
+      }),
+  );
+}
+
+/** Proxy egress only after sandbox identity and signed credential context pass. */
+async function proxySandboxEgressVerifiedRequest(input: {
+  activeEgressId: string;
+  credentialContext: SandboxEgressCredentialContext;
+  deps: ProxyDeps;
+  provider: string;
+  request: Request;
+  upstreamUrl: URL;
+}): Promise<Response> {
+  const {
+    activeEgressId,
+    credentialContext,
+    deps,
+    provider,
+    request,
+    upstreamUrl,
+  } = input;
   let body: ArrayBuffer | undefined;
   let bodyRead = false;
   if (isGrantSelectionBodyVisible({ provider, upstreamUrl })) {
@@ -750,7 +840,12 @@ export async function proxySandboxEgressRequest(
   }
 
   const fetchImpl = deps.fetch ?? fetch;
-  const headers = requestHeaders(request, lease, upstreamUrl.hostname);
+  const headers = requestHeaders(
+    request,
+    lease,
+    upstreamUrl.hostname,
+    deps.tracePropagation ?? {},
+  );
   if (!bodyRead) {
     body = await requestBodyBytes(request);
   }

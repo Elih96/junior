@@ -114,6 +114,24 @@ const app = await createApp({
 
 Keys must be registered plugin config keys. Channel-scoped overrides (`jr-rpc config set`) take precedence.
 
+## Sandbox egress trace propagation
+
+Pass `sandbox.egressTracePropagationDomains` to `createApp()` when sandboxed commands should keep Sentry trace context across sandbox network egress:
+
+```ts
+import { createApp } from "@sentry/junior";
+
+const app = await createApp({
+  sandbox: {
+    egressTracePropagationDomains: ["sentry.io", "*.sentry.io"],
+  },
+});
+```
+
+Configured non-provider domains receive trace-header transforms without requiring credential proxying.
+
+Entries may be exact domains or leading wildcard domains. The wildcard form matches subdomains, not the apex domain, so include both forms when needed.
+
 ## Verification
 
 - Validate required variables exist in deployment environment.

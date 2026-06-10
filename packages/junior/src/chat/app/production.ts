@@ -1,5 +1,6 @@
 import type { SlackAdapter } from "@chat-adapter/slack";
 import { createSlackRuntime } from "@/chat/app/factory";
+import { withSandboxTracePropagation } from "@/chat/app/services";
 import { createUserTokenStore } from "@/chat/capabilities/factory";
 import {
   getSlackBotToken,
@@ -14,6 +15,8 @@ import { createSlackConversationWorker } from "@/chat/task-execution/slack-work"
 import { getVercelConversationWorkQueue } from "@/chat/task-execution/vercel-queue";
 import type { VercelConversationWorkCallbackOptions } from "@/chat/task-execution/vercel-callback";
 import { resumeAwaitingSlackContinuation } from "@/chat/runtime/agent-continue-runner";
+import type { JuniorRuntimeServiceOverrides } from "@/chat/app/services";
+import { generateAssistantReply } from "@/chat/respond";
 
 let productionSlackAdapter: SlackAdapter | undefined;
 let productionSlackRuntime: ReturnType<typeof createSlackRuntime> | undefined;
@@ -53,6 +56,22 @@ export function getProductionSlackRuntime(): ReturnType<
   return productionSlackRuntime;
 }
 
+/** Create production-backed services for Slack webhook ingress. */
+export function createProductionSlackWebhookServices(options?: {
+  services?: JuniorRuntimeServiceOverrides;
+}): SlackWebhookServices {
+  const runtime = createSlackRuntime({
+    getSlackAdapter: getProductionSlackAdapter,
+    services: options?.services,
+  });
+  return {
+    getSlackAdapter: getProductionSlackAdapter,
+    getUserTokenStore: createUserTokenStore,
+    queue: getVercelConversationWorkQueue(),
+    runtime,
+  };
+}
+
 /** Return production services for Slack webhook ingress. */
 export function getProductionSlackWebhookServices(): SlackWebhookServices {
   return {
@@ -64,13 +83,24 @@ export function getProductionSlackWebhookServices(): SlackWebhookServices {
 }
 
 /** Return the production queue callback options for conversation work. */
-export function getProductionConversationWorkOptions(): VercelConversationWorkCallbackOptions {
-  const runtime = getProductionSlackRuntime();
+export function createProductionConversationWorkOptions(options?: {
+  services?: JuniorRuntimeServiceOverrides;
+}): VercelConversationWorkCallbackOptions {
+  const runtime = createSlackRuntime({
+    getSlackAdapter: getProductionSlackAdapter,
+    services: options?.services,
+  });
   return {
     queue: getVercelConversationWorkQueue(),
     run: createSlackConversationWorker({
       getSlackAdapter: getProductionSlackAdapter,
-      resumeAwaitingContinuation: resumeAwaitingSlackContinuation,
+      resumeAwaitingContinuation: async (conversationId) =>
+        await resumeAwaitingSlackContinuation(conversationId, {
+          generateReply: withSandboxTracePropagation(
+            generateAssistantReply,
+            options?.services?.sandbox?.tracePropagation,
+          ),
+        }),
       runtime,
     }),
   };

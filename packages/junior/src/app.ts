@@ -5,6 +5,8 @@ import {
 } from "@/chat/configuration/defaults";
 import { getSlackReactionConfig, setSlackReactionConfig } from "@/chat/config";
 import { logException } from "@/chat/logging";
+import { generateAssistantReply } from "@/chat/respond";
+import { normalizeSandboxEgressTracePropagationDomains } from "@/chat/sandbox/egress-tracing";
 import {
   getPluginCatalogSignature,
   getPluginProviders,
@@ -40,9 +42,13 @@ import {
   createVercelConversationWorkCallback,
   registerVercelConversationWorkDevConsumer,
   type VercelConversationWorkCallbackOptions,
-} from "./chat/task-execution/vercel-callback";
-import { getProductionConversationWorkOptions } from "@/chat/app/production";
-import type { WaitUntilFn } from "./handlers/types";
+} from "@/chat/task-execution/vercel-callback";
+import {
+  createProductionConversationWorkOptions,
+  createProductionSlackWebhookServices,
+} from "@/chat/app/production";
+import { withSandboxTracePropagation } from "@/chat/app/services";
+import type { WaitUntilFn } from "@/handlers/types";
 
 export { defineJuniorPlugins } from "./plugins";
 export type {
@@ -65,6 +71,15 @@ export interface JuniorAppOptions {
   conversationWork?: VercelConversationWorkCallbackOptions;
   /** Direct plugin set override. Usually omitted when `juniorNitro()` uses a plugin module. */
   plugins?: JuniorPluginSet;
+  /** Sandbox execution options. */
+  sandbox?: {
+    /**
+     * Egress domains allowed to carry Sentry trace propagation headers.
+     * Entries may be exact domains or leading wildcard domains such as
+     * `*.sentry.io`; wildcard entries match subdomains, not the apex domain.
+     */
+    egressTracePropagationDomains?: string[];
+  };
   waitUntil?: WaitUntilFn;
 }
 
@@ -334,7 +349,12 @@ export async function createApp(options?: JuniorAppOptions): Promise<Hono> {
   const previousConfigDefaults = getConfigDefaults();
   const previousSlackReactionConfig = getSlackReactionConfig();
   let agentPluginRoutes: AgentPluginRouteRegistration[] = [];
+  let sandboxEgressTracePropagationDomains: string[] = [];
   try {
+    sandboxEgressTracePropagationDomains =
+      normalizeSandboxEgressTracePropagationDomains(
+        options?.sandbox?.egressTracePropagationDomains,
+      );
     setConfigDefaults(options?.configDefaults);
     if (options?.slack) {
       setSlackReactionConfig(options.slack);
@@ -356,6 +376,18 @@ export async function createApp(options?: JuniorAppOptions): Promise<Hono> {
   }
 
   const waitUntil = options?.waitUntil ?? (await defaultWaitUntil());
+  const runtimeServiceOverrides = {
+    sandbox: {
+      tracePropagation: { domains: sandboxEgressTracePropagationDomains },
+    },
+  };
+  const slackWebhookServices = createProductionSlackWebhookServices({
+    services: runtimeServiceOverrides,
+  });
+  const generateReplyWithTracePropagation = withSandboxTracePropagation(
+    generateAssistantReply,
+    runtimeServiceOverrides.sandbox.tracePropagation,
+  );
 
   const app = new Hono();
 
@@ -368,7 +400,9 @@ export async function createApp(options?: JuniorAppOptions): Promise<Hono> {
     // Vercel Sandbox proxying preserves the original upstream path, so detect
     // authenticated proxy traffic before ordinary application routes claim it.
     if (isSandboxEgressRequest(c.req.raw)) {
-      return await sandboxEgressProxyALL(c.req.raw);
+      return await sandboxEgressProxyALL(c.req.raw, {
+        tracePropagation: { domains: sandboxEgressTracePropagationDomains },
+      });
     }
     await next();
   });
@@ -381,15 +415,21 @@ export async function createApp(options?: JuniorAppOptions): Promise<Hono> {
   // MCP callback must be registered before the generic OAuth callback
   // because Hono matches routes top-down and `:provider` would swallow `mcp/`.
   app.get("/api/oauth/callback/mcp/:provider", (c) => {
-    return mcpOauthCallbackGET(c.req.raw, c.req.param("provider"), waitUntil);
+    return mcpOauthCallbackGET(c.req.raw, c.req.param("provider"), waitUntil, {
+      generateReply: generateReplyWithTracePropagation,
+    });
   });
 
   app.get("/api/oauth/callback/:provider", (c) => {
-    return oauthCallbackGET(c.req.raw, c.req.param("provider"), waitUntil);
+    return oauthCallbackGET(c.req.raw, c.req.param("provider"), waitUntil, {
+      generateReply: generateReplyWithTracePropagation,
+    });
   });
 
   app.post("/api/internal/agent-dispatch", (c) => {
-    return agentDispatchPOST(c.req.raw, waitUntil);
+    return agentDispatchPOST(c.req.raw, waitUntil, {
+      tracePropagation: { domains: sandboxEgressTracePropagationDomains },
+    });
   });
 
   let agentContinuePOST:
@@ -400,7 +440,10 @@ export async function createApp(options?: JuniorAppOptions): Promise<Hono> {
     | undefined;
   const getConversationWorkOptions = () => {
     conversationWorkOptions ??=
-      options?.conversationWork ?? getProductionConversationWorkOptions();
+      options?.conversationWork ??
+      createProductionConversationWorkOptions({
+        services: runtimeServiceOverrides,
+      });
     return conversationWorkOptions;
   };
   if (process.env.NODE_ENV === "development") {
@@ -418,7 +461,12 @@ export async function createApp(options?: JuniorAppOptions): Promise<Hono> {
   });
 
   app.post("/api/webhooks/:platform", (c) => {
-    return webhooksPOST(c.req.raw, c.req.param("platform"), waitUntil);
+    return webhooksPOST(
+      c.req.raw,
+      c.req.param("platform"),
+      waitUntil,
+      slackWebhookServices,
+    );
   });
 
   return app;
