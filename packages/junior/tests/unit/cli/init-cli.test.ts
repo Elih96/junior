@@ -80,13 +80,18 @@ describe("init cli", () => {
     expect(pluginsFile).toContain(
       'import { defineJuniorPlugins } from "@sentry/junior";',
     );
+    expect(pluginsFile).toContain(
+      'import { createMemoryPlugin } from "@sentry/junior-memory";',
+    );
     expect(pluginsFile).toContain("defineJuniorPlugins(");
+    expect(pluginsFile).toContain("createMemoryPlugin()");
     expect(pluginsFile).toContain('"@sentry/junior-maintenance"');
 
     const pkg = JSON.parse(
       fs.readFileSync(path.join(target, "package.json"), "utf8"),
     );
     expect(pkg.dependencies["@sentry/junior"]).toBe("latest");
+    expect(pkg.dependencies["@sentry/junior-memory"]).toBe("latest");
     expect(pkg.dependencies["@sentry/junior-maintenance"]).toBe("latest");
     expect(pkg.devDependencies.nitro).toBeDefined();
     expect(pkg.devDependencies.vite).toBeDefined();
