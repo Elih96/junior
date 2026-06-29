@@ -2,7 +2,11 @@ import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-import { loadEnvFiles } from "./lib/load-env-files.mjs";
+import {
+  applyJuniorDevelopmentDefaults,
+  JUNIOR_LOCAL_DEV_HEARTBEAT_SECRET,
+  loadEnvFiles,
+} from "./lib/load-env-files.mjs";
 import {
   linkDirectory,
   resolveInjectedPackageDir,
@@ -108,28 +112,22 @@ function syncInjectedPackageDist(packageName, packageDir, options = {}) {
 const tunnelToken = process.env.CLOUDFLARE_TUNNEL_TOKEN?.trim();
 const tunnelUrl =
   process.env.CLOUDFLARE_TUNNEL_URL?.trim() || `http://localhost:${devPort}`;
-const localInternalSecret = "junior-local-dev-internal";
-const heartbeatSecret =
-  process.env.JUNIOR_SCHEDULER_SECRET?.trim() ||
-  process.env.CRON_SECRET?.trim() ||
-  "junior-local-dev-heartbeat";
-const heartbeatUrl =
-  process.env.JUNIOR_DEV_HEARTBEAT_URL?.trim() ||
-  `http://localhost:${devPort}/api/internal/heartbeat`;
-const heartbeatIntervalMs = 60_000;
-
+applyJuniorDevelopmentDefaults(process.env, {
+  baseUrl: `http://localhost:${devPort}`,
+});
 if (
   !process.env.JUNIOR_SCHEDULER_SECRET?.trim() &&
   !process.env.CRON_SECRET?.trim()
 ) {
-  process.env.JUNIOR_SCHEDULER_SECRET = heartbeatSecret;
+  process.env.JUNIOR_SCHEDULER_SECRET = JUNIOR_LOCAL_DEV_HEARTBEAT_SECRET;
 }
-if (!process.env.JUNIOR_SECRET?.trim()) {
-  process.env.JUNIOR_SECRET = localInternalSecret;
-}
-if (!process.env.JUNIOR_BASE_URL?.trim()) {
-  process.env.JUNIOR_BASE_URL = `http://localhost:${devPort}`;
-}
+const heartbeatSecret =
+  process.env.JUNIOR_SCHEDULER_SECRET?.trim() ||
+  process.env.CRON_SECRET?.trim();
+const heartbeatUrl =
+  process.env.JUNIOR_DEV_HEARTBEAT_URL?.trim() ||
+  `http://localhost:${devPort}/api/internal/heartbeat`;
+const heartbeatIntervalMs = 60_000;
 
 async function pulseHeartbeat() {
   try {

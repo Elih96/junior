@@ -1,38 +1,38 @@
-import { logInfo, logWarn, withSpan } from "@/chat/logging";
+import { logInfo, logWarn } from "@/chat/logging";
 import { onPluginEgressResponse } from "@/chat/plugins/credential-hooks";
-import {
-  matchesSandboxEgressDomain,
-  resolveSandboxEgressProviderForHost,
-} from "@/chat/sandbox/egress-policy";
+import { matchesSandboxEgressDomain } from "@/chat/sandbox/egress/policy";
 import {
   hasSandboxEgressLeaseTransformForHost,
   sandboxEgressCredentialLease,
   SandboxEgressCredentialError,
   selectSandboxEgressGrant,
-} from "@/chat/sandbox/egress-credentials";
-import { verifyVercelSandboxOidcToken } from "@/chat/sandbox/egress-oidc";
+} from "@/chat/sandbox/egress/credentials";
 import {
   clearSandboxEgressCredentialLease,
-  parseSandboxEgressCredentialToken,
   SANDBOX_EGRESS_PROXY_PATH,
   setSandboxEgressAuthRequiredSignal,
   setSandboxEgressPermissionDeniedSignal,
   type SandboxEgressCredentialContext,
   type SandboxEgressCredentialLease,
-} from "@/chat/sandbox/egress-session";
+} from "@/chat/sandbox/egress/session";
 import {
   shouldPropagateSandboxEgressTrace,
   type SandboxEgressTracePropagationConfig,
-} from "@/chat/sandbox/egress-tracing";
+} from "@/chat/sandbox/egress/tracing";
 import { EgressAuthRequired } from "@sentry/junior-plugin-api";
-import type { JWTPayload } from "jose";
-import * as Sentry from "@/chat/sentry";
 
-const OIDC_TOKEN_HEADER = "vercel-sandbox-oidc-token";
-const FORWARDED_HOST_HEADER = "vercel-forwarded-host";
-const FORWARDED_SCHEME_HEADER = "vercel-forwarded-scheme";
-const FORWARDED_PORT_HEADER = "vercel-forwarded-port";
-const FORWARDED_PATH_HEADER = "vercel-forwarded-path";
+// Module overview: own the trusted half of sandbox credentialed egress.
+//
+// `proxy.ts` first proves that the request came from the expected Vercel
+// Sandbox VM and reconstructs the upstream URL from Vercel forwarding headers.
+// This module starts after that point: it chooses the provider grant, obtains
+// credential header transforms, forwards the upstream request, and records the
+// auth/permission signal that the sandbox command runner consumes afterward.
+//
+// Keep this file about the provider request itself. Sandbox identity checks and
+// forwarded-header parsing belong in `proxy.ts`; signed context, leases, and
+// command-result signals belong in `session.ts`.
+
 const HOP_BY_HOP_HEADERS = new Set([
   "connection",
   "host",
@@ -45,11 +45,11 @@ const HOP_BY_HOP_HEADERS = new Set([
   "upgrade",
 ]);
 const PROXY_ONLY_HEADERS = new Set([
-  OIDC_TOKEN_HEADER,
-  FORWARDED_HOST_HEADER,
-  FORWARDED_SCHEME_HEADER,
-  FORWARDED_PORT_HEADER,
-  FORWARDED_PATH_HEADER,
+  "vercel-sandbox-oidc-token",
+  "vercel-forwarded-host",
+  "vercel-forwarded-scheme",
+  "vercel-forwarded-port",
+  "vercel-forwarded-path",
 ]);
 const TRACE_PROPAGATION_HEADERS = new Set([
   "baggage",
@@ -65,27 +65,24 @@ const UPSTREAM_PERMISSION_REJECTION_STATUS = 403;
 const GRANT_SELECTION_BODY_TEXT_LIMIT_BYTES = 64 * 1024;
 const RESPONSE_BODY_TEXT_LIMIT_BYTES = 64 * 1024;
 
-/** Intercepts a credential-injected sandbox HTTP request before live forwarding. */
-export type SandboxEgressHttpInterceptor = (input: {
+/**
+ * Intercepts the already-authenticated provider request before live forwarding.
+ *
+ * Tests use this to inspect the exact upstream request after grant selection
+ * and credential header injection, without weakening the proxy verification
+ * path that runs before this hook is reached.
+ */
+export type CredentialedEgressHttpInterceptor = (input: {
   provider: string;
   request: Request;
   upstreamUrl: URL;
 }) => Promise<Response | undefined>;
 
-interface ProxyDeps {
+/** Runtime dependencies for the credentialed provider forwarding step. */
+export interface CredentialedEgressDeps {
   fetch?: typeof fetch;
-  interceptHttp?: SandboxEgressHttpInterceptor;
+  interceptHttp?: CredentialedEgressHttpInterceptor;
   tracePropagation?: SandboxEgressTracePropagationConfig;
-  verifyOidc?: (token: string) => Promise<JWTPayload>;
-}
-
-type UpstreamUrlResult = { ok: true; url: URL } | { ok: false; error: string };
-type UpstreamPathResult =
-  | { ok: true; path: string }
-  | { ok: false; error: string };
-
-function jsonError(message: string, status: number): Response {
-  return Response.json({ error: message }, { status });
 }
 
 function authRequiredResponse(input: {
@@ -139,23 +136,6 @@ function egressAttributes(input: {
     ...(input.path ? { "url.path": input.path } : {}),
     ...(input.status ? { "http.response.status_code": input.status } : {}),
   };
-}
-
-function credentialTokenFromRequest(request: Request): string | undefined {
-  const pathname = new URL(request.url).pathname;
-  const prefix = `${SANDBOX_EGRESS_PROXY_PATH}/`;
-  if (!pathname.startsWith(prefix)) {
-    return undefined;
-  }
-  const token = pathname.slice(prefix.length).split("/")[0];
-  if (!token) {
-    return undefined;
-  }
-  try {
-    return decodeURIComponent(token);
-  } catch {
-    return undefined;
-  }
 }
 
 function redactedProxyPath(pathname: string): string {
@@ -275,104 +255,6 @@ function logSandboxEgressUpstreamRequest(input: {
   );
 }
 
-function normalizeHost(value: string): string | undefined {
-  const trimmed = value.trim().toLowerCase();
-  if (
-    !trimmed ||
-    trimmed.includes("/") ||
-    trimmed.includes("\\") ||
-    trimmed.includes(":")
-  ) {
-    return undefined;
-  }
-  return trimmed.replace(/\.$/, "");
-}
-
-function normalizeScheme(value: string): "https" | undefined {
-  return value.trim().toLowerCase() === "https" ? "https" : undefined;
-}
-
-function normalizePort(value: string | null): string | undefined {
-  if (!value) {
-    return undefined;
-  }
-  const trimmed = value.trim();
-  if (!/^\d{1,5}$/.test(trimmed)) {
-    return undefined;
-  }
-  const port = Number.parseInt(trimmed, 10);
-  return port >= 1 && port <= 65_535 ? trimmed : undefined;
-}
-
-function sandboxIdFromPayload(payload: JWTPayload): string | undefined {
-  return typeof payload.sandbox_id === "string"
-    ? payload.sandbox_id
-    : undefined;
-}
-
-function normalizedForwardedPath(path: string): UpstreamPathResult {
-  if (
-    !path.startsWith("/") ||
-    path.startsWith("//") ||
-    path.includes("#") ||
-    /[\r\n]/.test(path)
-  ) {
-    return { ok: false, error: "Invalid forwarded path" };
-  }
-  try {
-    const url = new URL(path, "https://sandbox-forwarded.local");
-    return { ok: true, path: `${url.pathname}${url.search}` };
-  } catch {
-    return { ok: false, error: "Invalid forwarded path" };
-  }
-}
-
-function upstreamPath(request: Request): UpstreamPathResult {
-  const forwardedPath = request.headers.get(FORWARDED_PATH_HEADER);
-  if (!forwardedPath?.trim()) {
-    return { ok: false, error: "Missing forwarded path" };
-  }
-
-  // Vercel may normalize request.url; this header carries the original target.
-  return normalizedForwardedPath(forwardedPath.trim());
-}
-
-function buildUpstreamUrl(request: Request): UpstreamUrlResult {
-  const forwardedHost = request.headers.get(FORWARDED_HOST_HEADER);
-  if (!forwardedHost?.trim()) {
-    return { ok: false, error: "Missing forwarded host" };
-  }
-  const host = normalizeHost(forwardedHost);
-  if (!host) {
-    return { ok: false, error: "Invalid forwarded host" };
-  }
-  const forwardedScheme = request.headers.get(FORWARDED_SCHEME_HEADER);
-  if (!forwardedScheme?.trim()) {
-    return { ok: false, error: "Missing forwarded scheme" };
-  }
-  const scheme = normalizeScheme(forwardedScheme);
-  if (!scheme) {
-    return { ok: false, error: "Forwarded scheme must be https" };
-  }
-  const forwardedPort = request.headers.get(FORWARDED_PORT_HEADER);
-  const port = normalizePort(forwardedPort);
-  if (forwardedPort && !port) {
-    return { ok: false, error: "Invalid forwarded port" };
-  }
-  const path = upstreamPath(request);
-  if (!path.ok) {
-    return { ok: false, error: path.error };
-  }
-  try {
-    const url = new URL(
-      `${scheme}://${host}${port ? `:${port}` : ""}${path.path}`,
-    );
-    return { ok: true, url };
-  } catch {
-    return { ok: false, error: "Invalid forwarded URL" };
-  }
-}
-
 async function requestBodyBytes(
   request: Request,
 ): Promise<ArrayBuffer | undefined> {
@@ -475,7 +357,14 @@ async function responseTextWithinLimit(
   return new TextDecoder().decode(combined);
 }
 
-/** Build sanitized upstream headers and preserve trace headers only for configured hosts. */
+/**
+ * Build the upstream request headers.
+ *
+ * Sandbox/proxy-only headers are stripped so they cannot leak to providers, and
+ * trace headers are preserved only for hosts opted into trace propagation.
+ * Credential lease transforms win last because they are the host-issued
+ * authority for provider auth headers.
+ */
 function requestHeaders(
   request: Request,
   lease: SandboxEgressCredentialLease,
@@ -532,180 +421,87 @@ function responseHeaders(upstream: Response): Headers {
   return headers;
 }
 
-/** Continue inbound trace context only after sandbox egress verification succeeds. */
-function continueSandboxEgressTrace<T>(
-  request: Request,
-  upstreamHost: string,
-  tracePropagation: SandboxEgressTracePropagationConfig,
-  callback: () => Promise<T>,
-): Promise<T> {
-  const sentryTrace = request.headers.get("sentry-trace") ?? undefined;
-  const baggage = request.headers.get("baggage") ?? undefined;
-  const run = () =>
-    withSpan("sandbox.egress", "http.server", {}, callback, {
-      "http.request.method": request.method,
-      "url.path": redactedProxyPath(new URL(request.url).pathname),
-    });
-  if (
-    !shouldPropagateSandboxEgressTrace(upstreamHost, tracePropagation) ||
-    (!sentryTrace && !baggage)
-  ) {
-    return run();
-  }
-  return Sentry.continueTrace({ sentryTrace, baggage }, run);
+function leaseLogAttributes(input: {
+  egressId: string;
+  lease: SandboxEgressCredentialLease;
+  provider: string;
+  request: Request;
+  status: number;
+  upstream?: Response;
+  upstreamUrl: URL;
+}): Record<string, unknown> {
+  return {
+    ...egressAttributes({
+      egressId: input.egressId,
+      grantAccess: input.lease.grant.access,
+      grantName: input.lease.grant.name,
+      grantReason: input.lease.grant.reason,
+      host: input.upstreamUrl.hostname,
+      method: input.request.method,
+      path: input.upstreamUrl.pathname,
+      provider: input.provider,
+      status: input.status,
+    }),
+    ...routingAttributes(input.request, input.upstreamUrl),
+    ...(input.upstream
+      ? upstreamPermissionAttributes(input.provider, input.upstream)
+      : {}),
+  };
 }
 
-/** Return whether a request appears to be from the Vercel Sandbox egress proxy. */
-export function isSandboxEgressForwardedRequest(request: Request): boolean {
-  return Boolean(
-    request.headers.get(OIDC_TOKEN_HEADER)?.trim() &&
-    request.headers.get(FORWARDED_HOST_HEADER)?.trim() &&
-    request.headers.get(FORWARDED_SCHEME_HEADER)?.trim(),
-  );
+async function recordAuthRequired(input: {
+  authorization?: SandboxEgressCredentialLease["authorization"];
+  credentialContext: SandboxEgressCredentialContext;
+  grant: SandboxEgressCredentialLease["grant"];
+  kind?: "auth_required" | "unavailable";
+  message: string;
+  provider: string;
+}): Promise<void> {
+  await setSandboxEgressAuthRequiredSignal(input.credentialContext, {
+    provider: input.provider,
+    grant: input.grant,
+    kind: input.kind ?? "auth_required",
+    ...(input.authorization ? { authorization: input.authorization } : {}),
+    message: input.message,
+  });
 }
 
-/** Proxy one Vercel Sandbox firewall egress request through lazy credential headers. */
-export async function proxySandboxEgressRequest(
-  request: Request,
-  deps: ProxyDeps = {},
-): Promise<Response> {
-  return await proxySandboxEgressRequestImpl(request, deps);
+async function recordPermissionDenied(input: {
+  credentialContext: SandboxEgressCredentialContext;
+  lease: SandboxEgressCredentialLease;
+  message: string;
+  provider: string;
+  upstream: Response;
+  upstreamUrl: URL;
+}): Promise<void> {
+  await setSandboxEgressPermissionDeniedSignal(input.credentialContext, {
+    provider: input.provider,
+    grant: input.lease.grant,
+    ...(input.lease.account ? { account: input.lease.account } : {}),
+    message: input.message,
+    source: "upstream",
+    status: input.upstream.status,
+    upstreamHost: input.upstreamUrl.hostname,
+    upstreamPath: displayedUpstreamPath(input.upstreamUrl),
+    ...(input.provider === "github"
+      ? githubPermissionHeaders(input.upstream)
+      : {}),
+  });
 }
 
-async function proxySandboxEgressRequestImpl(
-  request: Request,
-  deps: ProxyDeps,
-): Promise<Response> {
-  const oidcToken = request.headers.get(OIDC_TOKEN_HEADER)?.trim();
-  if (!oidcToken) {
-    return jsonError("Missing Vercel Sandbox OIDC token", 401);
-  }
-
-  let oidcPayload: JWTPayload;
-  try {
-    oidcPayload = await (deps.verifyOidc ?? verifyVercelSandboxOidcToken)(
-      oidcToken,
-    );
-  } catch (error) {
-    logWarn(
-      "sandbox_egress_oidc_verification_failed",
-      {},
-      {
-        "app.sandbox.oidc_error":
-          error instanceof Error ? error.message : String(error),
-      },
-      "Sandbox egress OIDC verification failed",
-    );
-    return jsonError("Invalid Vercel Sandbox OIDC token", 401);
-  }
-
-  const activeEgressId = sandboxIdFromPayload(oidcPayload);
-  if (!activeEgressId) {
-    logWarn(
-      "sandbox_egress_oidc_session_missing",
-      {},
-      {
-        "http.request.method": request.method,
-        "url.path": redactedProxyPath(new URL(request.url).pathname),
-      },
-      "Sandbox egress OIDC payload did not include a VM session id",
-    );
-    return jsonError(
-      "Vercel Sandbox OIDC token did not include sandbox_id",
-      401,
-    );
-  }
-
-  const upstreamResult = buildUpstreamUrl(request);
-  if (!upstreamResult.ok) {
-    logWarn(
-      "sandbox_egress_upstream_url_invalid",
-      {},
-      {
-        ...egressAttributes({
-          egressId: activeEgressId,
-          method: request.method,
-          path: redactedProxyPath(new URL(request.url).pathname),
-          status: 400,
-        }),
-        ...routingAttributes(request),
-      },
-      "Sandbox egress forwarded request had invalid upstream routing headers",
-    );
-    return jsonError(upstreamResult.error, 400);
-  }
-  const upstreamUrl = upstreamResult.url;
-
-  const provider = resolveSandboxEgressProviderForHost(upstreamUrl.hostname);
-  if (!provider) {
-    logWarn(
-      "sandbox_egress_provider_unresolved",
-      {},
-      {
-        ...egressAttributes({
-          egressId: activeEgressId,
-          host: upstreamUrl.hostname,
-          method: request.method,
-          path: upstreamUrl.pathname,
-          status: 403,
-        }),
-        ...routingAttributes(request, upstreamUrl),
-      },
-      "Sandbox egress forwarded host is not owned by any credential provider",
-    );
-    return jsonError("No provider owns forwarded host", 403);
-  }
-
-  // Vercel OIDC authenticates the forwarded VM session; Junior's signed
-  // credential context identifies which provider credentials may be issued
-  // lazily for that session.
-  const credentialContext = parseSandboxEgressCredentialToken(
-    credentialTokenFromRequest(request),
-  );
-  if (!credentialContext || credentialContext.egressId !== activeEgressId) {
-    logWarn(
-      "sandbox_egress_credential_context_unauthorized",
-      {},
-      {
-        ...egressAttributes({
-          egressId: activeEgressId,
-          host: upstreamUrl.hostname,
-          method: request.method,
-          path: upstreamUrl.pathname,
-          provider,
-          status: 403,
-        }),
-        ...routingAttributes(request, upstreamUrl),
-      },
-      "Sandbox egress request did not include a valid credential context for the VM session",
-    );
-    return jsonError(
-      "Sandbox egress credential context is not authorized",
-      403,
-    );
-  }
-
-  return await continueSandboxEgressTrace(
-    request,
-    upstreamUrl.hostname,
-    deps.tracePropagation ?? {},
-    async () =>
-      await proxySandboxEgressVerifiedRequest({
-        activeEgressId,
-        credentialContext,
-        deps,
-        provider,
-        request,
-        upstreamUrl,
-      }),
-  );
-}
-
-/** Proxy egress only after sandbox identity and signed credential context pass. */
-async function proxySandboxEgressVerifiedRequest(input: {
+/**
+ * Forward one verified sandbox egress request with host-managed credentials.
+ *
+ * The caller must already have authenticated the sandbox VM, checked the signed
+ * credential context, and resolved the provider for `upstreamUrl`. This function
+ * then selects the read/write grant, issues or reuses a short-lived credential
+ * lease, applies its header transforms, and maps provider auth failures into
+ * command-level signals instead of throwing raw upstream details at the agent.
+ */
+export async function executeCredentialedEgressRequest(input: {
   activeEgressId: string;
   credentialContext: SandboxEgressCredentialContext;
-  deps: ProxyDeps;
+  deps: CredentialedEgressDeps;
   provider: string;
   request: Request;
   upstreamUrl: URL;
@@ -718,14 +514,14 @@ async function proxySandboxEgressVerifiedRequest(input: {
     request,
     upstreamUrl,
   } = input;
-  let body: ArrayBuffer | undefined;
-  let bodyRead = false;
-  if (isGrantSelectionBodyVisible({ provider, upstreamUrl })) {
-    body = await requestBodyBytes(request);
-    bodyRead = true;
-  }
+  const bodyForGrantSelection = isGrantSelectionBodyVisible({
+    provider,
+    upstreamUrl,
+  })
+    ? await requestBodyBytes(request)
+    : undefined;
   const grantSelection = await selectSandboxEgressGrant({
-    bodyText: requestBodyText(body),
+    bodyText: requestBodyText(bodyForGrantSelection),
     provider,
     method: request.method,
     upstreamUrl,
@@ -740,11 +536,12 @@ async function proxySandboxEgressVerifiedRequest(input: {
     );
   } catch (error) {
     if (error instanceof SandboxEgressCredentialError) {
-      await setSandboxEgressAuthRequiredSignal(credentialContext, {
+      await recordAuthRequired({
+        credentialContext,
         provider: error.provider,
         grant: error.grant,
         kind: error.kind,
-        ...(error.authorization ? { authorization: error.authorization } : {}),
+        authorization: error.authorization,
         message: error.message,
       });
       const isAuthRequired = error.kind === "auth_required";
@@ -780,30 +577,33 @@ async function proxySandboxEgressVerifiedRequest(input: {
     throw error;
   }
 
+  const attributes = (status: number, upstream?: Response) =>
+    leaseLogAttributes({
+      egressId: activeEgressId,
+      lease,
+      provider,
+      request,
+      status,
+      ...(upstream ? { upstream } : {}),
+      upstreamUrl,
+    });
+
   if (!hasSandboxEgressLeaseTransformForHost(lease, upstreamUrl.hostname)) {
     logWarn(
       "sandbox_egress_transform_missing",
       {},
       {
-        ...egressAttributes({
-          egressId: activeEgressId,
-          grantAccess: lease.grant.access,
-          grantName: lease.grant.name,
-          grantReason: lease.grant.reason,
-          host: upstreamUrl.hostname,
-          method: request.method,
-          path: upstreamUrl.pathname,
-          provider,
-          status: 403,
-        }),
+        ...attributes(403),
         "app.sandbox.egress.transform_domains": lease.headerTransforms.map(
           (transform) => transform.domain,
         ),
-        ...routingAttributes(request, upstreamUrl),
       },
       "Sandbox egress credential lease does not cover forwarded host",
     );
-    return jsonError("Credential lease does not cover forwarded host", 403);
+    return Response.json(
+      { error: "Credential lease does not cover forwarded host" },
+      { status: 403 },
+    );
   }
 
   const fetchImpl = deps.fetch ?? fetch;
@@ -813,9 +613,7 @@ async function proxySandboxEgressVerifiedRequest(input: {
     upstreamUrl.hostname,
     deps.tracePropagation ?? {},
   );
-  if (!bodyRead) {
-    body = await requestBodyBytes(request);
-  }
+  const body = bodyForGrantSelection ?? (await requestBodyBytes(request));
   const intercepted = await deps.interceptHttp?.({
     provider,
     request: new Request(upstreamUrl, {
@@ -849,34 +647,19 @@ async function proxySandboxEgressVerifiedRequest(input: {
       },
     });
     if (effects.permissionDenied) {
-      await setSandboxEgressPermissionDeniedSignal(credentialContext, {
+      await recordPermissionDenied({
+        credentialContext,
         provider,
-        grant: lease.grant,
-        ...(lease.account ? { account: lease.account } : {}),
+        lease,
         message: effects.permissionDenied.message,
-        source: "upstream",
-        status: upstream.status,
-        upstreamHost: upstreamUrl.hostname,
-        upstreamPath: displayedUpstreamPath(upstreamUrl),
-        ...(provider === "github" ? githubPermissionHeaders(upstream) : {}),
+        upstream,
+        upstreamUrl,
       });
       logWarn(
         "sandbox_egress_upstream_permission_classified",
         {},
         {
-          ...egressAttributes({
-            egressId: activeEgressId,
-            grantAccess: lease.grant.access,
-            grantName: lease.grant.name,
-            grantReason: lease.grant.reason,
-            host: upstreamUrl.hostname,
-            method: request.method,
-            path: upstreamUrl.pathname,
-            provider,
-            status: upstream.status,
-          }),
-          ...routingAttributes(request, upstreamUrl),
-          ...upstreamPermissionAttributes(provider, upstream),
+          ...attributes(upstream.status, upstream),
         },
         "Sandbox egress plugin classified upstream response as permission denied",
       );
@@ -890,32 +673,18 @@ async function proxySandboxEgressVerifiedRequest(input: {
       lease.grant.name,
       credentialContext,
     );
-    await setSandboxEgressAuthRequiredSignal(credentialContext, {
+    await recordAuthRequired({
+      credentialContext,
       provider,
       grant: lease.grant,
-      kind: "auth_required",
-      ...((error.authorization ?? lease.authorization)
-        ? { authorization: error.authorization ?? lease.authorization }
-        : {}),
+      authorization: error.authorization ?? lease.authorization,
       message: error.message,
     });
     logWarn(
       "sandbox_egress_upstream_auth_required_classified",
       {},
       {
-        ...egressAttributes({
-          egressId: activeEgressId,
-          grantAccess: lease.grant.access,
-          grantName: lease.grant.name,
-          grantReason: lease.grant.reason,
-          host: upstreamUrl.hostname,
-          method: request.method,
-          path: upstreamUrl.pathname,
-          provider,
-          status: upstream.status,
-        }),
-        ...routingAttributes(request, upstreamUrl),
-        ...upstreamPermissionAttributes(provider, upstream),
+        ...attributes(upstream.status, upstream),
       },
       "Sandbox egress plugin classified upstream response as auth required",
     );
@@ -941,19 +710,7 @@ async function proxySandboxEgressVerifiedRequest(input: {
       "sandbox_egress_upstream_error_response",
       {},
       {
-        ...egressAttributes({
-          egressId: activeEgressId,
-          grantAccess: lease.grant.access,
-          grantName: lease.grant.name,
-          grantReason: lease.grant.reason,
-          host: upstreamUrl.hostname,
-          method: request.method,
-          path: upstreamUrl.pathname,
-          provider,
-          status: upstream.status,
-        }),
-        ...routingAttributes(request, upstreamUrl),
-        ...upstreamPermissionAttributes(provider, upstream),
+        ...attributes(upstream.status, upstream),
         "error.type": `http_${upstream.status}`,
       },
       `Sandbox egress upstream returned HTTP ${upstream.status}`,
@@ -967,19 +724,7 @@ async function proxySandboxEgressVerifiedRequest(input: {
       "sandbox_egress_upstream_auth_rejected",
       {},
       {
-        ...egressAttributes({
-          egressId: activeEgressId,
-          grantAccess: lease.grant.access,
-          grantName: lease.grant.name,
-          grantReason: lease.grant.reason,
-          host: upstreamUrl.hostname,
-          method: request.method,
-          path: upstreamUrl.pathname,
-          provider,
-          status: upstream.status,
-        }),
-        ...routingAttributes(request, upstreamUrl),
-        ...upstreamPermissionAttributes(provider, upstream),
+        ...attributes(upstream.status, upstream),
         ...(upstream.status === UPSTREAM_TOKEN_REJECTION_STATUS
           ? {
               "app.sandbox.egress.www_authenticate":
@@ -997,11 +742,11 @@ async function proxySandboxEgressVerifiedRequest(input: {
         lease.grant.name,
         credentialContext,
       );
-      await setSandboxEgressAuthRequiredSignal(credentialContext, {
+      await recordAuthRequired({
+        credentialContext,
         provider,
         grant: lease.grant,
-        kind: "auth_required",
-        ...(lease.authorization ? { authorization: lease.authorization } : {}),
+        authorization: lease.authorization,
         message: `Provider rejected the injected ${provider} credential.`,
       });
       await upstream.body?.cancel().catch(() => undefined);
@@ -1016,16 +761,13 @@ async function proxySandboxEgressVerifiedRequest(input: {
         lease.grant.name,
         credentialContext,
       );
-      await setSandboxEgressPermissionDeniedSignal(credentialContext, {
+      await recordPermissionDenied({
+        credentialContext,
         provider,
-        grant: lease.grant,
-        ...(lease.account ? { account: lease.account } : {}),
+        lease,
         message: permissionDeniedMessage(provider, lease.grant),
-        source: "upstream",
-        status: UPSTREAM_PERMISSION_REJECTION_STATUS,
-        upstreamHost: upstreamUrl.hostname,
-        upstreamPath: displayedUpstreamPath(upstreamUrl),
-        ...(provider === "github" ? githubPermissionHeaders(upstream) : {}),
+        upstream,
+        upstreamUrl,
       });
     }
   }
