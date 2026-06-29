@@ -419,6 +419,7 @@ export function getPluginTools(
         source: context.source,
         userText: context.userText,
         embedder: createPluginEmbedder(pluginName),
+        egress: context.egress,
         model: createPluginModel(pluginName, plugin.model),
         state: createPluginState(pluginName),
       };
@@ -439,6 +440,7 @@ export function getPluginTools(
         source: context.source,
         userText: context.userText,
         embedder: createPluginEmbedder(pluginName),
+        egress: context.egress,
         model: createPluginModel(pluginName, plugin.model),
         state: createPluginState(pluginName),
       };

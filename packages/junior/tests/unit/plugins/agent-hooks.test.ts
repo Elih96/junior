@@ -34,6 +34,11 @@ const LOCAL_DESTINATION = {
   conversationId: "local:test:agent-hooks",
 } as const;
 const LOCAL_SOURCE = createLocalSource(LOCAL_DESTINATION.conversationId);
+const TEST_EGRESS = {
+  async fetch() {
+    return new Response("ok");
+  },
+};
 
 const EMPTY_CONVERSATIONS: PluginConversations = {
   async listRecent() {
@@ -397,6 +402,7 @@ describe("agent plugin hooks", () => {
       const tools = getPluginTools({
         destination: SLACK_DESTINATION,
         requester: TEST_REQUESTER,
+        egress: TEST_EGRESS,
         source: SLACK_SOURCE,
         sandbox: {} as any,
       });
@@ -433,6 +439,7 @@ describe("agent plugin hooks", () => {
     try {
       const tools = getPluginTools({
         destination: LOCAL_DESTINATION,
+        egress: TEST_EGRESS,
         source: LOCAL_SOURCE,
         sandbox: {} as any,
       });
@@ -474,6 +481,7 @@ describe("agent plugin hooks", () => {
       expect(() =>
         getPluginTools({
           destination: LOCAL_DESTINATION,
+          egress: TEST_EGRESS,
           source: LOCAL_SOURCE,
           sandbox: {} as any,
         }),
@@ -511,6 +519,7 @@ describe("agent plugin hooks", () => {
           {},
           {
             destination: LOCAL_DESTINATION,
+            egress: TEST_EGRESS,
             source: LOCAL_SOURCE,
             sandbox: {} as any,
           },
@@ -1017,6 +1026,7 @@ describe("getPluginTools channel resolution", () => {
   function capturePluginContext(
     context: ToolRuntimeContext = {
       destination: LOCAL_DESTINATION,
+      egress: TEST_EGRESS,
       source: LOCAL_SOURCE,
       sandbox: {} as any,
     },
@@ -1054,6 +1064,7 @@ describe("getPluginTools channel resolution", () => {
         teamId: "T123",
         channelId: "COUT",
       },
+      egress: TEST_EGRESS,
       sandbox: {} as any,
     });
     expect(ctx.source).toEqual(source);
@@ -1073,6 +1084,7 @@ describe("getPluginTools channel resolution", () => {
         teamId: "T123",
         channelId: "COUT",
       },
+      egress: TEST_EGRESS,
       sandbox: {} as any,
     });
     expect(ctx.slack?.channelCapabilities.canCreateCanvas).toBe(true);
@@ -1088,6 +1100,7 @@ describe("getPluginTools channel resolution", () => {
         teamId: "T123",
         channelId: "COUT",
       },
+      egress: TEST_EGRESS,
       requester: TEST_REQUESTER,
       sandbox: {} as any,
     });
@@ -1107,6 +1120,7 @@ describe("getPluginTools channel resolution", () => {
         teamId: "T123",
         channelId: "COUT",
       },
+      egress: TEST_EGRESS,
       requester: TEST_REQUESTER,
       sandbox: {} as any,
     });
@@ -1118,6 +1132,7 @@ describe("getPluginTools channel resolution", () => {
     const ctx = capturePluginContext({
       conversationId: "slack:DDM:1780479160.406339",
       destination: SLACK_DESTINATION,
+      egress: TEST_EGRESS,
       source: SLACK_SOURCE,
       sandbox: {} as any,
     });
