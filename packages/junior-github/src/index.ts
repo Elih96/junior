@@ -1,10 +1,151 @@
+/**
+ * GitHub plugin runtime boundary.
+ *
+ * This package owns GitHub App credentials, egress grant selection, sandbox git
+ * preparation, and runtime tools. Host egress injects provider credentials; the
+ * plugin builds provider requests and enforces GitHub-specific command policy.
+ */
 import { createPrivateKey, createSign } from "node:crypto";
-import { defineJuniorPlugin } from "@sentry/junior-plugin-api";
 import {
+  defineJuniorPlugin,
+  type EgressHookContext,
+  type EgressResponseHookContext,
+  type IssueCredentialHookContext,
+  type PluginCredentialResult,
+  type PluginGrant,
+  type PluginGrantAccess,
+  type PluginProviderAccount,
+  type PluginRegistration,
+  type PluginStoredTokens,
+  type PluginUserTokenSlot,
+  type Requester,
+  type SandboxPrepareHookContext,
+} from "@sentry/junior-plugin-api";
+import {
+  type GitHubAppPermissions,
   normalizePermissions,
   permissionCapabilities,
   readGrantPermissions,
 } from "./permissions.js";
+import { createGitHubTools } from "./tools.js";
+
+export type { GitHubAppPermissionLevel } from "./permissions.js";
+
+/** Configure the built-in GitHub plugin manifest and hooks. */
+export interface GitHubPluginOptions {
+  /**
+   * Extra OAuth `scope` values to request during GitHub App user authorization.
+   *
+   * GitHub App user tokens report empty scopes, so Junior treats this as a
+   * local reauthorization contract only. Effective access still comes from the
+   * app permissions, installation repositories, and requesting user's access.
+   */
+  additionalUserScopes?: string[];
+
+  /**
+   * GitHub App installation permissions Junior should request for app tokens.
+   *
+   * Keys may use GitHub permission names with underscores or hyphens. Junior
+   * records these as plugin capabilities and requests read-only installation
+   * tokens by scoping read-capable permissions down to `read`.
+   * GitHub remains the source of truth for whether a permission exists.
+   */
+  appPermissions?: GitHubAppPermissions;
+
+  /** Environment variable containing the GitHub App id. */
+  appIdEnv?: string;
+
+  /** Environment variable containing Junior's Git committer email. */
+  botEmailEnv?: string;
+
+  /** Environment variable containing Junior's Git committer name. */
+  botNameEnv?: string;
+
+  /** Environment variable containing the GitHub App OAuth client id. */
+  clientIdEnv?: string;
+
+  /** Environment variable containing the GitHub App OAuth client secret. */
+  clientSecretEnv?: string;
+
+  /** Environment variable containing the GitHub App installation id. */
+  installationIdEnv?: string;
+
+  /** Environment variable containing the GitHub App private key. */
+  privateKeyEnv?: string;
+}
+
+type JsonRecord = Record<string, unknown>;
+type GitHubGrantName = "installation-read" | "user-read" | "user-write";
+type GitHubGrantReason =
+  | "github.api-read"
+  | "github.api-write"
+  | "github.contents-write"
+  | "github.fork-create"
+  | "github.git-read"
+  | "github.git-write"
+  | "github.graphql-read"
+  | "github.graphql-write"
+  | "github.issue-create"
+  | "github.issues-write"
+  | "github.pull-create"
+  | "github.pull-requests-write"
+  | "github.user-read"
+  | "github.workflows-write";
+type GitHubGrant = PluginGrant & {
+  name: GitHubGrantName;
+  reason: GitHubGrantReason;
+};
+
+interface GitHubRequestParams {
+  body?: unknown;
+  method?: string;
+  token: string;
+}
+
+interface OAuthTokenRequestInput {
+  clientId: string;
+  clientSecret: string;
+  payload: Record<string, string>;
+}
+
+interface RefreshUserAccessTokenInput {
+  clientIdEnv: string;
+  clientSecretEnv: string;
+  refreshToken: string;
+  requestedScope?: string;
+}
+
+interface CredentialLeaseInput {
+  account?: PluginProviderAccount;
+  authorization?: {
+    provider: "github";
+    scope?: string;
+    type: "oauth";
+  };
+  expiresAtMs: number;
+  token: string;
+}
+
+type TokenResolution =
+  | { ok: true; tokens: PluginStoredTokens }
+  | { ok: false; result: PluginCredentialResult };
+
+interface UserCredentialOptions {
+  clientIdEnv: string;
+  clientSecretEnv: string;
+  userScope?: string;
+}
+
+interface InstallationCredentialOptions {
+  appIdEnv: string;
+  installationIdEnv: string;
+  loadReadPermissions(input: {
+    appJwt: string;
+    installationId: number;
+  }): Promise<Record<string, "read">>;
+  privateKeyEnv: string;
+  readPermissions?: Record<string, "read">;
+}
 
 const GITHUB_APP_ID_ENV = "GITHUB_APP_ID";
 const GITHUB_APP_PRIVATE_KEY_ENV = "GITHUB_APP_PRIVATE_KEY";
@@ -40,14 +181,16 @@ const FORK_CREATE_REQUIREMENTS = [
 ];
 
 class GitHubUserRefreshRejectedError extends Error {
-  constructor(message) {
+  constructor(message: string) {
     super(message);
     this.name = "GitHubUserRefreshRejectedError";
   }
 }
 
 class GitHubRequestError extends Error {
-  constructor(message, status) {
+  status: number;
+
+  constructor(message: string, status: number) {
     super(message);
     this.name = "GitHubRequestError";
     this.status = status;
@@ -55,17 +198,17 @@ class GitHubRequestError extends Error {
 }
 
 class GitHubPluginSetupError extends Error {
-  constructor(message) {
+  constructor(message: string) {
     super(message);
     this.name = "GitHubPluginSetupError";
   }
 }
 
-function isRecord(value) {
+function isRecord(value: unknown): value is JsonRecord {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
-function readEnv(name) {
+function readEnv(name: string): string | undefined {
   const value = process.env[name];
   if (typeof value !== "string") {
     return undefined;
@@ -74,7 +217,7 @@ function readEnv(name) {
   return trimmed ? trimmed : undefined;
 }
 
-function requireEnv(name) {
+function requireEnv(name: string): string {
   const value = readEnv(name);
   if (!value) {
     throw new GitHubPluginSetupError(`Missing ${name}`);
@@ -82,7 +225,7 @@ function requireEnv(name) {
   return value;
 }
 
-function normalizeScopeList(scopes) {
+function normalizeScopeList(scopes?: string[]): string[] {
   return [
     ...new Set(
       (scopes ?? [])
@@ -93,12 +236,15 @@ function normalizeScopeList(scopes) {
   ].sort();
 }
 
-function normalizeOAuthScope(scope) {
+function normalizeOAuthScope(scope?: string): string | undefined {
   const normalized = normalizeScopeList(scope ? [scope] : []);
   return normalized.length ? normalized.join(" ") : undefined;
 }
 
-function hasRequiredOAuthScope(storedScope, requiredScope) {
+function hasRequiredOAuthScope(
+  storedScope?: string,
+  requiredScope?: string,
+): boolean {
   const required = normalizeScopeList(requiredScope ? [requiredScope] : []);
   if (required.length === 0) {
     return true;
@@ -110,7 +256,7 @@ function hasRequiredOAuthScope(storedScope, requiredScope) {
   return required.every((scope) => stored.has(scope));
 }
 
-function cleanIdentityPart(value) {
+function cleanIdentityPart(value: unknown): string {
   return String(value ?? "")
     .replaceAll("\n", " ")
     .replaceAll("\r", " ")
@@ -118,11 +264,14 @@ function cleanIdentityPart(value) {
     .trim();
 }
 
-function isSlackUserId(value) {
+function isSlackUserId(value: string): boolean {
   return /^[UW][A-Z0-9]{5,}$/.test(value);
 }
 
-function requesterDisplayName(value, requester) {
+function requesterDisplayName(
+  value: unknown,
+  requester?: Requester,
+): string | undefined {
   const name = cleanIdentityPart(value);
   if (
     !name ||
@@ -134,7 +283,7 @@ function requesterDisplayName(value, requester) {
   return isSlackUserId(name) ? undefined : name;
 }
 
-function requesterName(requester) {
+function requesterName(requester?: Requester): string | undefined {
   return (
     requesterDisplayName(requester?.fullName, requester) ||
     requesterDisplayName(requester?.userName, requester) ||
@@ -142,18 +291,18 @@ function requesterName(requester) {
   );
 }
 
-function requesterEmail(requester) {
+function requesterEmail(requester?: Requester): string | undefined {
   const email = cleanIdentityPart(requester?.email);
   return /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(email) ? email : undefined;
 }
 
-function isGitCommitCommand(command) {
+function isGitCommitCommand(command: string): boolean {
   return /(?:^|[\s;|&])git(?:\s+(?:-C\s+\S+|-c\s+\S+|--git-dir(?:=\S+|\s+\S+)|--work-tree(?:=\S+|\s+\S+)|--namespace(?:=\S+|\s+\S+)))*\s+commit(?:\s|$)/.test(
     command,
   );
 }
 
-function prepareCommitMsgHook() {
+function prepareCommitMsgHook(): string {
   return `#!/usr/bin/env bash
 set -eu
 
@@ -186,7 +335,11 @@ printf '\\n%s\\n' "$trailer" >> "$message_file"
 `;
 }
 
-async function configureGit(ctx, key, value) {
+async function configureGit(
+  ctx: SandboxPrepareHookContext,
+  key: string,
+  value: string,
+): Promise<void> {
   const result = await ctx.sandbox.run({
     cmd: "git",
     args: ["config", "--global", key, value],
@@ -198,7 +351,7 @@ async function configureGit(ctx, key, value) {
   }
 }
 
-function base64Url(input) {
+function base64Url(input: string): string {
   return Buffer.from(input)
     .toString("base64")
     .replace(/=/g, "")
@@ -206,7 +359,7 @@ function base64Url(input) {
     .replace(/\//g, "_");
 }
 
-function getPrivateKey(envName) {
+function getPrivateKey(envName: string) {
   const raw = requireEnv(envName);
   let key;
   try {
@@ -225,7 +378,7 @@ function getPrivateKey(envName) {
   return key;
 }
 
-function createAppJwt(appId, privateKeyEnv) {
+function createAppJwt(appId: string, privateKeyEnv: string): string {
   const now = Math.floor(Date.now() / 1000);
   const header = { alg: "RS256", typ: "JWT" };
   const payload = { iat: now - 60, exp: now + 9 * 60, iss: appId };
@@ -244,7 +397,11 @@ function createAppJwt(appId, privateKeyEnv) {
   return `${signingInput}.${signature}`;
 }
 
-async function githubRequest(apiBase, path, params) {
+async function githubRequest(
+  apiBase: string,
+  path: string,
+  params: GitHubRequestParams,
+): Promise<unknown> {
   const response = await fetch(`${apiBase}${path}`, {
     method: params.method ?? "GET",
     headers: {
@@ -257,7 +414,7 @@ async function githubRequest(apiBase, path, params) {
   });
 
   const text = await response.text();
-  let parsed;
+  let parsed: unknown;
   if (text) {
     try {
       parsed = JSON.parse(text);
@@ -268,7 +425,7 @@ async function githubRequest(apiBase, path, params) {
 
   if (!response.ok) {
     const message =
-      parsed && typeof parsed === "object" && typeof parsed.message === "string"
+      isRecord(parsed) && typeof parsed.message === "string"
         ? parsed.message
         : `GitHub API error ${response.status}`;
     throw new GitHubRequestError(message, response.status);
@@ -276,7 +433,10 @@ async function githubRequest(apiBase, path, params) {
   return parsed;
 }
 
-function buildOAuthTokenRequest(input) {
+function buildOAuthTokenRequest(input: OAuthTokenRequestInput): {
+  body: URLSearchParams;
+  headers: Record<string, string>;
+} {
   const payload = {
     ...input.payload,
     client_id: input.clientId,
@@ -291,7 +451,7 @@ function buildOAuthTokenRequest(input) {
   };
 }
 
-function parseOAuthResponseJson(responseText) {
+function parseOAuthResponseJson(responseText: string): unknown {
   if (!responseText.trim()) {
     return undefined;
   }
@@ -302,17 +462,20 @@ function parseOAuthResponseJson(responseText) {
   }
 }
 
-function oauthErrorCode(data) {
+function oauthErrorCode(data: unknown): string | undefined {
   return isRecord(data) && typeof data.error === "string"
     ? data.error
     : undefined;
 }
 
-function isRejectedRefreshError(errorCode) {
+function isRejectedRefreshError(errorCode: string | undefined): boolean {
   return errorCode === "bad_refresh_token" || errorCode === "invalid_grant";
 }
 
-function parseOAuthTokenResponse(data, requestedScope) {
+function parseOAuthTokenResponse(
+  data: unknown,
+  requestedScope?: string,
+): PluginStoredTokens {
   if (!isRecord(data)) {
     throw new Error("OAuth token response is invalid");
   }
@@ -329,7 +492,7 @@ function parseOAuthTokenResponse(data, requestedScope) {
     }
     scope = normalizeOAuthScope(data.scope) ?? scope;
   }
-  const result = {
+  const result: PluginStoredTokens = {
     accessToken: data.access_token,
     refreshToken: data.refresh_token,
     ...(scope ? { scope } : {}),
@@ -360,7 +523,9 @@ function parseOAuthTokenResponse(data, requestedScope) {
   return result;
 }
 
-async function refreshUserAccessToken(input) {
+async function refreshUserAccessToken(
+  input: RefreshUserAccessTokenInput,
+): Promise<PluginStoredTokens> {
   const clientId = requireEnv(input.clientIdEnv);
   const clientSecret = requireEnv(input.clientSecretEnv);
   const request = buildOAuthTokenRequest({
@@ -403,24 +568,26 @@ async function refreshUserAccessToken(input) {
   }
 }
 
-function leaseExpiry(expiresAt) {
+function leaseExpiry(expiresAt?: number): number {
   return expiresAt
     ? Math.min(expiresAt, Date.now() + MAX_LEASE_MS)
     : Date.now() + MAX_LEASE_MS;
 }
 
-function isGitSmartHttpDomain(domain) {
+function isGitSmartHttpDomain(domain: string): boolean {
   return domain.toLowerCase() === "github.com";
 }
 
-function authorizationFor(domain, token) {
+function authorizationFor(domain: string, token: string): string {
   if (isGitSmartHttpDomain(domain)) {
     return `Basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`;
   }
   return `Bearer ${token}`;
 }
 
-function createCredentialLease(input) {
+function createCredentialLease(
+  input: CredentialLeaseInput,
+): PluginCredentialResult {
   return {
     type: "lease",
     lease: {
@@ -437,7 +604,9 @@ function createCredentialLease(input) {
   };
 }
 
-function githubUserAuthorization(scope) {
+function githubUserAuthorization(
+  scope?: string,
+): CredentialLeaseInput["authorization"] {
   return {
     type: "oauth",
     provider: "github",
@@ -445,7 +614,11 @@ function githubUserAuthorization(scope) {
   };
 }
 
-function credentialNeeded(message, scope, allowAuthorization = true) {
+function credentialNeeded(
+  message: string,
+  scope?: string,
+  allowAuthorization = true,
+): PluginCredentialResult {
   return {
     type: "needed",
     message,
@@ -455,14 +628,17 @@ function credentialNeeded(message, scope, allowAuthorization = true) {
   };
 }
 
-function credentialUnavailable(message) {
+function credentialUnavailable(message: string): PluginCredentialResult {
   return {
     type: "unavailable",
     message,
   };
 }
 
-function parseInstallationTokenResponse(data) {
+function parseInstallationTokenResponse(data: unknown): {
+  expiresAtMs: number;
+  token: string;
+} {
   if (!isRecord(data)) {
     throw new Error("GitHub installation token response is invalid");
   }
@@ -481,14 +657,18 @@ function parseInstallationTokenResponse(data) {
   return { token, expiresAtMs };
 }
 
-function readInstallationPermissions(installation) {
+function readInstallationPermissions(
+  installation: unknown,
+): Record<string, "read"> {
   if (!isRecord(installation) || !isRecord(installation.permissions)) {
     throw new Error("GitHub installation response missing permissions");
   }
   return readGrantPermissions(installation.permissions);
 }
 
-async function resolveUserAccount(tokens) {
+async function resolveUserAccount(
+  tokens: PluginStoredTokens,
+): Promise<PluginProviderAccount> {
   const account = await githubRequest("https://api.github.com", "/user", {
     token: tokens.accessToken,
   });
@@ -513,7 +693,11 @@ async function resolveUserAccount(tokens) {
   };
 }
 
-async function tokensWithAccount(tokenSlot, stored, scope) {
+async function tokensWithAccount(
+  tokenSlot: PluginUserTokenSlot,
+  stored: PluginStoredTokens,
+  scope?: string,
+): Promise<TokenResolution> {
   if (stored.account) {
     return { ok: true, tokens: stored };
   }
@@ -540,13 +724,16 @@ async function tokensWithAccount(tokenSlot, stored, scope) {
   return { ok: true, tokens: updated };
 }
 
-function shouldRefreshUserToken(stored, now = Date.now()) {
+function shouldRefreshUserToken(
+  stored: PluginStoredTokens,
+  now = Date.now(),
+): boolean {
   return (
     stored.expiresAt !== undefined && stored.expiresAt - now < REFRESH_BUFFER_MS
   );
 }
 
-function canUseStoredUserToken(stored) {
+function canUseStoredUserToken(stored: PluginStoredTokens): boolean {
   return (
     stored.expiresAt === undefined ||
     (stored.expiresAt > Date.now() && !shouldRefreshUserToken(stored))
@@ -554,7 +741,11 @@ function canUseStoredUserToken(stored) {
 }
 
 /** Re-read under the token-slot refresh gate so concurrent callers reuse the winner's rotated tokens. */
-async function refreshUserTokensWithLock(tokenSlot, scope, options) {
+async function refreshUserTokensWithLock(
+  tokenSlot: PluginUserTokenSlot,
+  scope: string | undefined,
+  options: UserCredentialOptions,
+): Promise<TokenResolution> {
   return await tokenSlot.withRefresh(async () => {
     const latest = await tokenSlot.get();
     if (!latest) {
@@ -617,7 +808,10 @@ async function refreshUserTokensWithLock(tokenSlot, scope, options) {
   });
 }
 
-async function issueUserCredential(ctx, options) {
+async function issueUserCredential(
+  ctx: IssueCredentialHookContext,
+  options: UserCredentialOptions,
+): Promise<PluginCredentialResult> {
   const scope = options.userScope;
   const tokenSlot = ctx.tokens.currentUser ?? ctx.tokens.credentialSubject;
   if (!tokenSlot) {
@@ -687,7 +881,9 @@ async function issueUserCredential(ctx, options) {
   return credentialNeeded("Your GitHub authorization has expired.", scope);
 }
 
-async function issueInstallationCredential(options) {
+async function issueInstallationCredential(
+  options: InstallationCredentialOptions,
+): Promise<PluginCredentialResult> {
   const appId = requireEnv(options.appIdEnv);
   const installationIdRaw = requireEnv(options.installationIdEnv);
   const installationId = Number(installationIdRaw);
@@ -724,9 +920,14 @@ async function issueInstallationCredential(options) {
   });
 }
 
-function createPermissionCache() {
-  let cached;
-  let pending;
+function createPermissionCache(): InstallationCredentialOptions["loadReadPermissions"] {
+  let cached:
+    | {
+        expiresAtMs: number;
+        permissions: Record<string, "read">;
+      }
+    | undefined;
+  let pending: Promise<Record<string, "read">> | undefined;
   return async ({ appJwt, installationId }) => {
     if (cached && cached.expiresAtMs > Date.now()) {
       return cached.permissions;
@@ -751,7 +952,9 @@ function createPermissionCache() {
   };
 }
 
-function githubSmartHttpAccess(upstreamUrl) {
+function githubSmartHttpAccess(
+  upstreamUrl: URL,
+): PluginGrantAccess | undefined {
   const pathname = upstreamUrl.pathname.toLowerCase();
   const service = upstreamUrl.searchParams.get("service")?.toLowerCase();
   const isSmartHttpPath =
@@ -773,18 +976,21 @@ function githubSmartHttpAccess(upstreamUrl) {
   return undefined;
 }
 
-function isGitHubGraphqlUrl(upstreamUrl) {
+function isGitHubGraphqlUrl(upstreamUrl: URL): boolean {
   return (
     upstreamUrl.hostname.toLowerCase() === "api.github.com" &&
     upstreamUrl.pathname.toLowerCase().endsWith("/graphql")
   );
 }
 
-function isGitHubApiUrl(upstreamUrl) {
+function isGitHubApiUrl(upstreamUrl: URL): boolean {
   return upstreamUrl.hostname.toLowerCase() === "api.github.com";
 }
 
-function githubUserReadReason(method, upstreamUrl) {
+function githubUserReadReason(
+  method: string,
+  upstreamUrl: URL,
+): GitHubGrantReason | undefined {
   if (method !== "GET" || !isGitHubApiUrl(upstreamUrl)) {
     return undefined;
   }
@@ -793,7 +999,9 @@ function githubUserReadReason(method, upstreamUrl) {
     : undefined;
 }
 
-function parseGitHubGraphqlOperation(bodyText) {
+function parseGitHubGraphqlOperation(
+  bodyText: string | undefined,
+): PluginGrantAccess | undefined {
   if (typeof bodyText !== "string" || bodyText.trim().length === 0) {
     return undefined;
   }
@@ -836,11 +1044,13 @@ function parseGitHubGraphqlOperation(bodyText) {
   return undefined;
 }
 
-function escapeRegExp(value) {
+function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function graphqlOperationAccess(operation) {
+function graphqlOperationAccess(
+  operation: string | undefined,
+): PluginGrantAccess | undefined {
   if (operation === "mutation" || operation === "subscription") {
     return "write";
   }
@@ -850,13 +1060,17 @@ function graphqlOperationAccess(operation) {
   return undefined;
 }
 
-function maskGraphqlStringLiterals(query) {
+function maskGraphqlStringLiterals(query: string): string {
   return query.replace(/"""[\s\S]*?"""|"(?:\\.|[^"\\])*"/g, (match) =>
     " ".repeat(match.length),
   );
 }
 
-function githubGraphqlAccess(method, upstreamUrl, bodyText) {
+function githubGraphqlAccess(
+  method: string,
+  upstreamUrl: URL,
+  bodyText: string | undefined,
+): PluginGrantAccess | undefined {
   if (!isGitHubGraphqlUrl(upstreamUrl)) {
     return undefined;
   }
@@ -872,8 +1086,10 @@ function githubGraphqlAccess(method, upstreamUrl, bodyText) {
   return "write";
 }
 
-function githubGraphqlPermissionDeniedMessage(bodyText) {
-  let parsed;
+function githubGraphqlPermissionDeniedMessage(
+  bodyText: string,
+): string | undefined {
+  let parsed: unknown;
   try {
     parsed = JSON.parse(bodyText);
   } catch {
@@ -900,14 +1116,16 @@ function githubGraphqlPermissionDeniedMessage(bodyText) {
   return undefined;
 }
 
-function shouldInspectGitHubGraphqlResponse(ctx) {
+function shouldInspectGitHubGraphqlResponse(
+  ctx: EgressResponseHookContext,
+): boolean {
   if (
     ctx.request.method.toUpperCase() !== "POST" ||
     ctx.response.status !== 200
   ) {
     return false;
   }
-  let upstreamUrl;
+  let upstreamUrl: URL;
   try {
     upstreamUrl = new URL(ctx.request.url);
   } catch {
@@ -920,7 +1138,10 @@ function shouldInspectGitHubGraphqlResponse(ctx) {
   return contentType ? /\bjson\b/i.test(contentType) : false;
 }
 
-function githubApiWriteReason(method, upstreamUrl) {
+function githubApiWriteReason(
+  method: string,
+  upstreamUrl: URL,
+): GitHubGrantReason | undefined {
   const pathname = upstreamUrl.pathname.toLowerCase();
   if (!isGitHubApiUrl(upstreamUrl)) {
     return undefined;
@@ -981,7 +1202,7 @@ function githubApiWriteReason(method, upstreamUrl) {
   return undefined;
 }
 
-function grantRequirements(reason) {
+function grantRequirements(reason: GitHubGrantReason): string[] | undefined {
   if (reason === "github.git-write" || reason === "github.contents-write") {
     return CONTENTS_WRITE_REQUIREMENTS;
   }
@@ -1003,7 +1224,11 @@ function grantRequirements(reason) {
   return undefined;
 }
 
-function grantForAccess(access, reason, name) {
+function grantForAccess(
+  access: PluginGrantAccess,
+  reason: GitHubGrantReason,
+  name: GitHubGrantName,
+): GitHubGrant {
   const requirements = grantRequirements(reason);
   return {
     name,
@@ -1013,7 +1238,9 @@ function grantForAccess(access, reason, name) {
   };
 }
 
-async function githubGrantForEgress(ctx) {
+async function githubGrantForEgress(
+  ctx: EgressHookContext,
+): Promise<GitHubGrant> {
   const method = ctx.request.method.toUpperCase();
   const upstreamUrl = new URL(ctx.request.url);
   const smartHttpAccess = githubSmartHttpAccess(upstreamUrl);
@@ -1059,7 +1286,9 @@ async function githubGrantForEgress(ctx) {
 }
 
 /** Register GitHub runtime hooks for repository workflows. */
-export function githubPlugin(options = {}) {
+export function githubPlugin(
+  options: GitHubPluginOptions = {},
+): PluginRegistration {
   const botNameEnv = options.botNameEnv ?? "GITHUB_APP_BOT_NAME";
   const botEmailEnv = options.botEmailEnv ?? "GITHUB_APP_BOT_EMAIL";
   const clientIdEnv = options.clientIdEnv ?? "GITHUB_APP_CLIENT_ID";
@@ -1124,6 +1353,9 @@ export function githubPlugin(options = {}) {
       ],
     },
     hooks: {
+      tools(ctx) {
+        return createGitHubTools(ctx);
+      },
       async sandboxPrepare(ctx) {
         const hooksPath = `${ctx.sandbox.juniorRoot}/git-hooks`;
         await ctx.sandbox.writeFile({

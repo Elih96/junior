@@ -1,18 +1,56 @@
 import { generateKeyPairSync } from "node:crypto";
-import { createMemoryState } from "@chat-adapter/state-memory";
-import type {
-  PluginStoredTokens,
-  SandboxPrepareHookContext,
+import {
+  EgressAuthRequired,
+  type PluginStoredTokens,
+  type SandboxPrepareHookContext,
 } from "@sentry/junior-plugin-api";
 import { http, HttpResponse } from "msw";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { StateAdapterTokenStore } from "@/chat/credentials/state-adapter-token-store";
-import { githubPlugin } from "../../../../junior-github/index.js";
-import { mswServer } from "../../msw/server";
+import { githubPlugin } from "../src/index";
+import { mswServer } from "./msw";
 
 const ORIGINAL_ENV = { ...process.env };
 
 const db = {};
+
+class TestTokenStore {
+  private refreshLock = Promise.resolve();
+  private tokens = new Map<string, PluginStoredTokens>();
+
+  async get(
+    userId: string,
+    provider: string,
+  ): Promise<PluginStoredTokens | undefined> {
+    const tokens = this.tokens.get(this.key(userId, provider));
+    return tokens ? structuredClone(tokens) : undefined;
+  }
+
+  async set(
+    userId: string,
+    provider: string,
+    tokens: PluginStoredTokens,
+  ): Promise<void> {
+    this.tokens.set(this.key(userId, provider), structuredClone(tokens));
+  }
+
+  async withRefresh<T>(callback: () => Promise<T>): Promise<T> {
+    const previous = this.refreshLock;
+    let release: () => void;
+    this.refreshLock = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await callback();
+    } finally {
+      release!();
+    }
+  }
+
+  private key(userId: string, provider: string): string {
+    return `${provider}:${userId}`;
+  }
+}
 
 function beforeToolContext(requester: {
   email?: string;
@@ -88,6 +126,10 @@ async function captureRequest(request: Request): Promise<CapturedRequest> {
     headers: Object.fromEntries(request.headers.entries()),
     ...(text ? { body } : {}),
   };
+}
+
+function cloneStateValue<T>(value: T): T {
+  return value === undefined ? value : structuredClone(value);
 }
 
 function mockGitHubInstallationApi(): CapturedRequest[] {
@@ -176,6 +218,89 @@ async function grantForEgress(input: {
       url: input.url,
     },
   });
+}
+
+function githubToolsContext(input?: {
+  conversationId?: string;
+  egressFetch?: (request: {
+    operation: string;
+    provider: string;
+    request: Request;
+  }) => Promise<Response>;
+  stateSet?: (input: { key: string; value: unknown }) => Promise<void> | void;
+}) {
+  const conversationId = input?.conversationId ?? "local:test:github-tool";
+  const state = new Map<string, unknown>();
+  const requests: Array<{
+    operation: string;
+    provider: string;
+    request: Request;
+  }> = [];
+  return {
+    db,
+    log: pluginLog,
+    plugin: { name: "github" },
+    conversationId,
+    destination: { platform: "local" as const, conversationId },
+    source: {
+      platform: "local" as const,
+      type: "priv" as const,
+      conversationId,
+    },
+    embedder: {},
+    egress: {
+      async fetch(request: {
+        operation: string;
+        provider: string;
+        request: Request;
+      }) {
+        requests.push(request);
+        if (input?.egressFetch) {
+          return await input.egressFetch(request);
+        }
+        return new Response(
+          JSON.stringify({
+            number: 660,
+            html_url: "https://github.com/getsentry/junior/issues/660",
+          }),
+          { status: 201 },
+        );
+      },
+    },
+    model: {},
+    state: {
+      async delete(key: string) {
+        state.delete(key);
+      },
+      async get(key: string) {
+        return cloneStateValue(state.get(key));
+      },
+      async set(key: string, value: unknown) {
+        await input?.stateSet?.({ key, value });
+        state.set(key, cloneStateValue(value));
+      },
+      async setIfNotExists(key: string, value: unknown) {
+        if (state.has(key)) {
+          return false;
+        }
+        state.set(key, cloneStateValue(value));
+        return true;
+      },
+      async withLock<T>(
+        _key: string,
+        _ttlMs: number,
+        callback: () => Promise<T>,
+      ) {
+        return await callback();
+      },
+    },
+    egressRequests() {
+      return requests;
+    },
+    setState(key: string, value: unknown) {
+      state.set(key, cloneStateValue(value));
+    },
+  };
 }
 
 function githubIssueCredentialContext(input: {
@@ -345,6 +470,346 @@ describe("github plugin", () => {
       access: "write",
       reason: "github.fork-create",
     });
+  });
+
+  it("creates issues through host egress with a deterministic Junior footer", async () => {
+    const ctx = githubToolsContext({
+      conversationId: "slack:C123:1712345.0001",
+    });
+    const plugin = githubPlugin();
+    const tool = plugin.hooks?.tools?.(ctx as any)?.createIssue;
+
+    await expect(
+      tool?.execute?.(
+        {
+          repo: "getsentry/junior",
+          title: "Typed issue",
+          body: "Issue body",
+          labels: ["bug", "high-priority"],
+        },
+        { toolCallId: "call-create-issue" },
+      ),
+    ).resolves.toEqual({
+      number: 660,
+      url: "https://github.com/getsentry/junior/issues/660",
+    });
+
+    expect(ctx.egressRequests()).toHaveLength(1);
+    const request = ctx.egressRequests()[0];
+    expect(request).toMatchObject({
+      provider: "github",
+      operation: "github.issue.create",
+    });
+    expect(request?.request.method).toBe("POST");
+    expect(request?.request.url).toBe(
+      "https://api.github.com/repos/getsentry/junior/issues",
+    );
+    expect(
+      Object.fromEntries(request?.request.headers.entries() ?? []),
+    ).toEqual(
+      expect.objectContaining({
+        accept: "application/vnd.github+json",
+        "content-type": "application/json",
+        "x-github-api-version": "2022-11-28",
+      }),
+    );
+    await expect(request?.request.json()).resolves.toEqual({
+      title: "Typed issue",
+      body: "Issue body",
+      labels: ["bug", "high-priority"],
+    });
+  });
+
+  it("adds a Sentry session link to issue footers when configured", async () => {
+    process.env.SENTRY_DSN = "https://public@o450000.ingest.sentry.io/12345";
+    process.env.SENTRY_ORG_SLUG = "acme";
+    const ctx = githubToolsContext({
+      conversationId: "slack:C123:1712345.0001",
+    });
+    const plugin = githubPlugin();
+    const tool = plugin.hooks?.tools?.(ctx as any)?.createIssue;
+
+    await tool?.execute?.(
+      {
+        repo: "getsentry/junior",
+        title: "Typed issue",
+      },
+      { toolCallId: "call-create-issue-with-session-link" },
+    );
+
+    const request = ctx.egressRequests()[0];
+    await expect(request?.request.json()).resolves.toMatchObject({
+      body: `<!-- junior-session-footer:start -->
+
+[View Session in Sentry](https://acme.sentry.io/explore/conversations/slack%3AC123%3A1712345.0001/?project=12345)
+
+<!-- junior-session-footer:end -->`,
+    });
+  });
+
+  it("replaces an existing Junior issue footer before creating issues", async () => {
+    const ctx = githubToolsContext({
+      conversationId: "local:test:new-conversation",
+    });
+    const plugin = githubPlugin();
+    const tool = plugin.hooks?.tools?.(ctx as any)?.createIssue;
+
+    await tool?.execute?.(
+      {
+        repo: "getsentry/junior",
+        title: "Typed issue",
+        body: `Issue body
+
+<!-- junior-session-footer:start -->
+
+---
+Created by Junior.
+Conversation: \`local:test:old-conversation\`
+
+<!-- junior-session-footer:end -->`,
+      },
+      { toolCallId: "call-replace-footer" },
+    );
+
+    const request = ctx.egressRequests()[0];
+    await expect(request?.request.json()).resolves.toMatchObject({
+      body: "Issue body",
+    });
+  });
+
+  it("returns the stored issue result when a createIssue tool call is retried", async () => {
+    const ctx = githubToolsContext();
+    const plugin = githubPlugin();
+    const tool = plugin.hooks?.tools?.(ctx as any)?.createIssue;
+    const input = {
+      repo: "getsentry/junior",
+      title: "Typed issue",
+    };
+
+    await expect(
+      tool?.execute?.(input, { toolCallId: "call-idempotent-create" }),
+    ).resolves.toEqual({
+      number: 660,
+      url: "https://github.com/getsentry/junior/issues/660",
+    });
+    await expect(
+      tool?.execute?.(input, { toolCallId: "call-idempotent-create" }),
+    ).resolves.toEqual({
+      number: 660,
+      url: "https://github.com/getsentry/junior/issues/660",
+    });
+
+    expect(ctx.egressRequests()).toHaveLength(1);
+  });
+
+  it("refuses to duplicate issue creation after an uncertain pending attempt", async () => {
+    const ctx = githubToolsContext();
+    const plugin = githubPlugin();
+    const tool = plugin.hooks?.tools?.(ctx as any)?.createIssue;
+    ctx.setState("createIssue:local:test:github-tool:call-pending-create", {
+      status: "pending",
+      createdAtMs: Date.now(),
+    });
+
+    await expect(
+      tool?.execute?.(
+        {
+          repo: "getsentry/junior",
+          title: "Typed issue",
+        },
+        { toolCallId: "call-pending-create" },
+      ),
+    ).rejects.toThrow("refusing to create a duplicate issue");
+
+    expect(ctx.egressRequests()).toHaveLength(0);
+  });
+
+  it("keeps pending idempotency state when GitHub response handling fails", async () => {
+    const ctx = githubToolsContext({
+      egressFetch: async () => new Response("created", { status: 201 }),
+    });
+    const plugin = githubPlugin();
+    const tool = plugin.hooks?.tools?.(ctx as any)?.createIssue;
+    const input = {
+      repo: "getsentry/junior",
+      title: "Typed issue",
+    };
+
+    await expect(
+      tool?.execute?.(input, { toolCallId: "call-lost-response" }),
+    ).rejects.toThrow("invalid response");
+    await expect(
+      tool?.execute?.(input, { toolCallId: "call-lost-response" }),
+    ).rejects.toThrow("refusing to create a duplicate issue");
+
+    expect(ctx.egressRequests()).toHaveLength(1);
+  });
+
+  it("clears pending idempotency state after definitive GitHub rejection", async () => {
+    let attempts = 0;
+    const ctx = githubToolsContext({
+      egressFetch: async () => {
+        attempts += 1;
+        if (attempts === 1) {
+          return new Response(JSON.stringify({ message: "Invalid title" }), {
+            status: 422,
+          });
+        }
+        return new Response(
+          JSON.stringify({
+            number: 660,
+            html_url: "https://github.com/getsentry/junior/issues/660",
+          }),
+          { status: 201 },
+        );
+      },
+    });
+    const plugin = githubPlugin();
+    const tool = plugin.hooks?.tools?.(ctx as any)?.createIssue;
+    const input = {
+      repo: "getsentry/junior",
+      title: "Typed issue",
+    };
+
+    await expect(
+      tool?.execute?.(input, { toolCallId: "call-definitive-rejection" }),
+    ).rejects.toThrow("HTTP 422");
+    await expect(
+      tool?.execute?.(input, { toolCallId: "call-definitive-rejection" }),
+    ).resolves.toEqual({
+      number: 660,
+      url: "https://github.com/getsentry/junior/issues/660",
+    });
+
+    expect(ctx.egressRequests()).toHaveLength(2);
+  });
+
+  it("clears pending idempotency state after GitHub authorization pauses", async () => {
+    let attempts = 0;
+    const ctx = githubToolsContext({
+      egressFetch: async () => {
+        attempts += 1;
+        if (attempts === 1) {
+          throw new EgressAuthRequired("GitHub authorization required.", {
+            authorization: {
+              provider: "github",
+              scope: "repo",
+              type: "oauth",
+            },
+          });
+        }
+        return new Response(
+          JSON.stringify({
+            number: 660,
+            html_url: "https://github.com/getsentry/junior/issues/660",
+          }),
+          { status: 201 },
+        );
+      },
+    });
+    const plugin = githubPlugin();
+    const tool = plugin.hooks?.tools?.(ctx as any)?.createIssue;
+    const input = {
+      repo: "getsentry/junior",
+      title: "Typed issue",
+    };
+
+    await expect(
+      tool?.execute?.(input, { toolCallId: "call-auth-required" }),
+    ).rejects.toThrow("GitHub authorization required");
+    await expect(
+      tool?.execute?.(input, { toolCallId: "call-auth-required" }),
+    ).resolves.toEqual({
+      number: 660,
+      url: "https://github.com/getsentry/junior/issues/660",
+    });
+
+    expect(ctx.egressRequests()).toHaveLength(2);
+  });
+
+  it("keeps pending idempotency state after ambiguous GitHub server failure", async () => {
+    const ctx = githubToolsContext({
+      egressFetch: async () =>
+        new Response(JSON.stringify({ message: "Server error" }), {
+          status: 500,
+        }),
+    });
+    const plugin = githubPlugin();
+    const tool = plugin.hooks?.tools?.(ctx as any)?.createIssue;
+    const input = {
+      repo: "getsentry/junior",
+      title: "Typed issue",
+    };
+
+    await expect(
+      tool?.execute?.(input, { toolCallId: "call-server-error" }),
+    ).rejects.toThrow("HTTP 500");
+    await expect(
+      tool?.execute?.(input, { toolCallId: "call-server-error" }),
+    ).rejects.toThrow("refusing to create a duplicate issue");
+
+    expect(ctx.egressRequests()).toHaveLength(1);
+  });
+
+  it("keeps pending idempotency state after ambiguous GitHub throttling", async () => {
+    const ctx = githubToolsContext({
+      egressFetch: async () =>
+        new Response(JSON.stringify({ message: "Rate limited" }), {
+          status: 403,
+        }),
+    });
+    const plugin = githubPlugin();
+    const tool = plugin.hooks?.tools?.(ctx as any)?.createIssue;
+    const input = {
+      repo: "getsentry/junior",
+      title: "Typed issue",
+    };
+
+    await expect(
+      tool?.execute?.(input, { toolCallId: "call-rate-limited" }),
+    ).rejects.toThrow("HTTP 403");
+    await expect(
+      tool?.execute?.(input, { toolCallId: "call-rate-limited" }),
+    ).rejects.toThrow("refusing to create a duplicate issue");
+
+    expect(ctx.egressRequests()).toHaveLength(1);
+  });
+
+  it("fail-closes retries when completed storage fails after creation", async () => {
+    let setCalls = 0;
+    const ctx = githubToolsContext({
+      stateSet: () => {
+        setCalls += 1;
+        if (setCalls === 2) {
+          throw new Error("state unavailable");
+        }
+      },
+    });
+    const plugin = githubPlugin();
+    const tool = plugin.hooks?.tools?.(ctx as any)?.createIssue;
+
+    await expect(
+      tool?.execute?.(
+        {
+          repo: "getsentry/junior",
+          title: "Typed issue",
+        },
+        { toolCallId: "call-completed-storage-fails" },
+      ),
+    ).rejects.toThrow(
+      "GitHub issue was created, but Junior could not persist the completed issue state.",
+    );
+    await expect(
+      tool?.execute?.(
+        {
+          repo: "getsentry/junior",
+          title: "Typed issue",
+        },
+        { toolCallId: "call-completed-storage-fails" },
+      ),
+    ).rejects.toThrow("refusing to create a duplicate issue");
+
+    expect(ctx.egressRequests()).toHaveLength(1);
   });
 
   it("uses Git smart HTTP write evidence over conflicting read evidence", async () => {
@@ -969,9 +1434,7 @@ describe("github plugin", () => {
       expires_in: 3600,
       refresh_token: "fresh-refresh-token",
     });
-    const state = createMemoryState();
-    await state.connect();
-    const store = new StateAdapterTokenStore(state);
+    const store = new TestTokenStore();
     const storedToken: PluginStoredTokens = {
       account: {
         id: "12345",
@@ -992,7 +1455,7 @@ describe("github plugin", () => {
         await store.set("U123", "github", tokens);
       }),
       withRefresh: async <T>(callback: () => Promise<T>) =>
-        await store.withRefresh("U123", "github", callback),
+        await store.withRefresh(callback),
     };
     const plugin = githubPlugin({ additionalUserScopes: ["repo"] });
     const context = {
@@ -1008,39 +1471,35 @@ describe("github plugin", () => {
       tokens: { currentUser },
     };
 
-    try {
-      const [first, second] = await Promise.all([
-        plugin.hooks?.issueCredential?.(context),
-        plugin.hooks?.issueCredential?.(context),
-      ]);
+    const [first, second] = await Promise.all([
+      plugin.hooks?.issueCredential?.(context),
+      plugin.hooks?.issueCredential?.(context),
+    ]);
 
-      expect(refreshRequests).toHaveLength(1);
-      for (const result of [first, second]) {
-        expect(result).toMatchObject({
-          type: "lease",
-          lease: {
-            headerTransforms: [
-              {
-                domain: "api.github.com",
-                headers: { Authorization: "Bearer fresh-token" },
+    expect(refreshRequests).toHaveLength(1);
+    for (const result of [first, second]) {
+      expect(result).toMatchObject({
+        type: "lease",
+        lease: {
+          headerTransforms: [
+            {
+              domain: "api.github.com",
+              headers: { Authorization: "Bearer fresh-token" },
+            },
+            {
+              domain: "github.com",
+              headers: {
+                Authorization: expect.stringMatching(/^Basic /),
               },
-              {
-                domain: "github.com",
-                headers: {
-                  Authorization: expect.stringMatching(/^Basic /),
-                },
-              },
-            ],
-          },
-        });
-      }
-      await expect(store.get("U123", "github")).resolves.toMatchObject({
-        refreshToken: "fresh-refresh-token",
-        refreshTokenExpiresAt,
+            },
+          ],
+        },
       });
-    } finally {
-      await state.disconnect();
     }
+    await expect(store.get("U123", "github")).resolves.toMatchObject({
+      refreshToken: "fresh-refresh-token",
+      refreshTokenExpiresAt,
+    });
   });
 
   it("uses the refreshed token expiry when GitHub returns one", async () => {
@@ -1057,9 +1516,7 @@ describe("github plugin", () => {
       refresh_token_expires_in: 7200,
     });
 
-    const state = createMemoryState();
-    await state.connect();
-    const store = new StateAdapterTokenStore(state);
+    const store = new TestTokenStore();
     const storedToken: PluginStoredTokens = {
       account: {
         id: "12345",
@@ -1080,31 +1537,27 @@ describe("github plugin", () => {
         await store.set("U123", "github", tokens);
       }),
       withRefresh: async <T>(callback: () => Promise<T>) =>
-        await store.withRefresh("U123", "github", callback),
+        await store.withRefresh(callback),
     };
     const plugin = githubPlugin({ additionalUserScopes: ["repo"] });
-    try {
-      const result = await plugin.hooks?.issueCredential?.({
-        actor: { type: "user" as const, userId: "U123" },
-        grant: {
-          name: "user-write",
-          access: "write",
-          reason: "github.issue-create",
-        },
-        db,
-        log: pluginLog,
-        plugin: { name: "github" },
-        tokens: { currentUser },
-      });
+    const result = await plugin.hooks?.issueCredential?.({
+      actor: { type: "user" as const, userId: "U123" },
+      grant: {
+        name: "user-write",
+        access: "write",
+        reason: "github.issue-create",
+      },
+      db,
+      log: pluginLog,
+      plugin: { name: "github" },
+      tokens: { currentUser },
+    });
 
-      expect(result?.type).toBe("lease");
-      await expect(store.get("U123", "github")).resolves.toMatchObject({
-        refreshToken: "fresh-refresh-token",
-        refreshTokenExpiresAt: now.getTime() + 7200_000,
-      });
-    } finally {
-      await state.disconnect();
-    }
+    expect(result?.type).toBe("lease");
+    await expect(store.get("U123", "github")).resolves.toMatchObject({
+      refreshToken: "fresh-refresh-token",
+      refreshTokenExpiresAt: now.getTime() + 7200_000,
+    });
   });
 
   it.each(["bad_refresh_token", "invalid_grant"])(
