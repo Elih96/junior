@@ -369,6 +369,14 @@ function requesterUserName(message: Message): string | undefined {
   return getMessageActorIdentity(message)?.userName;
 }
 
+function isResourceEventNotificationMessage(message: Message): boolean {
+  const raw =
+    message.raw && typeof message.raw === "object"
+      ? (message.raw as Record<string, unknown>)
+      : undefined;
+  return raw?.event_type === "resource_event";
+}
+
 /** Build the Slack event runtime that routes mentions and subscribed messages. */
 export function createSlackTurnRuntime<
   TPreparedState,
@@ -868,9 +876,14 @@ export function createSlackTurnRuntime<
         const threadId = deps.getThreadId(thread, message);
         const channelId = deps.getChannelId(thread, message);
         const runId = deps.getRunId(thread, message);
+        const isResourceEventNotification =
+          isResourceEventNotificationMessage(message);
+        const requesterId = isResourceEventNotification
+          ? undefined
+          : message.author.userId;
         const turnContext = logContext({
           threadId,
-          requesterId: message.author.userId,
+          requesterId,
           requesterUserName: requesterUserName(message),
           channelId,
           runId,
@@ -893,7 +906,7 @@ export function createSlackTurnRuntime<
           };
           const threadContext: TurnContext = {
             threadId,
-            requesterId: message.author.userId,
+            requesterId,
             channelId,
             runId,
           };
@@ -905,13 +918,14 @@ export function createSlackTurnRuntime<
           const turnIsExplicitMention =
             Boolean(message.isMention) ||
             queuedMessages.some((queued) => queued.explicitMention);
-
-          const preflightDecision = getSubscribedReplyPreflightDecision({
-            botUserName: deps.assistantUserName,
-            rawText: combinedText.rawText,
-            text: combinedText.userText,
-            isExplicitMention: turnIsExplicitMention,
-          });
+          const preflightDecision = isResourceEventNotification
+            ? undefined
+            : getSubscribedReplyPreflightDecision({
+                botUserName: deps.assistantUserName,
+                rawText: combinedText.rawText,
+                text: combinedText.userText,
+                isExplicitMention: turnIsExplicitMention,
+              });
 
           if (preflightDecision && !preflightDecision.shouldReply) {
             const reason = preflightDecision.reasonDetail
@@ -942,20 +956,22 @@ export function createSlackTurnRuntime<
             preparedState,
           });
 
-          const decision = await deps.decideSubscribedReply({
-            rawText: combinedText.rawText,
-            text: combinedText.userText,
-            conversationContext:
-              deps.getPreparedConversationContext(preparedState),
-            hasAttachments:
-              message.attachments.length > 0 ||
-              queuedMessages.some(
-                (queued) => queued.message.attachments.length > 0,
-              ) ||
-              legacyAttachmentText !== "",
-            isExplicitMention: turnIsExplicitMention,
-            context: threadContext,
-          });
+          const decision: SubscribedReplyDecision = isResourceEventNotification
+            ? { shouldReply: true, reason: "resource_event" }
+            : await deps.decideSubscribedReply({
+                rawText: combinedText.rawText,
+                text: combinedText.userText,
+                conversationContext:
+                  deps.getPreparedConversationContext(preparedState),
+                hasAttachments:
+                  message.attachments.length > 0 ||
+                  queuedMessages.some(
+                    (queued) => queued.message.attachments.length > 0,
+                  ) ||
+                  legacyAttachmentText !== "",
+                isExplicitMention: turnIsExplicitMention,
+                context: threadContext,
+              });
 
           if (
             await maybeHandleThreadOptOutDecision({

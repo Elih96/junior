@@ -15,7 +15,14 @@ export interface PluginConversationSummary {
   displayTitle: string;
   lastActivityAt: string;
   lastUpdatedAt: string;
-  source?: "api" | "internal" | "local" | "plugin" | "scheduler" | "slack";
+  source?:
+    | "api"
+    | "internal"
+    | "local"
+    | "plugin"
+    | "resource_event"
+    | "scheduler"
+    | "slack";
   status: PluginConversationStatus;
 }
 

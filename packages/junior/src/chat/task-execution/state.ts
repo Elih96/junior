@@ -51,6 +51,7 @@ export type Source =
   | "internal"
   | "local"
   | "plugin"
+  | "resource_event"
   | "scheduler"
   | "slack";
 
@@ -237,6 +238,7 @@ function normalizeSource(value: unknown): Source | undefined {
     value === "internal" ||
     value === "local" ||
     value === "plugin" ||
+    value === "resource_event" ||
     value === "scheduler" ||
     value === "slack"
   ) {

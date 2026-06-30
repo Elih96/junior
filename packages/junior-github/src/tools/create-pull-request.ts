@@ -1,6 +1,7 @@
 import {
   EgressAuthRequired,
   PluginToolInputError,
+  type SubscribableResource,
   type PluginToolDefinition,
   type PluginToolExecuteOptions,
   type ToolRegistrationHookContext,
@@ -55,6 +56,7 @@ const createPullRequestStateSchema = Type.Union([
   Type.Object(
     {
       createdAtMs: Type.Number(),
+      input: Type.Optional(createPullRequestInputSchema),
       number: Type.Number(),
       status: Type.Literal("completed"),
       url: Type.String(),
@@ -64,6 +66,7 @@ const createPullRequestStateSchema = Type.Union([
   Type.Object(
     {
       createdAtMs: Type.Number(),
+      input: Type.Optional(createPullRequestInputSchema),
       status: Type.Literal("pending"),
     },
     { additionalProperties: false },
@@ -79,6 +82,10 @@ type CreatePullRequestState = Static<typeof createPullRequestStateSchema>;
 interface GitHubPullRequestResult {
   number: number;
   url: string;
+}
+
+interface GitHubPullRequestToolResult extends GitHubPullRequestResult {
+  subscribable: SubscribableResource;
 }
 
 function parseCreatePullRequestInput(
@@ -235,6 +242,45 @@ async function createGitHubPullRequest(
   };
 }
 
+function gitHubPullRequestSubscribable(
+  input: CreateGitHubPullRequestInput,
+  result: GitHubPullRequestResult,
+): SubscribableResource {
+  const repo = parseRepo(input.repo);
+  const repoRef = `${repo.owner}/${repo.name}`;
+  const supportedEvents = [
+    "checks.failed",
+    "checks.recovered",
+    "review.approved",
+    "review.changes_requested",
+    "state.merged",
+    "state.closed_unmerged",
+  ];
+  return {
+    label: `GitHub PR ${repoRef}#${result.number}`,
+    provider: "github",
+    resourceRef: `github:pull_request:${repoRef}#${result.number}`,
+    suggestedEvents: [
+      "checks.failed",
+      "review.changes_requested",
+      "state.merged",
+      "state.closed_unmerged",
+    ],
+    supportedEvents,
+    type: "pull_request",
+  };
+}
+
+function gitHubPullRequestToolResult(
+  input: CreateGitHubPullRequestInput,
+  result: GitHubPullRequestResult,
+): GitHubPullRequestToolResult {
+  return {
+    ...result,
+    subscribable: gitHubPullRequestSubscribable(input, result),
+  };
+}
+
 /** Own PR creation so provider writes use host egress and the footer stays deterministic. */
 export function createGitHubPullRequestTool(
   ctx: ToolRegistrationHookContext,
@@ -260,10 +306,10 @@ export function createGitHubPullRequestTool(
         async () => {
           const state = createPullRequestState(await ctx.state.get(key));
           if (state?.status === "completed") {
-            return {
+            return gitHubPullRequestToolResult(state.input ?? parsedInput, {
               number: state.number,
               url: state.url,
-            };
+            });
           }
           if (state?.status === "pending") {
             throw new Error(
@@ -277,6 +323,7 @@ export function createGitHubPullRequestTool(
           const pendingState: CreatePullRequestState = {
             status: "pending",
             createdAtMs: Date.now(),
+            input: parsedInput,
           };
           await ctx.state.set(
             key,
@@ -298,7 +345,7 @@ export function createGitHubPullRequestTool(
                 { cause: error },
               );
             }
-            return result;
+            return gitHubPullRequestToolResult(parsedInput, result);
           } catch (error) {
             if (
               isEgressAuthRequired(error) ||

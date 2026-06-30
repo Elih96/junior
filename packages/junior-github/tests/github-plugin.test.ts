@@ -873,8 +873,28 @@ Conversation: \`local:test:old-conversation\`
         },
         { toolCallId: "call-create-pull-request" },
       ),
-    ).resolves.toEqual({
+    ).resolves.toMatchObject({
       number: 691,
+      subscribable: {
+        label: "GitHub PR getsentry/junior#691",
+        provider: "github",
+        resourceRef: "github:pull_request:getsentry/junior#691",
+        suggestedEvents: [
+          "checks.failed",
+          "review.changes_requested",
+          "state.merged",
+          "state.closed_unmerged",
+        ],
+        supportedEvents: [
+          "checks.failed",
+          "checks.recovered",
+          "review.approved",
+          "review.changes_requested",
+          "state.merged",
+          "state.closed_unmerged",
+        ],
+        type: "pull_request",
+      },
       url: "https://github.com/getsentry/junior/pull/691",
     });
 
@@ -970,18 +990,92 @@ Conversation: \`local:test:old-conversation\`
 
     await expect(
       tool?.execute?.(input, { toolCallId: "call-idempotent-pr-create" }),
-    ).resolves.toEqual({
+    ).resolves.toMatchObject({
       number: 691,
+      subscribable: {
+        resourceRef: "github:pull_request:getsentry/junior#691",
+      },
       url: "https://github.com/getsentry/junior/pull/691",
     });
     await expect(
-      tool?.execute?.(input, { toolCallId: "call-idempotent-pr-create" }),
-    ).resolves.toEqual({
+      tool?.execute?.(
+        {
+          ...input,
+          repo: "getsentry/other",
+        },
+        { toolCallId: "call-idempotent-pr-create" },
+      ),
+    ).resolves.toMatchObject({
       number: 691,
+      subscribable: {
+        resourceRef: "github:pull_request:getsentry/junior#691",
+      },
       url: "https://github.com/getsentry/junior/pull/691",
     });
 
     expect(ctx.egressRequests()).toHaveLength(1);
+  });
+
+  it("returns legacy stored pull request results without stored input", async () => {
+    const ctx = githubToolsContext();
+    const plugin = githubPlugin();
+    const tool = plugin.hooks?.tools?.(ctx as any)?.createPullRequest;
+    ctx.setState(
+      "createPullRequest:local:test:github-tool:call-legacy-pr-create",
+      {
+        status: "completed",
+        createdAtMs: Date.now(),
+        number: 691,
+        url: "https://github.com/getsentry/junior/pull/691",
+      },
+    );
+
+    await expect(
+      tool?.execute?.(
+        {
+          repo: "getsentry/junior",
+          title: "Typed PR",
+          head: "dcramer/gh-660-pr-create",
+          base: "main",
+        },
+        { toolCallId: "call-legacy-pr-create" },
+      ),
+    ).resolves.toMatchObject({
+      number: 691,
+      subscribable: {
+        resourceRef: "github:pull_request:getsentry/junior#691",
+      },
+      url: "https://github.com/getsentry/junior/pull/691",
+    });
+
+    expect(ctx.egressRequests()).toHaveLength(0);
+  });
+
+  it("refuses legacy pending pull request idempotency state", async () => {
+    const ctx = githubToolsContext();
+    const plugin = githubPlugin();
+    const tool = plugin.hooks?.tools?.(ctx as any)?.createPullRequest;
+    ctx.setState(
+      "createPullRequest:local:test:github-tool:call-legacy-pending-pr-create",
+      {
+        status: "pending",
+        createdAtMs: Date.now(),
+      },
+    );
+
+    await expect(
+      tool?.execute?.(
+        {
+          repo: "getsentry/junior",
+          title: "Typed PR",
+          head: "dcramer/gh-660-pr-create",
+          base: "main",
+        },
+        { toolCallId: "call-legacy-pending-pr-create" },
+      ),
+    ).rejects.toThrow("refusing to create a duplicate pull request");
+
+    expect(ctx.egressRequests()).toHaveLength(0);
   });
 
   it("uses Git smart HTTP write evidence over conflicting read evidence", async () => {

@@ -90,6 +90,7 @@ function sourceFromValue(value: unknown): ConversationSource | undefined {
     value === "internal" ||
     value === "local" ||
     value === "plugin" ||
+    value === "resource_event" ||
     value === "scheduler" ||
     value === "slack"
   ) {
@@ -133,6 +134,14 @@ function systemIdentityFromSource(
       provider: "junior",
       providerSubjectId: "local-cli",
       displayName: "Local CLI",
+    };
+  }
+  if (source === "resource_event") {
+    return {
+      kind: "system",
+      provider: "junior",
+      providerSubjectId: "resource-event",
+      displayName: "Resource Event",
     };
   }
   return undefined;

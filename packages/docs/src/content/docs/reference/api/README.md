@@ -51,6 +51,7 @@ title: "@sentry/junior"
 - [PluginRunContext](/reference/api/type-aliases/pluginruncontext/)
 - [PluginRunTranscriptEntry](/reference/api/type-aliases/pluginruntranscriptentry/)
 - [PluginTasks](/reference/api/type-aliases/plugintasks/)
+- [SubscribableResource](/reference/api/type-aliases/subscribableresource/)
 - [TranscriptPartType](/reference/api/type-aliases/transcriptparttype/)
 - [TranscriptRole](/reference/api/type-aliases/transcriptrole/)
 
