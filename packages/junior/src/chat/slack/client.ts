@@ -1,6 +1,11 @@
 import { WebClient } from "@slack/web-api";
 import { getSlackBotToken } from "@/chat/config";
-import { logWarn } from "@/chat/logging";
+import {
+  logWarn,
+  setSpanAttributes,
+  setSpanStatus,
+  withSpan,
+} from "@/chat/logging";
 
 // Slack canvas/list methods are not exposed by the current chat adapter public API,
 // so this module owns direct Web API calls for artifact actions.
@@ -66,6 +71,8 @@ export class SlackActionError extends Error {
 interface SlackRetryContext {
   action?: string;
   attributes?: Record<string, string | number | boolean>;
+  /** Extra attributes forwarded onto the per-attempt Sentry span. */
+  spanAttributes?: Record<string, string | number | boolean>;
 }
 
 function serializeSlackErrorData(data: unknown): string | undefined {
@@ -291,15 +298,60 @@ export async function withSlackRetries<T>(
 ): Promise<T> {
   let attempt = 0;
 
+  const action = context.action ?? "unknown";
+
   while (attempt < maxAttempts) {
     attempt += 1;
+    const attemptNumber = attempt;
     try {
-      return await task();
+      return await withSpan(
+        `POST slack.com/api/${action}`,
+        "http.client",
+        {},
+        async () => {
+          try {
+            return await task();
+          } catch (error) {
+            const mapped = mapSlackError(error);
+            const errorAttrs: Record<string, string | number | boolean> = {
+              "error.type": mapped.code,
+            };
+            if (mapped.apiError) {
+              errorAttrs["app.slack.api_error_code"] = mapped.apiError;
+            }
+            if (mapped.code === "rate_limited") {
+              errorAttrs["http.response.status_code"] = 429;
+              if (mapped.retryAfterSeconds) {
+                errorAttrs["app.slack.retry_after_ms"] =
+                  mapped.retryAfterSeconds * 1000;
+              }
+            } else if (mapped.statusCode != null) {
+              errorAttrs["http.response.status_code"] = mapped.statusCode;
+            }
+            setSpanAttributes(errorAttrs);
+            setSpanStatus("error");
+            throw error;
+          }
+        },
+        {
+          "http.request.method": "POST",
+          "server.address": "slack.com",
+          "url.scheme": "https",
+          "url.path": `/api/${action}`,
+          "app.slack.method": action,
+          "app.retry.max_attempts": maxAttempts,
+          ...(attemptNumber > 1
+            ? { "http.resend_count": attemptNumber - 1 }
+            : {}),
+          ...(context.attributes ?? {}),
+          ...(context.spanAttributes ?? {}),
+        },
+      );
     } catch (error) {
       const mapped = mapSlackError(error);
       const isRetryable = mapped.code === "rate_limited";
       const baseLogAttributes: Record<string, string | number | boolean> = {
-        "app.slack.action": context.action ?? "unknown",
+        "app.slack.action": action,
         "app.slack.error_code": mapped.code,
         ...(mapped.apiError ? { "app.slack.api_error": mapped.apiError } : {}),
         ...(mapped.detail ? { "app.slack.detail": mapped.detail } : {}),
@@ -401,10 +453,16 @@ export async function getFilePermalink(
   fileId: string,
 ): Promise<string | undefined> {
   const client = getClient();
-  const response = await withSlackRetries(() =>
-    client.files.info({
-      file: fileId,
-    }),
+  const response = await withSlackRetries(
+    () =>
+      client.files.info({
+        file: fileId,
+      }),
+    3,
+    {
+      action: "files.info",
+      spanAttributes: { "app.slack.file_id": fileId },
+    },
   );
 
   return response.file?.permalink;
@@ -419,14 +477,29 @@ export async function downloadPrivateSlackFile(url: string): Promise<Buffer> {
     );
   }
 
-  const response = await fetch(url, {
-    headers: {
-      Authorization: `Bearer ${token}`,
+  return withSpan(
+    "GET files.slack.com",
+    "http.client",
+    {},
+    async () => {
+      const response = await fetch(url, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+      setSpanAttributes({ "http.response.status_code": response.status });
+      if (!response.ok) {
+        setSpanAttributes({ "error.type": String(response.status) });
+        setSpanStatus("error");
+        throw new Error(`Slack file download failed: ${response.status}`);
+      }
+      return Buffer.from(await response.arrayBuffer());
     },
-  });
-  if (!response.ok) {
-    throw new Error(`Slack file download failed: ${response.status}`);
-  }
-
-  return Buffer.from(await response.arrayBuffer());
+    {
+      "http.request.method": "GET",
+      "server.address": "files.slack.com",
+      "url.scheme": "https",
+      "app.slack.method": "files.download",
+    },
+  );
 }
