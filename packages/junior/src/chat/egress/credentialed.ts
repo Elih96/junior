@@ -20,7 +20,10 @@ import {
   shouldPropagateSandboxEgressTrace,
   type SandboxEgressTracePropagationConfig,
 } from "@/chat/sandbox/egress/tracing";
-import { EgressAuthRequired } from "@sentry/junior-plugin-api";
+import {
+  EgressAuthRequired,
+  EgressPolicyDenied,
+} from "@sentry/junior-plugin-api";
 
 // Module overview: own credentialed provider forwarding after a caller has
 // authenticated the request source and resolved its provider.
@@ -125,6 +128,18 @@ function authRequiredResponse(input: {
       status: 401,
       headers: {
         "content-type": "text/plain; charset=utf-8",
+        "cache-control": "no-store",
+      },
+    },
+  );
+}
+
+function policyDeniedResponse(error: EgressPolicyDenied): Response {
+  return Response.json(
+    { error: error.message },
+    {
+      status: 403,
+      headers: {
         "cache-control": "no-store",
       },
     },
@@ -248,6 +263,13 @@ function isEgressAuthRequired(error: unknown): error is EgressAuthRequired {
   );
 }
 
+function isEgressPolicyDenied(error: unknown): error is EgressPolicyDenied {
+  return (
+    error instanceof EgressPolicyDenied ||
+    (error instanceof Error && error.name === "EgressPolicyDenied")
+  );
+}
+
 function logSandboxEgressUpstreamRequest(input: {
   egressId: string;
   grantAccess?: "read" | "write";
@@ -308,14 +330,31 @@ function isGrantSelectionBodyVisible(input: {
   );
 }
 
-function requestBodyText(body: ArrayBuffer | undefined): string | undefined {
-  if (
-    body === undefined ||
-    body.byteLength > GRANT_SELECTION_BODY_TEXT_LIMIT_BYTES
-  ) {
+function grantSelectionBodyText(input: {
+  body: ArrayBuffer | undefined;
+  operation?: string;
+  provider: string;
+  request: Request;
+  upstreamUrl: URL;
+}): string | undefined {
+  if (input.body === undefined) {
     return undefined;
   }
-  return new TextDecoder().decode(body);
+  if (input.body.byteLength > GRANT_SELECTION_BODY_TEXT_LIMIT_BYTES) {
+    if (
+      !input.operation &&
+      input.provider === "github" &&
+      input.request.method.toUpperCase() === "POST" &&
+      input.upstreamUrl.hostname.toLowerCase() === "api.github.com" &&
+      input.upstreamUrl.pathname.toLowerCase().endsWith("/graphql")
+    ) {
+      throw new EgressPolicyDenied(
+        "GitHub GraphQL request body is too large for Junior to inspect before issuing credentials.",
+      );
+    }
+    return undefined;
+  }
+  return new TextDecoder().decode(input.body);
 }
 
 function responseContentLength(upstream: Response): number | undefined {
@@ -551,13 +590,43 @@ export async function executeCredentialedEgressRequest(input: {
   })
     ? await requestBodyBytes(request)
     : undefined;
-  const grantSelection = await selectSandboxEgressGrant({
-    bodyText: requestBodyText(bodyForGrantSelection),
-    ...(operation ? { operation } : {}),
-    provider,
-    method: request.method,
-    upstreamUrl,
-  });
+  let grantSelection: SandboxEgressGrantSelection;
+  try {
+    grantSelection = await selectSandboxEgressGrant({
+      bodyText: grantSelectionBodyText({
+        body: bodyForGrantSelection,
+        ...(operation ? { operation } : {}),
+        provider,
+        request,
+        upstreamUrl,
+      }),
+      ...(operation ? { operation } : {}),
+      provider,
+      method: request.method,
+      upstreamUrl,
+    });
+  } catch (error) {
+    if (isEgressPolicyDenied(error)) {
+      logWarn(
+        "sandbox_egress_policy_denied",
+        {},
+        {
+          ...egressAttributes({
+            egressId: activeEgressId,
+            host: upstreamUrl.hostname,
+            method: request.method,
+            path: upstreamUrl.pathname,
+            provider,
+            status: 403,
+          }),
+          ...routingAttributes(request, upstreamUrl),
+        },
+        error.message,
+      );
+      return policyDeniedResponse(error);
+    }
+    throw error;
+  }
   const issueCredentialLease =
     deps.issueCredentialLease ?? sandboxEgressCredentialLease;
   const clearCredentialLease =
