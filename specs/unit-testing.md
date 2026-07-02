@@ -3,57 +3,32 @@
 ## Metadata
 
 - Created: 2026-03-03
-- Last Edited: 2026-06-02
+- Last Edited: 2026-07-02
 
-## Intent
+## Purpose
 
-Unit tests validate isolated logic with tight control of dependencies. Use them for algorithm-type things and tightly local deterministic invariants. They are not the default for runtime/product behavior.
+Unit tests are for local deterministic logic only. Layer-selection judgment
+lives in `../policies/testing.md`.
 
-## Scope
+## Use For
 
-In scope:
+- Parsing and validation helpers.
+- Normalization and pure transforms.
+- Retry/backoff math.
+- Scoring, sorting, dedupe, and other local algorithms.
+- Small deterministic adapter wrappers without network contracts.
 
-- Pure functions and local control-flow logic.
-- Module-level invariants such as retry/backoff calculations, dedupe trimming, normalization helpers, scoring/routing heuristics, and pure transforms.
-- Small adapter wrappers where behavior is deterministic without network contracts.
-
-## Non-Goals
-
-- Real handler/runtime flows that rebuild thread state, call Slack APIs, or exercise multi-module orchestration.
-- Deterministic multi-module service contracts better covered by component tests.
-- Slack HTTP request/response contract validation.
-- Full runtime Slack event handling behavior.
-- Conversational quality and multi-turn judge-scored outcomes.
-
-## Mocking Policy
-
-Allowed:
-
-- `vi.mock`, local fakes, and spies.
-- Dependency stubs for clocks, random IDs, and boundary services.
-
-Recommended:
-
-- Keep the mocked surface minimal.
-- Mock one boundary for one local invariant; do not stack mocks across persistence, Slack delivery, and reply execution just to simulate an end-to-end flow.
-- Assert behavior at module outputs rather than internal calls where practical.
-- Do not treat logger or tracer calls as required behavior unless the test is explicitly validating instrumentation.
-- Do not unit test prompt builders by asserting exact or substring prompt prose. If prompt wording matters, cover the resulting user-visible behavior with evals or integration tests.
-- If a test has to mock large parts of the runtime or Slack client to prove a user-visible flow, reclassify it as component, integration, or eval instead of growing the unit seam.
-
-## Data and Fixtures
-
-- Use shared fixtures for common Slack entities when they improve consistency.
-- Avoid random data in assertions unless uniqueness itself is under test.
-
-## Naming and Placement
+## Mechanics
 
 - Preferred path: `packages/junior/tests/unit/**`.
-- Test titles should describe observable unit behavior.
+- No real network calls.
+- Local stubs, spies, and `vi.mock` are allowed when they isolate one local
+  invariant.
+- Avoid shared runtime state unless the test resets it locally.
 
-## Required Characteristics
+## Do Not Use For
 
-1. No real network calls.
-2. Deterministic results across runs.
-3. Clear failure messages that localize logic regressions quickly.
-4. A unit test should fail because one local invariant broke, not because an end-to-end workflow changed shape.
+- Product/runtime workflows.
+- Slack HTTP contracts or Slack-visible behavior.
+- Prompt quality, model interpretation, or multi-turn continuity.
+- Helper branches already exercised by integration or eval coverage.
