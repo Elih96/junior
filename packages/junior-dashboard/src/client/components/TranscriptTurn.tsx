@@ -55,6 +55,7 @@ import {
   groupTranscriptMessages,
   groupTranscriptParts,
   messageRawText,
+  type RenderedToolRunEntry,
   type RenderedTranscriptPart,
   type TranscriptViewMode,
 } from "./transcriptRenderModel";
@@ -325,26 +326,28 @@ function TranscriptEntryList(props: {
   for (let index = 0; index < props.entries.length; ) {
     const entry = props.entries[index]!;
 
-    if (entry.kind === "tool") {
+    if (entry.kind === "tool" || entry.kind === "thinking") {
       const startIndex = index;
-      const tools: TranscriptToolEntry[] = [];
-      while (props.entries[index]?.kind === "tool") {
-        tools.push(props.entries[index] as TranscriptToolEntry);
+      const runEntries: RenderedToolRunEntry[] = [];
+      while (
+        props.entries[index]?.kind === "tool" ||
+        props.entries[index]?.kind === "thinking"
+      ) {
+        runEntries.push(props.entries[index] as RenderedToolRunEntry);
         index += 1;
       }
-      // When searching, filter within the original group to preserve group boundaries.
-      const visibleTools = search.active
-        ? tools.filter((tool) =>
-            entryMatchesSearch(tool, search.normalizedQuery),
+      const visibleEntries = search.active
+        ? runEntries.filter((e) =>
+            entryMatchesSearch(e, search.normalizedQuery),
           )
-        : tools;
-
-      if (visibleTools.length > 0) {
+        : runEntries;
+      if (visibleEntries.length > 0) {
         rows.push(
           <TranscriptToolRun
-            entries={visibleTools}
+            entries={visibleEntries}
             key={`${props.keyPrefix}:tool-run:${startIndex}`}
             keyPrefix={props.keyPrefix}
+            renderThinking={props.renderThinking}
             renderTool={props.renderTool}
             startIndex={startIndex}
           />,
@@ -356,11 +359,9 @@ function TranscriptEntryList(props: {
     if (!search.active || entryMatchesSearch(entry, search.normalizedQuery)) {
       rows.push(
         <Fragment key={`${props.keyPrefix}:${entry.kind}:${index}`}>
-          {entry.kind === "thinking"
-            ? props.renderThinking(entry, index)
-            : entry.kind === "subagent"
-              ? props.renderSubagent(entry, index)
-              : props.renderMessage(entry, index)}
+          {entry.kind === "subagent"
+            ? props.renderSubagent(entry, index)
+            : props.renderMessage(entry, index)}
         </Fragment>,
       );
     }
