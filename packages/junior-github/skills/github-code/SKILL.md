@@ -132,7 +132,17 @@ Defaults:
 
 **Assignment:** resolve GitHub handles from evidence (`gh api search/users`, org membership, repo history) before assigning requested reviewers or assignees. Skip assignment when the handle cannot be confirmed.
 
-### 7. Report result
+### 7. Subscribe to PR lifecycle
+
+After `github_createPullRequest` succeeds, check whether the result includes a subscribable resource hint. If it does, call `subscribeToResourceEvents` immediately before reporting.
+
+- Use the suggested events from the hint; when absent, request review and CI events.
+- Write a **self-contained intent** that captures repo, PR number, branch, and a single goal: resolve any review concerns and keep the build green. When an event fires, read the signal, address it, push, and report.
+- **Only post an update when there is something meaningful to say.** Report when feedback has been addressed, a build failure has been fixed, the PR is fully green and ready to merge, or the PR has been merged. Stay silent on intermediate CI passes, queued checks, and informational events with no action taken.
+
+If no subscribable hint is present, skip this step.
+
+### 8. Report result
 
 Return: repo, branch, PR URL/number (when applicable), checks run with results, pre-existing failures if any, checks not run and why.
 
