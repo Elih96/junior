@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Destination } from "@sentry/junior-plugin-api";
-import { asc, desc, eq, sql } from "drizzle-orm";
+import { and, asc, desc, eq, sql } from "drizzle-orm";
+import type { ConversationPrivacy } from "@/chat/conversation-privacy";
 import { parseDestination, sameDestination } from "@/chat/destination";
 import {
   parseStoredSlackRequester,
@@ -31,6 +32,11 @@ import type { JuniorIdentityKind } from "./schema/identities";
 
 type ConversationRow = typeof juniorConversations.$inferSelect;
 
+interface ConversationReadRow {
+  conversation: ConversationRow;
+  destinationVisibility: JuniorDestinationVisibility | null;
+}
+
 interface IdentityUpsert {
   email?: string;
   displayName?: string;
@@ -49,6 +55,7 @@ interface DestinationUpsert {
   provider: string;
   providerDestinationId: string;
   providerTenantId?: string;
+  refreshVisibility: boolean;
   visibility: JuniorDestinationVisibility;
 }
 
@@ -173,6 +180,8 @@ function destinationUpsertFromDestination(args: {
   channelName?: string;
   conversationId?: string;
   destination: Destination | undefined;
+  /** Source-confirmed visibility from the current event's signal only. */
+  visibility?: ConversationPrivacy;
 }): DestinationUpsert | undefined {
   const { destination } = args;
   if (!destination) {
@@ -185,17 +194,13 @@ function destinationUpsertFromDestination(args: {
       : channelId.startsWith("G")
         ? "group"
         : "channel";
-    const visibility = channelId.startsWith("D")
-      ? "direct"
-      : channelId.startsWith("G")
-        ? "private"
-        : "public";
     return {
       kind: channelKind,
       provider: "slack",
       providerTenantId: destination.teamId,
       providerDestinationId: channelId,
-      visibility,
+      refreshVisibility: args.visibility !== undefined,
+      visibility: args.visibility ?? "private",
       ...(args.channelName ? { displayName: args.channelName } : {}),
       metadata: { platform: "slack" },
     };
@@ -207,6 +212,7 @@ function destinationUpsertFromDestination(args: {
       localWorkspaceFromConversationId(destination.conversationId) ??
       localWorkspaceFromConversationId(args.conversationId ?? ""),
     providerDestinationId: destination.conversationId,
+    refreshVisibility: true,
     visibility: "direct",
     metadata: { platform: "local" },
   };
@@ -225,8 +231,20 @@ function executionStatusFromValue(value: unknown): ConversationStatus {
   throw new Error("Conversation record execution status is invalid");
 }
 
+/** Project joined destination columns into conversation privacy. */
+function privacyFromRow(
+  row: ConversationReadRow,
+): ConversationPrivacy | undefined {
+  if (row.destinationVisibility === null) {
+    return undefined;
+  }
+  return row.destinationVisibility === "public" ? "public" : "private";
+}
+
 /** Decode one SQL row and reject invalid durable conversation records. */
-function conversationFromRow(row: ConversationRow): Conversation {
+function conversationFromRow(readRow: ConversationReadRow): Conversation {
+  const row = readRow.conversation;
+  const visibility = privacyFromRow(readRow);
   if (row.schemaVersion !== 1) {
     throw new Error("Conversation record schema version is invalid");
   }
@@ -273,6 +291,7 @@ function conversationFromRow(row: ConversationRow): Conversation {
     ...(row.channelName ? { channelName: row.channelName } : {}),
     ...(source ? { source } : {}),
     ...(row.title ? { title: row.title } : {}),
+    ...(visibility ? { visibility } : {}),
   };
 }
 
@@ -353,6 +372,7 @@ export class SqlStore implements ConversationStore {
     requester?: StoredSlackRequester;
     source?: ConversationSource;
     title?: string;
+    visibility?: ConversationPrivacy;
   }): Promise<void> {
     const nowMs = args.nowMs ?? now();
     const activityAtMs = args.activityAtMs ?? nowMs;
@@ -375,9 +395,12 @@ export class SqlStore implements ConversationStore {
           nowMs,
           source: args.source,
         });
+      // Persist visibility only from the current event's live signal; the
+      // previously stored confirmation must not be replayed as a new signal.
+      const { visibility: _persisted, ...currentWithoutVisibility } = current;
       await this.upsertConversation({
         conversation: {
-          ...current,
+          ...currentWithoutVisibility,
           destination: current.destination ?? args.destination,
           source: current.source ?? args.source,
           channelName: current.channelName ?? args.channelName,
@@ -389,6 +412,7 @@ export class SqlStore implements ConversationStore {
             ...current.execution,
             updatedAtMs: current.execution.updatedAtMs ?? nowMs,
           },
+          ...(args.visibility ? { visibility: args.visibility } : {}),
         },
       });
     });
@@ -405,6 +429,7 @@ export class SqlStore implements ConversationStore {
     source?: ConversationSource;
     title?: string;
     updatedAtMs: number;
+    visibility?: ConversationPrivacy;
   }): Promise<void> {
     await this.withConversationMutation(args.conversationId, async () => {
       await this.upsertConversation({
@@ -419,6 +444,7 @@ export class SqlStore implements ConversationStore {
           ...(args.requester ? { requester: args.requester } : {}),
           ...(args.source ? { source: args.source } : {}),
           ...(args.title ? { title: args.title } : {}),
+          ...(args.visibility ? { visibility: args.visibility } : {}),
           execution: args.execution,
         },
       });
@@ -426,7 +452,10 @@ export class SqlStore implements ConversationStore {
   }
 
   /** Copy one conversation record into SQL during backfill. */
-  async backfillConversation(conversation: Conversation): Promise<void> {
+  async backfillConversation(sourceConversation: Conversation): Promise<void> {
+    // Backfilled records are not live source signals: never let them confirm
+    // destination visibility.
+    const { visibility: _visibility, ...conversation } = sourceConversation;
     await this.withConversationMutation(
       conversation.conversationId,
       async () => {
@@ -480,8 +509,15 @@ export class SqlStore implements ConversationStore {
   ): Promise<Conversation[]> {
     const rows = await this.executor
       .db()
-      .select()
+      .select({
+        conversation: juniorConversations,
+        destinationVisibility: juniorDestinations.visibility,
+      })
       .from(juniorConversations)
+      .leftJoin(
+        juniorDestinations,
+        eq(juniorDestinations.id, juniorConversations.destinationId),
+      )
       .orderBy(
         desc(juniorConversations.lastActivityAt),
         asc(juniorConversations.conversationId),
@@ -493,6 +529,37 @@ export class SqlStore implements ConversationStore {
       conversations.push(conversationFromRow(row));
     }
     return conversations;
+  }
+
+  async getDestinationVisibility(args: {
+    provider: string;
+    providerDestinationId: string;
+    providerTenantId?: string;
+  }): Promise<ConversationPrivacy | undefined> {
+    const rows = await this.executor
+      .db()
+      .select({
+        visibility: juniorDestinations.visibility,
+      })
+      .from(juniorDestinations)
+      .where(
+        and(
+          eq(juniorDestinations.provider, args.provider),
+          eq(
+            juniorDestinations.providerTenantId,
+            tenantId(args.providerTenantId),
+          ),
+          eq(
+            juniorDestinations.providerDestinationId,
+            args.providerDestinationId,
+          ),
+        ),
+      );
+    const row = rows[0];
+    if (!row) {
+      return undefined;
+    }
+    return row.visibility === "public" ? "public" : "private";
   }
 
   /** Serialize all durable mutations for one conversation inside a SQL transaction. */
@@ -508,11 +575,18 @@ export class SqlStore implements ConversationStore {
 
   private async readConversationRow(
     conversationId: string,
-  ): Promise<ConversationRow | undefined> {
+  ): Promise<ConversationReadRow | undefined> {
     const rows = await this.executor
       .db()
-      .select()
+      .select({
+        conversation: juniorConversations,
+        destinationVisibility: juniorDestinations.visibility,
+      })
       .from(juniorConversations)
+      .leftJoin(
+        juniorDestinations,
+        eq(juniorDestinations.id, juniorConversations.destinationId),
+      )
       .where(eq(juniorConversations.conversationId, conversationId));
     return rows[0];
   }
@@ -530,6 +604,9 @@ export class SqlStore implements ConversationStore {
         channelName: conversation.channelName,
         conversationId: conversation.conversationId,
         destination: conversation.destination,
+        ...(conversation.visibility
+          ? { visibility: conversation.visibility }
+          : {}),
       }),
       conversation.updatedAtMs,
     );
@@ -657,6 +734,9 @@ export class SqlStore implements ConversationStore {
     if (!destination) {
       return undefined;
     }
+    const visibilityUpdate = destination.refreshVisibility
+      ? sql`excluded.visibility`
+      : juniorDestinations.visibility;
     const rows = await this.executor
       .db()
       .insert(juniorDestinations)
@@ -682,7 +762,10 @@ export class SqlStore implements ConversationStore {
         set: {
           kind: sql`excluded.kind`,
           displayName: sql`coalesce(excluded.display_name, ${juniorDestinations.displayName})`,
-          visibility: sql`excluded.visibility`,
+          // Signal-less writes insert as private but must not clobber an
+          // existing public/private value. Live source signals refresh this
+          // field so converted channels converge on the next message.
+          visibility: visibilityUpdate,
           metadata: sql`coalesce(excluded.metadata_json, ${juniorDestinations.metadata})`,
           updatedAt: sql`excluded.updated_at`,
         },

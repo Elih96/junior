@@ -5,6 +5,10 @@ import {
   getDispatchConversationId,
   getDispatchDestinationLockId,
   getDispatchRecord,
+  getDispatchStorageKey,
+  parseDispatchRecord,
+  updateDispatchRecord,
+  withDispatchLock,
 } from "@/chat/agent-dispatch/store";
 import { runAgentDispatchSlice } from "@/chat/agent-dispatch/runner";
 import {
@@ -15,10 +19,12 @@ import { RetryableTurnError } from "@/chat/runtime/turn";
 import { coerceThreadConversationState } from "@/chat/state/conversation";
 import { disconnectStateAdapter, getStateAdapter } from "@/chat/state/adapter";
 import type { AssistantReply } from "@/chat/respond";
+import type { PiMessage } from "@/chat/pi/messages";
 import {
   bindSlackDirectCredentialSubject,
   createSlackDirectCredentialSubject,
 } from "@/chat/credentials/subject";
+import { getAgentTurnSessionRecord } from "@/chat/state/turn-session";
 import { chatPostMessageOk } from "../fixtures/slack/factories/api";
 import {
   getCapturedSlackApiCalls,
@@ -28,6 +34,23 @@ import {
 vi.hoisted(() => {
   process.env.JUNIOR_STATE_ADAPTER = "memory";
 });
+
+function zeroUsage() {
+  return {
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: 0,
+    cost: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      total: 0,
+    },
+  };
+}
 
 function createReply(): AssistantReply {
   return {
@@ -48,7 +71,45 @@ function createReply(): AssistantReply {
       toolResultCount: 0,
       usedPrimaryText: true,
     },
+    piMessages: [
+      {
+        role: "user",
+        content: [{ type: "text", text: "Run the scheduled task." }],
+        timestamp: 1,
+      },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "Dispatch delivered." }],
+        api: "responses",
+        provider: "openai",
+        model: "test-model",
+        stopReason: "stop",
+        timestamp: 2,
+        usage: zeroUsage(),
+      },
+    ],
   };
+}
+
+function failedDispatchPiMessages(): PiMessage[] {
+  return [
+    {
+      role: "user",
+      content: [{ type: "text", text: "Run the scheduled task." }],
+      timestamp: 1,
+    },
+    {
+      role: "assistant",
+      content: [],
+      api: "responses",
+      provider: "openai",
+      model: "test-model",
+      errorMessage: "provider failed",
+      stopReason: "error",
+      timestamp: 2,
+      usage: zeroUsage(),
+    },
+  ];
 }
 
 function createCredentialSubject() {
@@ -82,6 +143,8 @@ function slackAddress(channelId = "C123") {
 function slackSource(channelId = "C123") {
   return createSlackSource({
     ...slackAddress(channelId),
+
+    type: "priv",
   });
 }
 
@@ -190,6 +253,18 @@ describe("agent dispatch runner", () => {
     expect(scheduleSessionCompletedPluginTasks).toHaveBeenCalledWith({
       conversationId: dispatchConversationId,
       sessionId: `dispatch:${created.record.id}`,
+    });
+    await expect(
+      getAgentTurnSessionRecord(
+        dispatchConversationId,
+        `dispatch:${created.record.id}`,
+      ),
+    ).resolves.toMatchObject({
+      conversationId: dispatchConversationId,
+      sessionId: `dispatch:${created.record.id}`,
+      sliceId: 1,
+      state: "completed",
+      surface: "api",
     });
     await expect(getPersistedThreadState("slack:T123:C123")).resolves.toEqual(
       {},
@@ -353,6 +428,193 @@ describe("agent dispatch runner", () => {
     await expect(getDispatchRecord(created.record.id)).resolves.toMatchObject({
       status: "completed",
       resultMessageTs: "1700000000.000002",
+    });
+  });
+
+  it("does not re-post when the delivered-state persist fails after Slack accepted the reply", async () => {
+    queueSlackApiResponse("chat.postMessage", {
+      body: chatPostMessageOk({
+        channel: "C123",
+        ts: "1700000000.000004",
+      }),
+    });
+    const created = await createOrGetDispatch({
+      plugin: "scheduler",
+      nowMs: Date.parse("2026-05-26T12:00:00.000Z"),
+      options: {
+        idempotencyKey: "run-persist-fail",
+        destination: slackAddress(),
+        input: "Run the scheduled task.",
+        source: slackSource(),
+      },
+    });
+    const state = getStateAdapter();
+    await state.connect();
+    const originalSet = state.set.bind(state);
+    const setSpy = vi
+      .spyOn(state, "set")
+      .mockImplementation(async (key, value, ttlMs) => {
+        if (String(key).startsWith("thread-state:")) {
+          throw new Error("state store unavailable");
+        }
+        return originalSet(key, value, ttlMs);
+      });
+
+    try {
+      await runAgentDispatchSlice(
+        {
+          id: created.record.id,
+          expectedVersion: created.record.version,
+        },
+        { generateAssistantReply: async () => createReply() },
+      );
+    } finally {
+      setSpy.mockRestore();
+    }
+
+    // Delivery already happened: the dispatch is terminal so a retry cannot
+    // re-post, and the persistence failure is logged instead of failing it.
+    await expect(getDispatchRecord(created.record.id)).resolves.toMatchObject({
+      status: "completed",
+      resultMessageTs: "1700000000.000004",
+    });
+
+    const rerunGenerate = vi.fn(async () => {
+      throw new Error("must not regenerate a delivered dispatch");
+    });
+    await runAgentDispatchSlice(
+      {
+        id: created.record.id,
+        expectedVersion: created.record.version,
+      },
+      { generateAssistantReply: rerunGenerate },
+    );
+    expect(rerunGenerate).not.toHaveBeenCalled();
+    expect(getCapturedSlackApiCalls("chat.postMessage")).toHaveLength(1);
+  });
+
+  it("completes the session record after delivering a failed dispatch fallback", async () => {
+    queueSlackApiResponse("chat.postMessage", {
+      body: chatPostMessageOk({
+        channel: "C123",
+        ts: "1700000000.000006",
+      }),
+    });
+    const created = await createOrGetDispatch({
+      plugin: "scheduler",
+      nowMs: Date.parse("2026-05-26T12:00:00.000Z"),
+      options: {
+        idempotencyKey: "run-fallback-completed",
+        destination: slackAddress(),
+        input: "Run the scheduled task.",
+        source: slackSource(),
+      },
+    });
+    const dispatchConversationId = getDispatchConversationId(created.record);
+    const failedReply = createReply();
+    const generateAssistantReply = vi.fn(async () => ({
+      ...failedReply,
+      text: "",
+      diagnostics: {
+        ...failedReply.diagnostics,
+        errorMessage: "provider failed",
+        outcome: "provider_error" as const,
+        usedPrimaryText: false,
+      },
+      piMessages: failedDispatchPiMessages(),
+    }));
+
+    await runAgentDispatchSlice(
+      {
+        id: created.record.id,
+        expectedVersion: created.record.version,
+      },
+      { generateAssistantReply },
+    );
+
+    await expect(getDispatchRecord(created.record.id)).resolves.toMatchObject({
+      status: "failed",
+      resultMessageTs: "1700000000.000006",
+    });
+    await expect(
+      getAgentTurnSessionRecord(
+        dispatchConversationId,
+        `dispatch:${created.record.id}`,
+      ),
+    ).resolves.toMatchObject({
+      conversationId: dispatchConversationId,
+      sessionId: `dispatch:${created.record.id}`,
+      state: "completed",
+      surface: "api",
+    });
+  });
+
+  it("suppresses re-posting when a redelivered slice finds the delivered marker", async () => {
+    queueSlackApiResponse("chat.postMessage", {
+      body: chatPostMessageOk({
+        channel: "C123",
+        ts: "1700000000.000005",
+      }),
+    });
+    const created = await createOrGetDispatch({
+      plugin: "scheduler",
+      nowMs: Date.parse("2026-05-26T12:00:00.000Z"),
+      options: {
+        idempotencyKey: "run-crash-window",
+        destination: slackAddress(),
+        input: "Run the scheduled task.",
+        source: slackSource(),
+      },
+    });
+    await runAgentDispatchSlice(
+      {
+        id: created.record.id,
+        expectedVersion: created.record.version,
+      },
+      { generateAssistantReply: async () => createReply() },
+    );
+    await expect(getDispatchRecord(created.record.id)).resolves.toMatchObject({
+      status: "completed",
+      resultMessageTs: "1700000000.000005",
+    });
+
+    // Simulate a crash after the delivered marker persisted but before the
+    // dispatch was marked terminal: the record reverts to a lease-expired
+    // running attempt that queue redelivery will re-claim.
+    const reverted = await withDispatchLock(
+      created.record.id,
+      async (state) => {
+        const current = parseDispatchRecord(
+          await state.get(getDispatchStorageKey(created.record.id)),
+        );
+        if (!current) {
+          throw new Error("Expected dispatch record");
+        }
+        return await updateDispatchRecord(state, {
+          ...current,
+          status: "running",
+          attempt: 1,
+          leaseExpiresAtMs: Date.now() - 1,
+        });
+      },
+    );
+
+    const rerunGenerate = vi.fn(async () => {
+      throw new Error("must not regenerate a delivered dispatch");
+    });
+    await runAgentDispatchSlice(
+      {
+        id: created.record.id,
+        expectedVersion: reverted.version,
+      },
+      { generateAssistantReply: rerunGenerate },
+    );
+
+    expect(rerunGenerate).not.toHaveBeenCalled();
+    expect(getCapturedSlackApiCalls("chat.postMessage")).toHaveLength(1);
+    await expect(getDispatchRecord(created.record.id)).resolves.toMatchObject({
+      status: "completed",
+      resultMessageTs: "1700000000.000005",
     });
   });
 

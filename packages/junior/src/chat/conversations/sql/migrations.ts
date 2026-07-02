@@ -156,8 +156,21 @@ CREATE INDEX IF NOT EXISTS junior_conversations_origin_idx
 `,
 ] as const;
 
+const destinationVisibilityBackfillStatements = [
+  `
+UPDATE junior_destinations
+  SET visibility = 'private'
+  WHERE provider = 'slack'
+    AND visibility = 'public'
+`,
+] as const;
+
 export const migrations = [
   defineMigration("0001_conversation_core", coreMetadataStatements),
+  defineMigration(
+    "0002_slack_destination_visibility_backfill",
+    destinationVisibilityBackfillStatements,
+  ),
 ] as const;
 
 export { schema };

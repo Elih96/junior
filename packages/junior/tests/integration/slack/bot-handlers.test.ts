@@ -1,11 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { Destination } from "@sentry/junior-plugin-api";
+import { createSlackSource, type Destination } from "@sentry/junior-plugin-api";
 import type { JuniorRuntimeServiceOverrides } from "@/chat/app/services";
 import type { ReplyRequestContext } from "@/chat/respond";
 import { makeAssistantStatus } from "@/chat/slack/assistant-thread/status";
 import { getSlackInterruptionMarker } from "@/chat/slack/output";
 import { RetryableTurnError } from "@/chat/runtime/turn";
-import { disconnectStateAdapter } from "@/chat/state/adapter";
+import { disconnectStateAdapter, getStateAdapter } from "@/chat/state/adapter";
+import { acquireActiveLock } from "@/chat/state/locks";
+import { loadProjection } from "@/chat/state/session-log";
 import {
   getAgentTurnSessionRecord,
   upsertAgentTurnSessionRecord,
@@ -64,6 +66,16 @@ function createRuntime(
         ...(services.visionContext ?? {}),
       },
     },
+  });
+}
+
+function createSlackSourceForTest(channelId: string) {
+  return createSlackSource({
+    teamId: "T123",
+    channelId,
+    threadTs: "1700000000.000",
+
+    type: "priv",
   });
 }
 
@@ -461,22 +473,62 @@ describe("bot handlers (integration)", () => {
   });
 
   it("does not persist an assistant message when final Slack delivery fails", async () => {
+    const conversationId = "slack:C_DELIVERY_FAIL:1700000000.000";
+    const sessionId = "turn_msg-delivery-fail";
     const finalText = "This reply never reaches Slack.";
+    const promptMessages = turnPiMessages("please answer");
     const { slackRuntime } = createTestChatRuntime({
       services: {
         replyExecutor: {
-          generateAssistantReply: async () => ({
-            text: finalText,
-            diagnostics: {
-              assistantMessageCount: 1,
-              modelId: "fake-agent-model",
-              outcome: "success",
-              toolCalls: [],
-              toolErrorCount: 0,
-              toolResultCount: 0,
-              usedPrimaryText: true,
-            },
-          }),
+          generateAssistantReply: async () => {
+            // Simulate respond's durable input checkpoint: the session record
+            // is running at the prompt boundary when generation finishes.
+            await upsertAgentTurnSessionRecord({
+              conversationId,
+              sessionId,
+              sliceId: 1,
+              state: "running",
+              piMessages: promptMessages,
+            });
+            return {
+              text: finalText,
+              piMessages: [
+                ...promptMessages,
+                {
+                  role: "assistant" as const,
+                  content: [{ type: "text" as const, text: finalText }],
+                  api: "responses" as const,
+                  provider: "openai",
+                  model: "gpt-5.3",
+                  usage: {
+                    input: 1,
+                    output: 1,
+                    cacheRead: 0,
+                    cacheWrite: 0,
+                    totalTokens: 2,
+                    cost: {
+                      input: 0,
+                      output: 0,
+                      cacheRead: 0,
+                      cacheWrite: 0,
+                      total: 0,
+                    },
+                  },
+                  stopReason: "stop" as const,
+                  timestamp: 2,
+                },
+              ],
+              diagnostics: {
+                assistantMessageCount: 1,
+                modelId: "fake-agent-model",
+                outcome: "success" as const,
+                toolCalls: [],
+                toolErrorCount: 0,
+                toolResultCount: 0,
+                usedPrimaryText: true,
+              },
+            };
+          },
         },
         visionContext: {
           listThreadReplies: async () => [],
@@ -484,7 +536,7 @@ describe("bot handlers (integration)", () => {
       },
     });
     const thread = createTestThread({
-      id: "slack:C_DELIVERY_FAIL:1700000000.000",
+      id: conversationId,
     });
     thread.post = vi.fn(async () => {
       throw new Error("Slack unavailable");
@@ -495,7 +547,7 @@ describe("bot handlers (integration)", () => {
         thread,
         createTestMessage({
           id: "msg-delivery-fail",
-          threadId: "slack:C_DELIVERY_FAIL:1700000000.000",
+          threadId: conversationId,
           text: "please answer",
           isMention: true,
         }),
@@ -535,6 +587,85 @@ describe("bot handlers (integration)", () => {
         skippedReason: "reply failed",
       },
     });
+
+    // The session must not be recorded as delivered, and the undelivered
+    // assistant reply must not surface to later turns as durable history.
+    const sessionRecord = await getAgentTurnSessionRecord(
+      conversationId,
+      sessionId,
+    );
+    expect(sessionRecord?.state).toBe("failed");
+    const projection = await loadProjection({ conversationId });
+    expect(JSON.stringify(projection)).not.toContain(finalText);
+  });
+
+  it("keeps the turn successful when persistence fails after Slack accepted the reply", async () => {
+    const conversationId = "slack:C_POST_DELIVERY:1700000000.000";
+    const finalText = "Delivered before the state store failed.";
+    const { slackRuntime } = createTestChatRuntime({
+      services: {
+        replyExecutor: {
+          generateAssistantReply: async () => ({
+            text: finalText,
+            diagnostics: {
+              assistantMessageCount: 1,
+              modelId: "fake-agent-model",
+              outcome: "success" as const,
+              toolCalls: [],
+              toolErrorCount: 0,
+              toolResultCount: 0,
+              usedPrimaryText: true,
+            },
+          }),
+        },
+        visionContext: {
+          listThreadReplies: async () => [],
+        },
+      },
+    });
+    const thread = createTestThread({ id: conversationId });
+    const originalPost = thread.post.bind(thread);
+    const originalSetState = thread.setState.bind(thread);
+    let replyPosted = false;
+    thread.post = (async (message: unknown) => {
+      const sent = await originalPost(
+        message as Parameters<typeof originalPost>[0],
+      );
+      replyPosted = true;
+      return sent;
+    }) as typeof thread.post;
+    thread.setState = (async (
+      next: Parameters<typeof originalSetState>[0],
+      options?: Parameters<typeof originalSetState>[1],
+    ) => {
+      if (replyPosted) {
+        throw new Error("state store unavailable");
+      }
+      return originalSetState(next, options);
+    }) as typeof thread.setState;
+
+    // The user already saw the answer: post-delivery persistence failures are
+    // logged, the turn stays successful, and no fallback failure reply posts.
+    await expect(
+      slackRuntime.handleNewMention(
+        thread,
+        createTestMessage({
+          id: "msg-post-delivery",
+          threadId: conversationId,
+          text: "please answer",
+          isMention: true,
+        }),
+        { destination: createTestDestination(thread) },
+      ),
+    ).resolves.toBeUndefined();
+
+    expect(postIncludes(thread, finalText)).toBe(true);
+    expect(
+      postIncludes(
+        thread,
+        "I ran into an internal error while processing that.",
+      ),
+    ).toBe(false);
   });
 
   it("passes conversation and turn correlation IDs into assistant reply context", async () => {
@@ -941,7 +1072,7 @@ describe("bot handlers (integration)", () => {
       expectedVersion: 4,
     });
     const generateAssistantReply = vi.fn();
-    const onInputCommitted = vi.fn();
+    const ack = vi.fn();
     const onTurnStatePersisted = vi.fn();
     const { slackRuntime } = createRuntime({
       services: {
@@ -969,7 +1100,7 @@ describe("bot handlers (integration)", () => {
         }),
         {
           destination,
-          onInputCommitted,
+          ack,
           onTurnStatePersisted,
         },
       ),
@@ -987,7 +1118,7 @@ describe("bot handlers (integration)", () => {
     });
     expect(generateAssistantReply).not.toHaveBeenCalled();
     expect(onTurnStatePersisted).toHaveBeenCalledOnce();
-    expect(onInputCommitted).toHaveBeenCalledOnce();
+    expect(ack).toHaveBeenCalledOnce();
     expect(thread.posts).toEqual([]);
 
     const state = thread.getState();
@@ -1011,11 +1142,21 @@ describe("bot handlers (integration)", () => {
     expect(followUp?.meta?.skippedReason).toBeUndefined();
   });
 
-  it("parks auth-paused active turns without starting a new follow-up turn", async () => {
+  it("answers a follow-up as a fresh turn when the active session is auth-parked", async () => {
     const conversationId = "slack:C_AUTH_PARKED:1700000000.000";
     const activeSessionId = "turn_msg-auth-original";
-    const generateAssistantReply = vi.fn();
-    const onTurnStatePersisted = vi.fn();
+    const generateAssistantReply = vi.fn().mockResolvedValue({
+      text: "Fresh answer without the provider.",
+      diagnostics: {
+        assistantMessageCount: 1,
+        modelId: "test-model",
+        outcome: "success" as const,
+        toolCalls: [],
+        toolErrorCount: 0,
+        toolResultCount: 0,
+        usedPrimaryText: true,
+      },
+    });
     await upsertAgentTurnSessionRecord({
       conversationId,
       sessionId: activeSessionId,
@@ -1045,34 +1186,342 @@ describe("bot handlers (integration)", () => {
         text: "any update?",
         isMention: true,
       }),
-      {
-        destination: createTestDestination(thread),
-        onTurnStatePersisted,
-      },
+      { destination: createTestDestination(thread) },
     );
 
-    expect(generateAssistantReply).not.toHaveBeenCalled();
-    expect(onTurnStatePersisted).toHaveBeenCalledOnce();
-    expect(thread.posts).toEqual([]);
+    // The follow-up supersedes the pause: it must be answered, not consumed
+    // into a resume that only happens if the user ever authorizes.
+    expect(generateAssistantReply).toHaveBeenCalledOnce();
+    expect(generateAssistantReply.mock.calls[0]?.[0]).toContain("any update?");
+    expect(postIncludes(thread, "Fresh answer without the provider.")).toBe(
+      true,
+    );
+    await expect(
+      getAgentTurnSessionRecord(conversationId, activeSessionId),
+    ).resolves.toMatchObject({
+      state: "abandoned",
+      errorMessage: "Auth-parked session superseded by a new user message",
+    });
     const state = thread.getState();
     const conversation = (
       state as {
-        conversation?: {
-          messages?: Array<{
-            id?: string;
-            meta?: { replied?: boolean; skippedReason?: string };
-          }>;
-          processing?: { activeTurnId?: string };
-        };
+        conversation?: { processing?: { activeTurnId?: string } };
       }
     ).conversation;
-    expect(conversation?.processing?.activeTurnId).toBe(activeSessionId);
-    const followUp = conversation?.messages?.find(
-      (message) => message.id === "msg-auth-follow-up",
+    expect(conversation?.processing?.activeTurnId).toBeUndefined();
+  });
+
+  it("appends a parked-conversation follow-up to the session log before consuming it", async () => {
+    const conversationId = "slack:C9PARKEDLOG:1700000000.000";
+    const destination = slackDestination("C9PARKEDLOG");
+    const activeSessionId = "turn_msg-original";
+    const storedSource = createSlackSourceForTest("C9PARKEDLOG");
+    const parkedRecord = await upsertAgentTurnSessionRecord({
+      conversationId,
+      sessionId: activeSessionId,
+      sliceId: 1,
+      state: "awaiting_resume",
+      resumeReason: "yield",
+      destination,
+      source: storedSource,
+      piMessages: turnPiMessages("please keep working"),
+      turnStartMessageIndex: 0,
+    });
+    const projectionAtScheduleTime: string[] = [];
+    const scheduleAgentContinue = vi.fn(async () => {
+      projectionAtScheduleTime.push(
+        JSON.stringify(await loadProjection({ conversationId })),
+      );
+    });
+    const generateAssistantReply = vi.fn();
+    const ack = vi.fn();
+    const { slackRuntime } = createRuntime({
+      services: {
+        replyExecutor: {
+          generateAssistantReply,
+          scheduleAgentContinue,
+        },
+      },
+    });
+
+    const thread = createTestThread({
+      id: conversationId,
+      state: createAwaitingContinuationState({ activeSessionId }),
+    });
+    const followUp = createTestMessage({
+      id: "msg-parked-follow-up",
+      threadId: conversationId,
+      text: "also check the logs",
+      isMention: true,
+    });
+
+    await slackRuntime.handleNewMention(thread, followUp, {
+      destination,
+      ack,
+    });
+
+    expect(generateAssistantReply).not.toHaveBeenCalled();
+    expect(thread.posts).toEqual([]);
+    expect(ack).toHaveBeenCalledOnce();
+    expect(scheduleAgentContinue).toHaveBeenCalledWith({
+      conversationId,
+      destination,
+      sessionId: activeSessionId,
+      // The append is a log-only write: the resume request stays valid.
+      expectedVersion: parkedRecord.version,
+    });
+    // The durable append happened before the continuation was scheduled.
+    expect(projectionAtScheduleTime[0]).toContain("also check the logs");
+
+    // The resumed continue() replays the record's Pi history, which must now
+    // end with the follow-up at a continuable user boundary.
+    const record = await getAgentTurnSessionRecord(
+      conversationId,
+      activeSessionId,
     );
-    expect(followUp).toBeDefined();
-    expect(followUp?.meta?.replied).toBeUndefined();
-    expect(followUp?.meta?.skippedReason).toBeUndefined();
+    expect(record?.state).toBe("awaiting_resume");
+    const lastMessage = record?.piMessages.at(-1) as
+      | { content?: Array<{ text?: string }>; role?: string }
+      | undefined;
+    expect(lastMessage?.role).toBe("user");
+    expect(JSON.stringify(lastMessage?.content)).toContain(
+      "also check the logs",
+    );
+
+    // Redelivery of the same follow-up must not duplicate the append.
+    await slackRuntime.handleNewMention(thread, followUp, {
+      destination,
+      ack,
+    });
+    const projection = await loadProjection({ conversationId });
+    expect(
+      JSON.stringify(projection).split("also check the logs"),
+    ).toHaveLength(2);
+  });
+
+  it("appends only the missing parked messages on a partial-overlap redelivery", async () => {
+    const conversationId = "slack:C9PARKEDPART:1700000000.000";
+    const destination = slackDestination("C9PARKEDPART");
+    const activeSessionId = "turn_msg-original";
+    await upsertAgentTurnSessionRecord({
+      conversationId,
+      sessionId: activeSessionId,
+      sliceId: 1,
+      state: "awaiting_resume",
+      resumeReason: "yield",
+      destination,
+      source: createSlackSourceForTest("C9PARKEDPART"),
+      piMessages: turnPiMessages("please keep working"),
+      turnStartMessageIndex: 0,
+    });
+    const scheduleAgentContinue = vi.fn();
+    const { slackRuntime } = createRuntime({
+      services: {
+        replyExecutor: {
+          generateAssistantReply: vi.fn(),
+          scheduleAgentContinue,
+        },
+      },
+    });
+    const thread = createTestThread({
+      id: conversationId,
+      state: createAwaitingContinuationState({ activeSessionId }),
+    });
+    const first = createTestMessage({
+      id: "msg-parked-first",
+      threadId: conversationId,
+      text: "first follow-up",
+      isMention: true,
+    });
+    const second = createTestMessage({
+      id: "msg-parked-second",
+      threadId: conversationId,
+      text: "second follow-up",
+      isMention: true,
+    });
+
+    // First delivery durably appends the first follow-up.
+    await slackRuntime.handleNewMention(thread, first, { destination });
+
+    // Redelivery arrives carrying the already-appended message plus a new
+    // one; only the missing message may be appended.
+    await slackRuntime.handleNewMention(thread, second, {
+      destination,
+      messageContext: { skipped: [first], totalSinceLastHandler: 1 },
+    });
+
+    const serialized = JSON.stringify(await loadProjection({ conversationId }));
+    expect(serialized.split("first follow-up")).toHaveLength(2);
+    expect(serialized.split("second follow-up")).toHaveLength(2);
+  });
+
+  it("leaves the parked follow-up unconsumed while a live resume holds the thread lock", async () => {
+    const conversationId = "slack:C9PARKEDLOCK:1700000000.000";
+    const destination = slackDestination("C9PARKEDLOCK");
+    const activeSessionId = "turn_msg-original";
+    await upsertAgentTurnSessionRecord({
+      conversationId,
+      sessionId: activeSessionId,
+      sliceId: 1,
+      state: "awaiting_resume",
+      resumeReason: "yield",
+      destination,
+      source: createSlackSourceForTest("C9PARKEDLOCK"),
+      piMessages: turnPiMessages("please keep working"),
+      turnStartMessageIndex: 0,
+    });
+    const scheduleAgentContinue = vi.fn();
+    const ack = vi.fn();
+    const { slackRuntime } = createRuntime({
+      services: {
+        replyExecutor: {
+          generateAssistantReply: vi.fn(),
+          scheduleAgentContinue,
+        },
+      },
+    });
+    const thread = createTestThread({
+      id: conversationId,
+      state: createAwaitingContinuationState({ activeSessionId }),
+    });
+    const followUp = createTestMessage({
+      id: "msg-parked-locked",
+      threadId: conversationId,
+      text: "also check the logs",
+      isMention: true,
+    });
+
+    // Simulate a live resume: it holds the thread resume lock for its run.
+    const stateAdapter = getStateAdapter();
+    await stateAdapter.connect();
+    const lock = await acquireActiveLock(stateAdapter, conversationId);
+    expect(lock).not.toBeNull();
+    try {
+      await expect(
+        slackRuntime.handleNewMention(thread, followUp, {
+          destination,
+          ack,
+        }),
+      ).rejects.toThrow("Turn input is deferred until the active resume ends");
+    } finally {
+      await stateAdapter.releaseLock(lock!);
+    }
+
+    // The message was not consumed and nothing was appended or scheduled: it
+    // stays pending in the mailbox for the next drain.
+    expect(ack).not.toHaveBeenCalled();
+    expect(scheduleAgentContinue).not.toHaveBeenCalled();
+    expect(
+      JSON.stringify(await loadProjection({ conversationId })),
+    ).not.toContain("also check the logs");
+  });
+
+  it("suppresses the visible failure reply when the mailbox will retry the delivery", async () => {
+    const { slackRuntime } = createRuntime({
+      services: {
+        replyExecutor: {
+          generateAssistantReply: async () => {
+            throw new Error("transient turn failure");
+          },
+        },
+      },
+    });
+
+    const thread = createTestThread({
+      id: "slack:C_RETRYQUIET:1700000000.000",
+    });
+
+    await slackRuntime.handleNewMention(
+      thread,
+      createTestMessage({
+        id: "msg-retryable-failure",
+        threadId: "slack:C_RETRYQUIET:1700000000.000",
+        text: "do work",
+        isMention: true,
+      }),
+      {
+        destination: createTestDestination(thread),
+        isFinalAttempt: false,
+      },
+    );
+
+    expect(thread.posts).toEqual([]);
+  });
+
+  it("posts the failure fallback after ack even when the attempt is not final", async () => {
+    const ack = vi.fn().mockResolvedValue(undefined);
+    const { slackRuntime } = createRuntime({
+      services: {
+        replyExecutor: {
+          generateAssistantReply: async (_input, context) => {
+            await context.onInputCommitted?.();
+            throw new Error("post-ack turn failure");
+          },
+        },
+      },
+    });
+
+    const thread = createTestThread({
+      id: "slack:C_RETRYACKED:1700000000.000",
+    });
+
+    await slackRuntime.handleNewMention(
+      thread,
+      createTestMessage({
+        id: "msg-acked-failure",
+        threadId: "slack:C_RETRYACKED:1700000000.000",
+        text: "do work",
+        isMention: true,
+      }),
+      {
+        ack,
+        destination: createTestDestination(thread),
+        isFinalAttempt: false,
+      },
+    );
+
+    expect(ack).toHaveBeenCalledOnce();
+    expect(thread.posts).toEqual([
+      expect.stringContaining(
+        "I ran into an internal error while processing that.",
+      ),
+    ]);
+  });
+
+  it("posts the failure fallback on the final delivery attempt", async () => {
+    const { slackRuntime } = createRuntime({
+      services: {
+        replyExecutor: {
+          generateAssistantReply: async () => {
+            throw new Error("persistent turn failure");
+          },
+        },
+      },
+    });
+
+    const thread = createTestThread({
+      id: "slack:C_RETRYFINAL:1700000000.000",
+    });
+
+    await slackRuntime.handleNewMention(
+      thread,
+      createTestMessage({
+        id: "msg-final-failure",
+        threadId: "slack:C_RETRYFINAL:1700000000.000",
+        text: "do work",
+        isMention: true,
+      }),
+      {
+        destination: createTestDestination(thread),
+        isFinalAttempt: true,
+      },
+    );
+
+    expect(thread.posts).toEqual([
+      expect.stringContaining(
+        "I ran into an internal error while processing that.",
+      ),
+    ]);
   });
 
   it("fails malformed awaiting continuations before handling the follow-up", async () => {

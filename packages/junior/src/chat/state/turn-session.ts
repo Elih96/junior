@@ -24,6 +24,7 @@ import { commitMessages, loadMessages, loadProjection } from "./session-log";
 import type { AgentTurnUsage } from "@/chat/usage";
 import { getStateAdapter } from "./adapter";
 import { getConversationStore } from "@/chat/db";
+import type { ConversationPrivacy } from "@/chat/conversation-privacy";
 import type {
   ConversationExecution,
   ConversationStore,
@@ -359,6 +360,8 @@ async function appendAgentTurnSessionSummary(
 /** Store run summary metadata in the configured conversation store. */
 async function recordConversationActivityMetadata(args: {
   conversationStore?: ConversationStore;
+  /** Source-confirmed destination visibility from the current event's signal. */
+  destinationVisibility?: ConversationPrivacy;
   nowMs: number;
   summary: AgentTurnSessionSummary;
 }): Promise<void> {
@@ -376,6 +379,7 @@ async function recordConversationActivityMetadata(args: {
       nowMs: args.nowMs,
       requester: sessionLogRequester(args.summary.requester),
       source,
+      visibility: args.destinationVisibility,
     });
     await conversationStore.recordExecution({
       channelName: args.summary.channelName,
@@ -387,6 +391,7 @@ async function recordConversationActivityMetadata(args: {
       requester: sessionLogRequester(args.summary.requester),
       source,
       updatedAtMs: args.nowMs,
+      visibility: args.destinationVisibility,
     });
   } catch (error) {
     logWarn(
@@ -580,6 +585,8 @@ function buildStoredRecord(args: {
 
 async function setStoredRecord(args: {
   conversationStore?: ConversationStore;
+  /** Source-confirmed destination visibility from the current event's signal. */
+  destinationVisibility?: ConversationPrivacy;
   piMessages: PiMessage[];
   record: StoredAgentTurnSessionRecord;
   ttlMs: number;
@@ -602,6 +609,7 @@ async function setStoredRecord(args: {
   await appendAgentTurnSessionSummary(summary, args.ttlMs);
   await recordConversationActivityMetadata({
     conversationStore: args.conversationStore,
+    destinationVisibility: args.destinationVisibility,
     nowMs: Date.now(),
     summary,
   });
@@ -678,6 +686,8 @@ export async function upsertAgentTurnSessionRecord(args: {
   cumulativeDurationMs?: number;
   cumulativeUsage?: AgentTurnUsage;
   destination?: Destination;
+  /** Source-confirmed destination visibility from the current event's signal. */
+  destinationVisibility?: ConversationPrivacy;
   source?: Source;
   lastProgressAtMs?: number;
   loadedSkillNames?: string[];
@@ -709,6 +719,7 @@ export async function upsertAgentTurnSessionRecord(args: {
 
   return await setStoredRecord({
     conversationStore: args.conversationStore,
+    destinationVisibility: args.destinationVisibility,
     piMessages: args.piMessages,
     ttlMs,
     record: buildStoredRecord({
@@ -777,6 +788,12 @@ export async function recordAgentTurnSessionSummary(args: {
   cumulativeDurationMs?: number;
   cumulativeUsage?: AgentTurnUsage;
   destination?: Destination;
+  /**
+   * Source-confirmed destination visibility from the current event's signal
+   * (Slack `channel_type`). Leave unset when no live signal exists so an
+   * existing destination visibility is not overwritten.
+   */
+  destinationVisibility?: ConversationPrivacy;
   source?: Source;
   lastProgressAtMs?: number;
   loadedSkillNames?: string[];
@@ -845,6 +862,7 @@ export async function recordAgentTurnSessionSummary(args: {
   await appendAgentTurnSessionSummary(summary, ttlMs);
   await recordConversationActivityMetadata({
     conversationStore: args.conversationStore,
+    destinationVisibility: args.destinationVisibility,
     nowMs,
     summary,
   });

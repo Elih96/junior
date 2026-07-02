@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { backfillToSql } from "@/chat/conversations/sql/backfill";
+import { migrateSchema, migrations } from "@/chat/conversations/sql/migrations";
 import { createSqlStore, SqlStore } from "@/chat/conversations/sql/store";
 import { createStateConversationStore } from "@/chat/conversations/state";
 import {
@@ -56,7 +57,7 @@ describe("conversation SQL store", () => {
         fixture.sql.query(
           "SELECT id FROM junior_schema_migrations ORDER BY id ASC",
         ),
-      ).resolves.toHaveLength(1);
+      ).resolves.toHaveLength(2);
     } finally {
       await fixture.close();
     }
@@ -175,6 +176,142 @@ describe("conversation SQL store", () => {
           requesterTenant: "T123",
         },
       ]);
+    } finally {
+      await fixture.close();
+    }
+  });
+
+  it("persists visibility from source signals and converges on newer signals", async () => {
+    const fixture = await createLocalJuniorSqlFixture();
+
+    try {
+      const store = createSqlStore(fixture.sql);
+      await store.migrate();
+      const destination = inboundMessage("visibility").destination;
+
+      // Slack reports this C-prefixed channel private (channel_type: group).
+      await store.recordActivity({
+        conversationId: CONVERSATION_ID,
+        destination,
+        visibility: "private",
+        nowMs: 1_000,
+      });
+      await expect(
+        store.get({ conversationId: CONVERSATION_ID }),
+      ).resolves.toMatchObject({ visibility: "private" });
+      await expect(
+        store.getDestinationVisibility({
+          provider: "slack",
+          providerTenantId: "T123",
+          providerDestinationId: "C123",
+        }),
+      ).resolves.toBe("private");
+
+      // A signal-less write must not clobber the stored value.
+      await store.recordActivity({
+        conversationId: CONVERSATION_ID,
+        destination,
+        nowMs: 2_000,
+      });
+      await expect(
+        store.get({ conversationId: CONVERSATION_ID }),
+      ).resolves.toMatchObject({ visibility: "private" });
+
+      // A channel converted private -> public converges on the next signal.
+      await store.recordActivity({
+        conversationId: CONVERSATION_ID,
+        destination,
+        visibility: "public",
+        nowMs: 3_000,
+      });
+      await expect(
+        store.get({ conversationId: CONVERSATION_ID }),
+      ).resolves.toMatchObject({ visibility: "public" });
+      await expect(
+        store.getDestinationVisibility({
+          provider: "slack",
+          providerTenantId: "T123",
+          providerDestinationId: "C123",
+        }),
+      ).resolves.toBe("public");
+
+      await store.recordActivity({
+        conversationId: CONVERSATION_ID,
+        destination,
+        nowMs: 4_000,
+      });
+      await expect(
+        store.get({ conversationId: CONVERSATION_ID }),
+      ).resolves.toMatchObject({ visibility: "public" });
+    } finally {
+      await fixture.close();
+    }
+  });
+
+  it("defaults unsigned Slack destinations to private", async () => {
+    const fixture = await createLocalJuniorSqlFixture();
+
+    try {
+      const store = createSqlStore(fixture.sql);
+      await store.migrate();
+
+      // A write without a live source signal fails closed to private even
+      // though the channel id is C-prefixed.
+      await store.recordActivity({
+        conversationId: CONVERSATION_ID,
+        destination: inboundMessage("unsigned").destination,
+        nowMs: 1_000,
+      });
+      const conversation = await store.get({
+        conversationId: CONVERSATION_ID,
+      });
+      expect(conversation?.visibility).toBe("private");
+      await expect(
+        store.getDestinationVisibility({
+          provider: "slack",
+          providerTenantId: "T123",
+          providerDestinationId: "C123",
+        }),
+      ).resolves.toBe("private");
+    } finally {
+      await fixture.close();
+    }
+  });
+
+  it("migrates historical Slack public visibility guesses to private", async () => {
+    const fixture = await createLocalJuniorSqlFixture();
+
+    try {
+      await migrateSchema(fixture.sql, [migrations[0]]);
+      await fixture.sql.execute(
+        `
+INSERT INTO junior_destinations (
+  id, provider, provider_tenant_id, provider_destination_id,
+  kind, visibility, created_at, updated_at
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+`,
+        [
+          "historical-public-destination",
+          "slack",
+          "T999",
+          "C_LEGACY",
+          "channel",
+          "public",
+          new Date(1_000).toISOString(),
+          new Date(1_000).toISOString(),
+        ],
+      );
+
+      const store = createSqlStore(fixture.sql);
+      await store.migrate();
+
+      await expect(
+        store.getDestinationVisibility({
+          provider: "slack",
+          providerTenantId: "T999",
+          providerDestinationId: "C_LEGACY",
+        }),
+      ).resolves.toBe("private");
     } finally {
       await fixture.close();
     }
@@ -605,7 +742,7 @@ INSERT INTO junior_conversations (
         conversationStore: store,
         queue,
         run: async (context) => {
-          await context.drainMailbox(async () => {});
+          await context.attempt.drain(async () => {});
           entered.resolve();
           await finish.promise;
           return { status: "completed" };
@@ -663,7 +800,7 @@ INSERT INTO junior_conversations (
       await drainConversationMailbox({
         conversationId: CONVERSATION_ID,
         conversationStore: store,
-        inject: async () => {},
+        handle: async () => {},
         leaseToken: lease.leaseToken,
         nowMs: 3_000,
         state,

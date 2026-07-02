@@ -14,6 +14,7 @@ import { AuthorizationFlowDisabledError } from "@/chat/services/auth-pause";
 import { SlackActionError } from "@/chat/slack/client";
 import {
   isCooperativeTurnYieldError,
+  isTurnInputDeferredError,
   isTurnInputCommitLostError,
   isRetryableTurnError,
 } from "@/chat/runtime/turn";
@@ -64,14 +65,15 @@ export interface SteeringCandidateMessage {
 export interface ReplyHooks {
   beforeFirstResponsePost?: () => Promise<void>;
   drainSteeringMessages?: (
-    inject: (
+    accept: (
       messages: SteeringCandidateMessage[],
     ) => Promise<readonly string[] | void>,
   ) => Promise<void>;
   messageContext?: MessageContext;
-  onInputCommitted?: () => Promise<void>;
+  ack?: () => Promise<void>;
   onToolInvocation?: (invocation: TurnToolInvocation) => void;
   onTurnStatePersisted?: () => Promise<void>;
+  isFinalAttempt?: boolean;
   shouldYield?: () => boolean;
 }
 
@@ -91,6 +93,7 @@ function shouldRethrowTurnControlError(error: unknown): boolean {
   return (
     isCooperativeTurnYieldError(error) ||
     isTurnInputCommitLostError(error) ||
+    isTurnInputDeferredError(error) ||
     isProviderRetryError(error)
   );
 }
@@ -189,14 +192,14 @@ export interface SlackTurnRuntimeDependencies<TPreparedState> {
       beforeFirstResponsePost?: () => Promise<void>;
       destination: Destination;
       explicitMention?: boolean;
-      onInputCommitted?: () => Promise<void>;
+      ack?: () => Promise<void>;
       onToolInvocation?: (invocation: TurnToolInvocation) => void;
       onTurnCompleted?: () => Promise<void>;
       onTurnStatePersisted?: () => Promise<void>;
       preparedState?: TPreparedState;
       queuedMessages?: QueuedTurnMessage[];
       drainSteeringMessages?: (
-        inject: (messages: QueuedTurnMessage[]) => Promise<void>,
+        accept: (messages: QueuedTurnMessage[]) => Promise<void>,
         context?: SteeringDrainContext,
       ) => Promise<QueuedTurnMessage[]>;
       shouldYield?: () => boolean;
@@ -289,7 +292,7 @@ function createAcceptedSteeringDrain(
   },
 ):
   | ((
-      inject: (messages: QueuedTurnMessage[]) => Promise<void>,
+      accept: (messages: QueuedTurnMessage[]) => Promise<void>,
       context?: SteeringDrainContext,
     ) => Promise<QueuedTurnMessage[]>)
   | undefined {
@@ -297,7 +300,7 @@ function createAcceptedSteeringDrain(
     return undefined;
   }
 
-  return async (inject, context) => {
+  return async (accept, context) => {
     let interruptedMessages: Message[] | undefined;
     await hooks.drainSteeringMessages!(async (messages) => {
       const selection = await options.selectMessages(messages, context);
@@ -307,7 +310,7 @@ function createAcceptedSteeringDrain(
       const interrupted = selection.accepted
         .filter((accepted) => accepted.mode === "interrupt")
         .map((accepted) => accepted.message);
-      await inject(getQueuedMessagesFromSlackMessages(interrupted, options));
+      await accept(getQueuedMessagesFromSlackMessages(interrupted, options));
       interruptedMessages = interrupted;
       await options.onAcceptedForProcessing?.(interrupted);
       return [
@@ -557,7 +560,7 @@ export function createSlackTurnRuntime<
     message: Message;
     decision: SubscribedReplyDecision;
     context: TurnContext;
-    onInputCommitted?: () => Promise<void>;
+    ack?: () => Promise<void>;
     preparedState?: TPreparedState;
     text: TurnMessageText;
   }): Promise<void> => {
@@ -583,7 +586,7 @@ export function createSlackTurnRuntime<
     // Mark the inbound mailbox messages as consumed even though we are not
     // replying. Without this, completeConversationWork sees pendingMessages > 0
     // and re-enqueues indefinitely — an infinite loop for every skipped message.
-    await args.onInputCommitted?.();
+    await args.ack?.();
   };
 
   const selectAcceptedSteeringMessages = async (args: {
@@ -696,6 +699,7 @@ export function createSlackTurnRuntime<
       let processingReaction: ProcessingReactionSession | undefined;
       const skippedSteeringMessages: SteeringMessageDecision[] = [];
       let completed = false;
+      let acked = false;
       const onTurnCompleted = async (): Promise<void> => {
         completed = true;
         await flushSkippedSteeringMessagesBestEffort({
@@ -745,8 +749,9 @@ export function createSlackTurnRuntime<
               ),
             );
           };
-          const onInputCommitted = async (): Promise<void> => {
-            await hooks.onInputCommitted?.();
+          const ack = async (): Promise<void> => {
+            await hooks.ack?.();
+            acked = true;
             await startQueuedProcessingReactions();
           };
           const drainSteeringMessages = createAcceptedSteeringDrain(hooks, {
@@ -778,7 +783,7 @@ export function createSlackTurnRuntime<
             beforeFirstResponsePost: hooks.beforeFirstResponsePost,
             destination: hooks.destination,
             queuedMessages,
-            onInputCommitted,
+            ack,
             onToolInvocation: toolInvocationHook,
             onTurnCompleted,
             drainSteeringMessages,
@@ -838,6 +843,11 @@ export function createSlackTurnRuntime<
           {},
           "onNewMention failed",
         );
+        if (!acked && hooks.isFinalAttempt === false) {
+          // The mailbox redelivers this message; only the final bounded
+          // attempt posts the visible failure reply.
+          return;
+        }
         if (!eventId) {
           throw new Error(
             "Sentry did not return an event ID for mention_handler_failed",
@@ -881,6 +891,7 @@ export function createSlackTurnRuntime<
       let processingReaction: ProcessingReactionSession | undefined;
       const skippedSteeringMessages: SteeringMessageDecision[] = [];
       let completed = false;
+      let acked = false;
       const onTurnCompleted = async (): Promise<void> => {
         completed = true;
         await flushSkippedSteeringMessagesBestEffort({
@@ -959,7 +970,7 @@ export function createSlackTurnRuntime<
               message,
               decision: { shouldReply: false, reason },
               context: threadContext,
-              onInputCommitted: hooks.onInputCommitted,
+              ack: hooks.ack,
               text: combinedText,
             });
             return;
@@ -1008,7 +1019,7 @@ export function createSlackTurnRuntime<
               message,
               decision,
               context: threadContext,
-              onInputCommitted: hooks.onInputCommitted,
+              ack: hooks.ack,
               preparedState,
               text: combinedText,
             });
@@ -1021,7 +1032,7 @@ export function createSlackTurnRuntime<
               message,
               decision,
               context: threadContext,
-              onInputCommitted: hooks.onInputCommitted,
+              ack: hooks.ack,
               preparedState,
               text: combinedText,
             });
@@ -1071,8 +1082,9 @@ export function createSlackTurnRuntime<
               ),
             );
           };
-          const onInputCommitted = async (): Promise<void> => {
-            await hooks.onInputCommitted?.();
+          const ack = async (): Promise<void> => {
+            await hooks.ack?.();
+            acked = true;
             await startQueuedProcessingReactions();
           };
           const toolInvocationHook = createToolInvocationHook(
@@ -1086,7 +1098,7 @@ export function createSlackTurnRuntime<
             preparedState,
             beforeFirstResponsePost: hooks.beforeFirstResponsePost,
             queuedMessages,
-            onInputCommitted,
+            ack,
             onToolInvocation: toolInvocationHook,
             onTurnCompleted,
             drainSteeringMessages,
@@ -1146,6 +1158,11 @@ export function createSlackTurnRuntime<
           {},
           "onSubscribedMessage failed",
         );
+        if (!acked && hooks.isFinalAttempt === false) {
+          // The mailbox redelivers this message; only the final bounded
+          // attempt posts the visible failure reply.
+          return;
+        }
         if (!eventId) {
           throw new Error(
             "Sentry did not return an event ID for subscribed_message_handler_failed",

@@ -33,6 +33,8 @@ import {
   persistThreadStateById,
 } from "@/chat/runtime/thread-state";
 import { startActiveTurn, markTurnFailed } from "@/chat/runtime/turn";
+import { finalizeFailedTurnReply } from "@/chat/services/turn-failure-response";
+import { completeDeliveredTurn } from "@/chat/services/turn-session-record";
 import {
   buildConversationContext,
   markConversationMessage,
@@ -284,6 +286,14 @@ export async function runLocalAgentTurn(
       },
     });
 
+    // Failed turns deliver the sanitized fallback (or genuine partial model
+    // text), never raw exception strings and never silence.
+    reply = finalizeFailedTurnReply({
+      reply,
+      logException,
+      context: { conversationId: input.conversationId },
+    });
+
     completedState = buildDeliveredTurnStatePatch({
       artifacts,
       conversation,
@@ -329,11 +339,22 @@ export async function runLocalAgentTurn(
     sandboxDependencyProfileHash:
       reply.sandboxDependencyProfileHash ?? sandboxDependencyProfileHash,
   });
-  if (reply.piMessages) {
-    await commitMessages({
+  if (reply.piMessages?.length) {
+    // Destination acceptance is the completion boundary: this first commits
+    // the final assistant messages to the session log and marks the session
+    // record completed only after the CLI sink accepted the reply. Failures
+    // are logged inside and never fail the delivered turn.
+    await completeDeliveredTurn({
       conversationId: input.conversationId,
+      sessionId: turnId,
+      sliceId: 1,
       messages: reply.piMessages,
-      ttlMs: THREAD_STATE_TTL_MS,
+      durationMs: reply.diagnostics.durationMs,
+      usage: reply.diagnostics.usage,
+      destination,
+      source,
+      surface: "internal",
+      logContext: { modelId: reply.diagnostics.modelId },
     });
   }
   if (reply.diagnostics.outcome === "success") {

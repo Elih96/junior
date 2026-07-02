@@ -4,6 +4,7 @@ import {
   type AgentTurnSessionRecord,
   type AgentTurnSurface,
 } from "@/chat/state/turn-session";
+import type { ConversationPrivacy } from "@/chat/conversation-privacy";
 import type { Destination, Requester, Source } from "@sentry/junior-plugin-api";
 import { getActiveTraceId, logException } from "@/chat/logging";
 import type { PiMessage } from "@/chat/pi/messages";
@@ -200,16 +201,26 @@ export async function persistRunningSessionRecord(args: {
   }
 }
 
-/** Persist a completed turn session record. */
+/**
+ * Commit the delivered final reply as the terminal completed session record.
+ *
+ * Generation completing is not delivery: call this only after the destination
+ * accepted the visible final reply, so an undelivered assistant reply never
+ * becomes durable conversation history or a terminal completed state. Failures
+ * are logged and swallowed because the reply is already user-visible.
+ */
 export async function persistCompletedSessionRecord(args: {
   channelName?: string;
   conversationId: string;
   currentDurationMs?: number;
   currentUsage?: AgentTurnUsage;
   destination?: Destination;
+  /** Source-confirmed destination visibility from the current event's signal. */
+  destinationVisibility?: ConversationPrivacy;
   source?: Source;
   sessionId: string;
-  sliceId: number;
+  /** Defaults to the latest stored slice when the deliverer does not know it. */
+  sliceId?: number;
   allMessages: PiMessage[];
   loadedSkillNames?: string[];
   logContext: SessionRecordLogContext;
@@ -217,11 +228,20 @@ export async function persistCompletedSessionRecord(args: {
   surface?: AgentTurnSurface;
   turnStartMessageIndex?: number;
 }): Promise<void> {
+  let sliceId = args.sliceId;
   try {
     const latestSessionRecord = await getAgentTurnSessionRecord(
       args.conversationId,
       args.sessionId,
     );
+    sliceId = sliceId ?? latestSessionRecord?.sliceId;
+    if (sliceId === undefined) {
+      // Never fabricate a slice-1 completion: a completion without a known
+      // slice is a caller bug and must surface as the standard failure path.
+      throw new Error(
+        "Completed session record requires a slice id from the caller or the latest stored record",
+      );
+    }
     await upsertAgentTurnSessionRecord({
       ...((args.channelName ?? latestSessionRecord?.channelName)
         ? { channelName: args.channelName ?? latestSessionRecord?.channelName }
@@ -241,15 +261,21 @@ export async function persistCompletedSessionRecord(args: {
       ...((args.source ?? latestSessionRecord?.source)
         ? { source: args.source ?? latestSessionRecord?.source }
         : {}),
+      ...(args.destinationVisibility
+        ? { destinationVisibility: args.destinationVisibility }
+        : {}),
       sessionId: args.sessionId,
-      sliceId: args.sliceId,
+      sliceId,
       state: "completed",
       piMessages: args.allMessages,
       ...((args.surface ?? latestSessionRecord?.surface)
         ? { surface: args.surface ?? latestSessionRecord?.surface }
         : {}),
-      ...(args.loadedSkillNames
-        ? { loadedSkillNames: args.loadedSkillNames }
+      ...((args.loadedSkillNames ?? latestSessionRecord?.loadedSkillNames)
+        ? {
+            loadedSkillNames:
+              args.loadedSkillNames ?? latestSessionRecord?.loadedSkillNames,
+          }
         : {}),
       ...((args.requester ?? latestSessionRecord?.requester)
         ? { requester: args.requester ?? latestSessionRecord?.requester }
@@ -271,12 +297,47 @@ export async function persistCompletedSessionRecord(args: {
       recordError,
       "agent_turn_completed_session_record_failed",
       args,
-      {
-        "app.ai.resume_slice_id": args.sliceId,
-      },
+      sliceId !== undefined ? { "app.ai.resume_slice_id": sliceId } : {},
       "Failed to persist completed turn session record",
     );
   }
+}
+
+/** Complete a delivered single-slice run with an explicit session boundary. */
+export async function completeDeliveredTurn(args: {
+  channelName?: string;
+  conversationId: string;
+  destination: Destination;
+  destinationVisibility?: ConversationPrivacy;
+  durationMs?: number;
+  loadedSkillNames?: string[];
+  logContext: SessionRecordLogContext;
+  messages: PiMessage[];
+  requester?: Requester;
+  sessionId: string;
+  sliceId: number;
+  source: Source;
+  surface: AgentTurnSurface;
+  turnStartMessageIndex?: number;
+  usage?: AgentTurnUsage;
+}): Promise<void> {
+  await persistCompletedSessionRecord({
+    channelName: args.channelName,
+    conversationId: args.conversationId,
+    currentDurationMs: args.durationMs,
+    currentUsage: args.usage,
+    destination: args.destination,
+    destinationVisibility: args.destinationVisibility,
+    source: args.source,
+    sessionId: args.sessionId,
+    sliceId: args.sliceId,
+    allMessages: args.messages,
+    loadedSkillNames: args.loadedSkillNames,
+    logContext: args.logContext,
+    requester: args.requester,
+    surface: args.surface,
+    turnStartMessageIndex: args.turnStartMessageIndex,
+  });
 }
 
 /**

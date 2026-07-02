@@ -41,6 +41,8 @@ import {
 } from "@/chat/slack/reply";
 import { buildSlackReplyFooter } from "@/chat/slack/footer";
 import { finalizeFailedTurnReply } from "@/chat/services/turn-failure-response";
+import { completeDeliveredTurn } from "@/chat/services/turn-session-record";
+import { persistWithRetry } from "@/chat/services/persist-retry";
 import { AuthorizationFlowDisabledError } from "@/chat/services/auth-pause";
 import { PluginCredentialFailureError } from "@/chat/services/plugin-auth-orchestration";
 import { scheduleSessionCompletedPluginTasks } from "@/chat/plugins/task-runner";
@@ -203,6 +205,16 @@ export async function runAgentDispatchSlice(
   let dispatch = claimedDispatch;
 
   const conversationId = getDispatchConversationId(dispatch);
+  const turnId = getDispatchTurnId(dispatch.id);
+  const logContext = {
+    conversationId,
+    slackThreadId: conversationId,
+    slackChannelId: dispatch.destination.channelId,
+    runId: dispatch.id,
+    actorType: dispatch.actor.type,
+    actorId: dispatch.actor.id,
+    assistantUserName: botConfig.userName,
+  };
   const destinationLockId = getDispatchDestinationLockId(dispatch.destination);
   const stateAdapter = getStateAdapter();
   await stateAdapter.connect();
@@ -307,7 +319,7 @@ export async function runAgentDispatchSlice(
       correlation: {
         conversationId,
         threadId: conversationId,
-        turnId: getDispatchTurnId(dispatch.id),
+        turnId,
         runId: dispatch.id,
         channelId: dispatch.destination.channelId,
         teamId: dispatch.destination.teamId,
@@ -352,13 +364,7 @@ export async function runAgentDispatchSlice(
         reply,
         logException,
         context: {
-          conversationId,
-          slackThreadId: conversationId,
-          slackChannelId: dispatch.destination.channelId,
-          runId: dispatch.id,
-          actorType: dispatch.actor.type,
-          actorId: dispatch.actor.id,
-          assistantUserName: botConfig.userName,
+          ...logContext,
           modelId: reply.diagnostics.modelId,
         },
       });
@@ -374,6 +380,12 @@ export async function runAgentDispatchSlice(
       fileUploadFailureMode: "strict",
     });
 
+    // Slack accepted the reply: everything after this point serves duplicate
+    // suppression and bookkeeping, and must not turn into a failed dispatch
+    // that a retry would re-post. Persist the delivered marker
+    // (`meta.slackTs`, checked by the redelivery guard above) immediately and
+    // durably before the dispatch is marked terminal so the crash window
+    // between post and marker stays as small as possible.
     markConversationMessage(conversation, userMessageId, {
       replied: true,
       skippedReason: undefined,
@@ -396,14 +408,48 @@ export async function runAgentDispatchSlice(
     const nextArtifacts = reply.artifactStatePatch
       ? mergeArtifactsState(artifacts, reply.artifactStatePatch)
       : artifacts;
-    await persistRuntimePatch({
-      threadId: conversationId,
-      conversation,
-      artifacts: nextArtifacts,
-      sandboxId: reply.sandboxId ?? sandboxId,
-      sandboxDependencyProfileHash:
-        reply.sandboxDependencyProfileHash ?? sandboxDependencyProfileHash,
-    });
+    try {
+      await persistWithRetry(() =>
+        persistRuntimePatch({
+          threadId: conversationId,
+          conversation,
+          artifacts: nextArtifacts,
+          sandboxId: reply.sandboxId ?? sandboxId,
+          sandboxDependencyProfileHash:
+            reply.sandboxDependencyProfileHash ?? sandboxDependencyProfileHash,
+        }),
+      );
+    } catch (persistError) {
+      logException(
+        persistError,
+        "agent_dispatch_post_delivery_persist_failed",
+        logContext,
+        {},
+        "Failed to persist delivered dispatch state after Slack accepted the reply",
+      );
+    }
+    if (reply.piMessages?.length) {
+      // Destination acceptance is the completion boundary for the session
+      // record too; this call swallows its own persistence failures.
+      await completeDeliveredTurn({
+        conversationId,
+        sessionId: turnId,
+        sliceId: 1,
+        messages: reply.piMessages,
+        durationMs: reply.diagnostics.durationMs,
+        usage: reply.diagnostics.usage,
+        destination: dispatch.destination,
+        source: dispatch.source,
+        surface: "api",
+        logContext: {
+          threadId: conversationId,
+          channelId: dispatch.destination.channelId,
+          runId: dispatch.id,
+          assistantUserName: botConfig.userName,
+          modelId: reply.diagnostics.modelId,
+        },
+      });
+    }
     dispatch = await markDispatch({
       dispatch,
       status: failure ? "failed" : "completed",
@@ -414,21 +460,13 @@ export async function runAgentDispatchSlice(
       try {
         await scheduleCompletedTasks({
           conversationId,
-          sessionId: getDispatchTurnId(dispatch.id),
+          sessionId: turnId,
         });
       } catch (error) {
         logException(
           error,
           "plugin_session_completed_task_schedule_failed",
-          {
-            conversationId,
-            slackThreadId: conversationId,
-            slackChannelId: dispatch.destination.channelId,
-            runId: dispatch.id,
-            actorType: dispatch.actor.type,
-            actorId: dispatch.actor.id,
-            assistantUserName: botConfig.userName,
-          },
+          logContext,
           {},
           "Plugin session.completed task scheduling failed",
         );
@@ -482,13 +520,7 @@ export async function runAgentDispatchSlice(
       error,
       "agent_dispatch_run_failed",
       {
-        conversationId,
-        slackThreadId: conversationId,
-        slackChannelId: dispatch.destination.channelId,
-        runId: dispatch.id,
-        actorType: dispatch.actor.type,
-        actorId: dispatch.actor.id,
-        assistantUserName: botConfig.userName,
+        ...logContext,
         modelId: botConfig.modelId,
       },
       {},

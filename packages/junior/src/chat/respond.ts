@@ -137,7 +137,6 @@ import {
 } from "@/chat/usage";
 import {
   loadTurnSessionRecord,
-  persistCompletedSessionRecord,
   persistAuthPauseSessionRecord,
   persistRunningSessionRecord,
   persistTimeoutSessionRecord,
@@ -263,7 +262,7 @@ export interface ReplyRequestContext {
   };
   onStatus?: (status: AssistantStatusSpec) => void | Promise<void>;
   drainSteeringMessages?: (
-    inject: (messages: ReplySteeringMessage[]) => Promise<void>,
+    accept: (messages: ReplySteeringMessage[]) => Promise<void>,
   ) => Promise<ReplySteeringMessage[]>;
   /** Return true when the durable worker should pause at the next Pi boundary. */
   shouldYield?: () => boolean;
@@ -549,7 +548,14 @@ function buildUserTurnInput(args: {
   return { routerBlocks, userContentParts };
 }
 
-function buildSteeringPiMessage(message: ReplySteeringMessage): PiMessage {
+/**
+ * Convert a mid-run user message into the Pi user message shape used for
+ * steering injection and parked-conversation session-log appends, so both
+ * paths store identical durable history.
+ */
+export function buildSteeringPiMessage(
+  message: ReplySteeringMessage,
+): PiMessage {
   const { userContentParts } = buildUserTurnInput({
     userTurnText: buildUserTurnText(message.text),
     userAttachments: message.userAttachments,
@@ -643,6 +649,9 @@ export async function generateAssistantReply(
       context.correlation?.conversationId ??
       context.correlation?.threadId ??
       context.correlation?.runId,
+    // Source-confirmed visibility from the live event's channel_type; without
+    // it the turn fails closed to private telemetry capture.
+    visibility: context.slackConversation?.visibility,
   });
   return runWithConversationPrivacy(conversationPrivacy ?? "private", () =>
     generateAssistantReplyInPrivacyContext(
@@ -853,14 +862,28 @@ async function generateAssistantReplyInPrivacyContext(
       ) {
         return;
       }
-      await recordToolExecutionStarted({
-        conversationId: sessionConversationId,
-        sessionId,
-        toolCallId: event.toolCallId,
-        toolName: event.toolName,
-        args: event.args,
-        ttlMs: THREAD_STATE_TTL_MS,
-      });
+      try {
+        await recordToolExecutionStarted({
+          conversationId: sessionConversationId,
+          sessionId,
+          toolCallId: event.toolCallId,
+          toolName: event.toolName,
+          args: event.args,
+          ttlMs: THREAD_STATE_TTL_MS,
+        });
+      } catch (error) {
+        // Host-only activity events are best-effort reporting writes; a
+        // failed append must not abort the in-flight model turn.
+        logException(
+          error,
+          "agent_turn_session_log_append_failed",
+          spanContext,
+          {
+            "gen_ai.tool.name": event.toolName,
+          },
+          "Failed to record host-only tool execution start",
+        );
+      }
     };
     const persistedConfigurationValues = context.channelConfiguration
       ? await context.channelConfiguration.resolveValues()
@@ -1317,15 +1340,16 @@ async function generateAssistantReplyInPrivacyContext(
       resumedFromSessionRecord &&
       existingSessionRecord?.turnStartMessageIndex !== undefined;
     const shouldPromptAgent = !resumedFromSessionRecord || !hasPromptCheckpoint;
-    const promptHistoryMessages =
-      shouldPromptAgent && resumedFromSessionRecord
-        ? withoutTrailingUncheckpointedUserPrompt(
-            priorPiMessages,
-            userContentParts,
-          )
-        : shouldPromptAgent
-          ? (priorPiMessages ?? [])
-          : existingSessionRecord!.piMessages;
+    // Every re-prompt shape must trim a trailing checkpointed copy of the same
+    // user prompt, including redelivery of the same inbound message after a
+    // lost input commit against a still-`running` record; otherwise the prompt
+    // appears twice in Pi history.
+    const promptHistoryMessages = shouldPromptAgent
+      ? withoutTrailingUncheckpointedUserPrompt(
+          priorPiMessages,
+          userContentParts,
+        )
+      : existingSessionRecord!.piMessages;
     const needsBootstrapContextForPrompt =
       shouldPromptAgent && !hasRuntimeTurnContext(promptHistoryMessages);
     const systemPromptContributions =
@@ -1528,12 +1552,12 @@ async function generateAssistantReplyInPrivacyContext(
         });
         if (steeredMessageCount > 0) {
           logInfo(
-            "agent_turn_steering_messages_injected",
+            "agent_turn_steering_messages_accepted",
             spanContext,
             {
               "app.ai.steering_message_count": steeredMessageCount,
             },
-            "Agent turn steering messages injected",
+            "Agent turn steering messages accepted",
           );
         }
       } catch (error) {
@@ -1636,11 +1660,11 @@ async function generateAssistantReplyInPrivacyContext(
     try {
       if (resumedFromSessionRecord) {
         agent.state.messages = shouldPromptAgent
-          ? (promptHistoryMessages ?? [])
+          ? promptHistoryMessages
           : existingSessionRecord!.piMessages;
         turnStartMessageIndex = existingSessionRecord!.turnStartMessageIndex;
-      } else if (context.piMessages && context.piMessages.length > 0) {
-        agent.state.messages = [...context.piMessages];
+      } else if (promptHistoryMessages.length > 0) {
+        agent.state.messages = [...promptHistoryMessages];
       }
       beforeMessageCount = agent.state.messages.length;
       if (shouldPromptAgent) {
@@ -1842,24 +1866,12 @@ async function generateAssistantReplyInPrivacyContext(
       sessionId
     ) {
       await recordActiveMcpProviders();
-      await persistCompletedSessionRecord({
-        channelName: context.correlation?.channelName,
-        conversationId: sessionConversationId,
-        currentDurationMs: Date.now() - replyStartedAtMs,
-        currentUsage: turnUsage,
-        destination: context.destination,
-        source: runSource,
-        sessionId,
-        sliceId: currentSliceId,
-        allMessages: agent.state.messages,
-        loadedSkillNames: loadedSkillNamesForResume,
-        logContext: sessionRecordLogContext,
-        requester,
-        ...(surface ? { surface } : {}),
-        ...(turnStartMessageIndex !== undefined
-          ? { turnStartMessageIndex }
-          : {}),
-      });
+      // Generation completing is not delivery: the session record stays at its
+      // latest running safe boundary here. The destination boundary commits
+      // the final messages and terminal completed state only after the visible
+      // reply is accepted, so an undelivered assistant reply never surfaces as
+      // delivered conversation history and a crash before delivery stays
+      // recoverable through stranded-running continuation.
     }
 
     // ── Build turn result ────────────────────────────────────────────
@@ -2042,9 +2054,11 @@ async function generateAssistantReplyInPrivacyContext(
       "generateAssistantReply failed",
     );
 
+    // Raw exception text is diagnostics-only; the failure-response service
+    // owns the sanitized user-visible fallback for empty provider errors.
     const message = error instanceof Error ? error.message : String(error);
     return {
-      text: `Error: ${message}`,
+      text: "",
       ...getSandboxMetadata(),
       diagnostics: {
         outcome: "provider_error",

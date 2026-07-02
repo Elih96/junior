@@ -6,6 +6,7 @@
  * queued messages, compaction, status updates, and Slack posting meet; agent
  * internals stay behind the reply generator.
  */
+import { THREAD_STATE_TTL_MS } from "chat";
 import type { Message, SentMessage, Thread } from "chat";
 import type { SlackAdapter } from "@chat-adapter/slack";
 import { createSlackSource, type Destination } from "@sentry/junior-plugin-api";
@@ -29,6 +30,7 @@ import {
 import { buildSlackOutputMessage } from "@/chat/slack/output";
 import { getSlackErrorObservabilityAttributes } from "@/chat/slack/errors";
 import {
+  buildSteeringPiMessage,
   generateAssistantReply as generateAssistantReplyImpl,
   type ReplySteeringMessage,
 } from "@/chat/respond";
@@ -77,6 +79,7 @@ import {
 import { buildSlackReplyFooter } from "@/chat/slack/footer";
 import { maybeUpdateAssistantTitle } from "@/chat/slack/assistant-thread/title";
 import {
+  conversationVisibilityFromSlackChannelType,
   resolveSlackChannelTypeFromMessage,
   resolveSlackConversationContext,
 } from "@/chat/slack/conversation-context";
@@ -94,6 +97,7 @@ import {
   isAuthResumeRetryableTurnError,
   isCooperativeTurnYieldError,
   isRetryableTurnError,
+  TurnInputDeferredError,
 } from "@/chat/runtime/turn";
 import { buildDeterministicTurnId } from "@/chat/runtime/turn";
 import { markTurnClosed, markTurnFailed } from "@/chat/runtime/turn";
@@ -108,20 +112,36 @@ import { buildAuthPauseResponse } from "@/chat/services/auth-pause-response";
 import { maybeApplyProviderDefaultConfigRequest } from "@/chat/services/provider-default-config";
 import type { PiMessage } from "@/chat/pi/messages";
 import {
+  abandonAgentTurnSessionRecord,
   failAgentTurnSessionRecord,
   getAgentTurnSessionRecord,
   recordAgentTurnSessionSummary,
 } from "@/chat/state/turn-session";
+import { completeDeliveredTurn } from "@/chat/services/turn-session-record";
 import {
   initConversationContext,
   setConversationTitle,
 } from "@/chat/state/conversation-details";
-import { loadProjection } from "@/chat/state/session-log";
+import { commitMessages, loadProjection } from "@/chat/state/session-log";
+import { getStateAdapter } from "@/chat/state/adapter";
+import { acquireActiveLock } from "@/chat/state/locks";
+import { persistWithRetry } from "@/chat/services/persist-retry";
 import {
   stripRuntimeTurnContext,
   trimTrailingAssistantMessages,
 } from "@/chat/respond-helpers";
 import { requireSlackDestination } from "@/chat/destination";
+
+/**
+ * Persist post-delivery thread state with a short retry so a transient state
+ * write does not lose the delivered outcome of an already-accepted reply.
+ */
+async function persistThreadStateWithRetry(
+  thread: Thread,
+  patch: Parameters<typeof persistThreadState>[1],
+): Promise<void> {
+  await persistWithRetry(() => persistThreadState(thread, patch));
+}
 
 function collectCanvasUrls(artifacts: Partial<ThreadArtifactsState>) {
   return new Set(
@@ -134,6 +154,24 @@ function collectCanvasUrls(artifacts: Partial<ThreadArtifactsState>) {
 
 function turnRequester(requester: SlackRequester): StoredSlackRequester {
   return toStoredSlackRequester(requester);
+}
+
+/**
+ * Identity key for parked-input dedupe: the inbound timestamp plus the user
+ * turn text (always the first content part). Attachment resolution may differ
+ * across queue redeliveries, so resolved attachment parts must not decide
+ * whether the same inbound message was already appended.
+ */
+function parkedInputKey(message: PiMessage): string | undefined {
+  if (message.role !== "user") {
+    return undefined;
+  }
+  const first = Array.isArray(message.content) ? message.content[0] : undefined;
+  const text =
+    first && typeof first === "object" && "text" in first
+      ? String((first as { text?: unknown }).text ?? "")
+      : "";
+  return `${message.timestamp}:${text}`;
 }
 
 function isResourceEventMessage(message: Message): boolean {
@@ -290,14 +328,14 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
       beforeFirstResponsePost?: () => Promise<void>;
       destination: Destination;
       explicitMention?: boolean;
-      onInputCommitted?: () => Promise<void>;
+      ack?: () => Promise<void>;
       onToolInvocation?: (invocation: TurnToolInvocation) => void;
       onTurnCompleted?: () => Promise<void>;
       onTurnStatePersisted?: () => Promise<void>;
       preparedState?: PreparedTurnState;
       queuedMessages?: QueuedTurnMessage[];
       drainSteeringMessages?: (
-        inject: (messages: QueuedTurnMessage[]) => Promise<void>,
+        accept: (messages: QueuedTurnMessage[]) => Promise<void>,
         context?: { conversationContext?: string },
       ) => Promise<QueuedTurnMessage[]>;
       shouldYield?: () => boolean;
@@ -318,6 +356,10 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
       channelName,
       channelType: slackChannelType,
     });
+    // Source-confirmed visibility for destination persistence; undefined when
+    // the event carries no channel_type so existing visibility is not changed.
+    const destinationVisibility =
+      conversationVisibilityFromSlackChannelType(slackChannelType);
     const threadTs = getThreadTs(threadId);
     const assistantThreadContext = getAssistantThreadContext(message);
     const messageTs = getMessageTs(message);
@@ -331,6 +373,7 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
       messageTs,
       teamId,
       threadTs,
+      type: destinationVisibility === "public" ? "pub" : "priv",
     });
     const runId = getRunId(thread, message);
     const conversationId = threadId ?? runId;
@@ -474,12 +517,118 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
           }
         };
         let activeTurnId = preparedState.conversation.processing.activeTurnId;
+        const resolveSteeringMessages = async (
+          queuedMessages: QueuedTurnMessage[],
+        ): Promise<ReplySteeringMessage[]> => {
+          return await Promise.all(
+            queuedMessages.map(async (queued) => {
+              const attachments = queued.message.attachments;
+              return {
+                text: queued.userText,
+                timestampMs: queued.message.metadata.dateSent.getTime(),
+                omittedImageAttachmentCount:
+                  !isVisionEnabled() && hasPotentialImageAttachment(attachments)
+                    ? countPotentialImageAttachments(attachments)
+                    : 0,
+                userAttachments: await deps.resolveUserAttachments(
+                  attachments,
+                  {
+                    threadId,
+                    requesterId: isResourceEventMessage(queued.message)
+                      ? undefined
+                      : queued.message.author.userId,
+                    channelId,
+                    runId,
+                    conversation: preparedState.conversation,
+                    messageTs: getSlackMessageTs(queued.message),
+                  },
+                ),
+              };
+            }),
+          );
+        };
+        /**
+         * Durably append this turn's user input to the session log at the
+         * parked safe boundary so the resumed `continue()` sees it. The
+         * awaiting record pins the log session and materializes the projection
+         * tail, so the append needs no record mutation. Must complete before
+         * `ack` consumes the mailbox record.
+         *
+         * The read-compute-append races a concurrently-resumed slice, which
+         * runs under the thread resume lock; take the same lock so the two
+         * writers never interleave. Returns false when the lock is busy (a
+         * live resume owns the session log): the caller must leave the
+         * mailbox message pending for the next drain instead of consuming it.
+         */
+        const appendParkedTurnInput = async (
+          parkedSessionId: string,
+        ): Promise<boolean> => {
+          if (!conversationId) {
+            return true;
+          }
+          const parkedMessages = [
+            ...(options.queuedMessages ?? []),
+            {
+              explicitMention: Boolean(
+                options.explicitMention || message.isMention,
+              ),
+              message,
+              rawText: currentText.rawText,
+              userText: currentText.userText,
+            },
+          ].filter(
+            // Redelivery of the parked turn's own message must not duplicate
+            // the prompt that already started the session.
+            (queued) =>
+              buildDeterministicTurnId(queued.message.id) !== parkedSessionId,
+          );
+          if (parkedMessages.length === 0) {
+            return true;
+          }
+          const stateAdapter = getStateAdapter();
+          await stateAdapter.connect();
+          const lock = await acquireActiveLock(stateAdapter, conversationId);
+          if (!lock) {
+            return false;
+          }
+          try {
+            const piMessages = (
+              await resolveSteeringMessages(parkedMessages)
+            ).map(buildSteeringPiMessage);
+            const projection = await loadProjection({ conversationId });
+            // Dedupe per message: a partial-overlap redelivery (some messages
+            // already appended before a schedule failure) must append only
+            // the missing ones.
+            const appendedKeys = new Set(
+              projection
+                .map(parkedInputKey)
+                .filter((key): key is string => key !== undefined),
+            );
+            const missing = piMessages.filter((piMessage) => {
+              const key = parkedInputKey(piMessage);
+              return key === undefined || !appendedKeys.has(key);
+            });
+            if (missing.length === 0) {
+              // A prior delivery already appended this input durably.
+              return true;
+            }
+            await commitMessages({
+              conversationId,
+              messages: [...projection, ...missing],
+              requester: storedRequester,
+              ttlMs: THREAD_STATE_TTL_MS,
+            });
+            return true;
+          } finally {
+            await stateAdapter.releaseLock(lock);
+          }
+        };
         if (preparedState.userMessageAlreadyReplied) {
           await persistThreadState(thread, {
             conversation: preparedState.conversation,
           });
           await options.onTurnStatePersisted?.();
-          await options.onInputCommitted?.();
+          await options.ack?.();
           await options.onTurnCompleted?.();
           return;
         }
@@ -490,6 +639,15 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
               sessionId: activeTurnId,
             });
           if (resumeRequest) {
+            // Durable session-log append first: rescheduling a continuation
+            // does not consume the message, and `ack` may only
+            // fire after the input is model-visible.
+            if (!(await appendParkedTurnInput(resumeRequest.sessionId))) {
+              // A live resume holds the thread lock; leave the mailbox
+              // message pending so the next drain re-delivers it after the
+              // resume completes.
+              throw new TurnInputDeferredError();
+            }
             try {
               await deps.services.scheduleAgentContinue(resumeRequest);
             } catch (error) {
@@ -512,7 +670,7 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
               conversation: preparedState.conversation,
             });
             await options.onTurnStatePersisted?.();
-            await options.onInputCommitted?.();
+            await options.ack?.();
             return;
           }
 
@@ -522,29 +680,43 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
           );
           if (sessionRecord?.state === "awaiting_resume") {
             if (sessionRecord.resumeReason === "auth") {
-              await persistThreadState(thread, {
-                conversation: preparedState.conversation,
+              // A user follow-up supersedes the auth-parked run: answer it
+              // now as a fresh turn instead of consuming it into a pause that
+              // may never resume. The parked prompt stays model-visible via
+              // the session-log projection, pendingAuth state keeps the
+              // authorization link reusable, and the abandoned record turns a
+              // late OAuth callback into a stale no-op instead of a competing
+              // run.
+              await abandonAgentTurnSessionRecord({
+                conversationId,
+                sessionId: activeTurnId,
+                errorMessage:
+                  "Auth-parked session superseded by a new user message",
               });
-              await options.onTurnStatePersisted?.();
-              await options.onInputCommitted?.();
-              return;
+              markTurnClosed({
+                conversation: preparedState.conversation,
+                nowMs: Date.now(),
+                sessionId: activeTurnId,
+                updateConversationStats,
+              });
+              activeTurnId = undefined;
+            } else {
+              await failAgentTurnSessionRecord({
+                conversationId,
+                expectedVersion: sessionRecord.version,
+                sessionId: activeTurnId,
+                errorMessage:
+                  "Awaiting agent continuation metadata could not be materialized",
+              });
+              markTurnFailed({
+                conversation: preparedState.conversation,
+                nowMs: Date.now(),
+                sessionId: activeTurnId,
+                markConversationMessage,
+                updateConversationStats,
+              });
+              activeTurnId = undefined;
             }
-
-            await failAgentTurnSessionRecord({
-              conversationId,
-              expectedVersion: sessionRecord.version,
-              sessionId: activeTurnId,
-              errorMessage:
-                "Awaiting agent continuation metadata could not be materialized",
-            });
-            markTurnFailed({
-              conversation: preparedState.conversation,
-              nowMs: Date.now(),
-              sessionId: activeTurnId,
-              markConversationMessage,
-              updateConversationStats,
-            });
-            activeTurnId = undefined;
           }
         }
         const configReply = await maybeApplyProviderDefaultConfigRequest({
@@ -580,7 +752,7 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
             conversation: preparedState.conversation,
           });
           await options.onTurnStatePersisted?.();
-          await options.onInputCommitted?.();
+          await options.ack?.();
           return;
         }
         startActiveTurn({
@@ -603,6 +775,7 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
             surface: "slack",
             requester,
             destination,
+            destinationVisibility,
             source,
             traceId: getActiveTraceId(),
           }).catch((error) => {
@@ -730,8 +903,16 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
         };
         let persistedAtLeastOnce = false;
         let shouldPersistFailureState = true;
+        // Mirrors slack-resume's finalReplyDelivered guard: once the
+        // destination accepted the final posts, later errors in the same turn
+        // must not mark it failed or trigger the fallback failure reply.
+        let finalReplyDelivered = false;
         let latestArtifacts = preparedState.artifacts;
         let assistantTitleArtifacts: Partial<ThreadArtifactsState> = {};
+        const hasVisibleSlackDelivery = (post: {
+          files?: unknown[];
+          text: string;
+        }) => post.text.trim().length > 0 || Boolean(post.files?.length);
 
         try {
           const loadedPiMessages = await loadPiMessagesForTurn({
@@ -839,52 +1020,21 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
             });
           const toolChannelId =
             preparedState.artifacts.assistantContextChannelId ?? channelId;
-          const resolveSteeringMessages = async (
-            queuedMessages: QueuedTurnMessage[],
-          ): Promise<ReplySteeringMessage[]> => {
-            return await Promise.all(
-              queuedMessages.map(async (queued) => {
-                const attachments = queued.message.attachments;
-                return {
-                  text: queued.userText,
-                  timestampMs: queued.message.metadata.dateSent.getTime(),
-                  omittedImageAttachmentCount:
-                    !isVisionEnabled() &&
-                    hasPotentialImageAttachment(attachments)
-                      ? countPotentialImageAttachments(attachments)
-                      : 0,
-                  userAttachments: await deps.resolveUserAttachments(
-                    attachments,
-                    {
-                      threadId,
-                      requesterId: isResourceEventMessage(queued.message)
-                        ? undefined
-                        : queued.message.author.userId,
-                      channelId,
-                      runId,
-                      conversation: preparedState.conversation,
-                      messageTs: getSlackMessageTs(queued.message),
-                    },
-                  ),
-                };
-              }),
-            );
-          };
           const drainSteeringMessages = options.drainSteeringMessages
             ? async (
-                inject: (messages: ReplySteeringMessage[]) => Promise<void>,
+                accept: (messages: ReplySteeringMessage[]) => Promise<void>,
               ): Promise<ReplySteeringMessage[]> => {
-                let injectedMessages: ReplySteeringMessage[] | undefined;
+                let acceptedMessages: ReplySteeringMessage[] | undefined;
                 const drained = await options.drainSteeringMessages!(
                   async (queuedMessages) => {
-                    injectedMessages =
+                    acceptedMessages =
                       await resolveSteeringMessages(queuedMessages);
-                    await inject(injectedMessages);
+                    await accept(acceptedMessages);
                   },
                   { conversationContext: preparedState.conversationContext },
                 );
                 return (
-                  injectedMessages ?? (await resolveSteeringMessages(drained))
+                  acceptedMessages ?? (await resolveSteeringMessages(drained))
                 );
               }
             : undefined;
@@ -955,7 +1105,7 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
               },
               onStatus: (nextStatus) => status.update(nextStatus),
               onToolInvocation: options.onToolInvocation,
-              onInputCommitted: options.onInputCommitted,
+              onInputCommitted: options.ack,
               drainSteeringMessages,
               shouldYield: options.shouldYield,
             },
@@ -998,6 +1148,14 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
           // completed after the visible reply has been accepted by Slack.
           if (plannedPosts.length > 0) {
             let sent: SentMessage | undefined;
+            const hasVisibleDelivery = plannedPosts.some(
+              hasVisibleSlackDelivery,
+            );
+            if (!hasVisibleDelivery) {
+              throw new Error(
+                "Slack final reply plan did not contain visible delivery",
+              );
+            }
             if (shouldUseSlackFooter) {
               const slackChannelId = channelId;
               const slackThreadTs = threadTs;
@@ -1045,12 +1203,19 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
               }
             } else {
               for (const post of plannedPosts) {
+                if (!hasVisibleSlackDelivery(post)) {
+                  continue;
+                }
                 sent = await postThreadReply(
                   buildSlackOutputMessage(post.text, post.files),
                   post.stage,
                 );
               }
             }
+            // Slack accepted every final post: the turn is delivered even if
+            // the redundant-ack cleanup or completion persistence below fails.
+            finalReplyDelivered = true;
+            shouldPersistFailureState = false;
             const firstPlannedMessageHasFiles =
               (plannedPosts[0]?.files?.length ?? 0) > 0;
             // When a reaction already acknowledged the turn, delete the
@@ -1063,8 +1228,27 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
               !firstPlannedMessageHasFiles &&
               isRedundantReactionAckText(reply.text)
             ) {
-              await sent.delete();
+              try {
+                await sent.delete();
+              } catch (error) {
+                // Best effort: the turn is already delivered, and a thrown
+                // delete here would skip the completed-record commit below
+                // and leave the session record stuck running.
+                logException(
+                  error,
+                  "slack_redundant_ack_delete_failed",
+                  turnTraceContext,
+                  messageTs ? { "messaging.message.id": messageTs } : {},
+                  "Failed to delete redundant reaction-ack reply",
+                );
+              }
             }
+          } else {
+            // Side-effect-only turns (for example reactions or channel posts)
+            // have no thread reply to deliver; the successful tool result is
+            // the visible Slack acceptance boundary.
+            finalReplyDelivered = true;
+            shouldPersistFailureState = false;
           }
 
           const completedState = buildDeliveredTurnStatePatch({
@@ -1081,36 +1265,78 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
           if (completedState.artifacts) {
             latestArtifacts = completedState.artifacts;
           }
-          await persistThreadState(thread, {
-            ...completedState,
-          });
-          if (
-            completedState.artifacts &&
-            (assistantTitleArtifacts.assistantTitle !== undefined ||
-              assistantTitleArtifacts.assistantTitleSourceMessageId !==
-                undefined) &&
-            (completedState.artifacts.assistantTitle !==
-              assistantTitleArtifacts.assistantTitle ||
-              completedState.artifacts.assistantTitleSourceMessageId !==
-                assistantTitleArtifacts.assistantTitleSourceMessageId)
-          ) {
-            await persistThreadState(thread, { artifacts: latestArtifacts });
-          }
-          if (conversationId) {
-            await recordAgentTurnSessionSummary({
-              channelName,
-              conversationId,
-              cumulativeDurationMs: reply.diagnostics.durationMs,
-              cumulativeUsage: reply.diagnostics.usage,
-              sessionId: turnId,
-              sliceId: 1,
-              startedAtMs: message.metadata.dateSent.getTime(),
-              state: "completed",
-              requester,
-              destination,
-              source,
-              traceId: getActiveTraceId(),
+          try {
+            // Commit the terminal completed session record first: it is the
+            // delivered marker that keeps stranded-running recovery from
+            // regenerating an already-delivered reply if the thread-state
+            // write below fails.
+            if (conversationId && reply.piMessages?.length) {
+              await completeDeliveredTurn({
+                channelName,
+                conversationId,
+                durationMs: reply.diagnostics.durationMs,
+                usage: reply.diagnostics.usage,
+                destination,
+                destinationVisibility,
+                source,
+                sessionId: turnId,
+                sliceId: 1,
+                messages: reply.piMessages,
+                logContext: {
+                  threadId,
+                  requesterId: slackRequesterId,
+                  channelId,
+                  runId,
+                  assistantUserName: botConfig.userName,
+                  modelId: reply.diagnostics.modelId,
+                },
+                requester,
+                surface: "slack",
+              });
+            } else if (conversationId) {
+              await recordAgentTurnSessionSummary({
+                channelName,
+                conversationId,
+                cumulativeDurationMs: reply.diagnostics.durationMs,
+                cumulativeUsage: reply.diagnostics.usage,
+                sessionId: turnId,
+                sliceId: 1,
+                startedAtMs: message.metadata.dateSent.getTime(),
+                state: "completed",
+                requester,
+                destination,
+                destinationVisibility,
+                source,
+                traceId: getActiveTraceId(),
+              });
+            }
+            await persistThreadStateWithRetry(thread, {
+              ...completedState,
             });
+            if (
+              completedState.artifacts &&
+              (assistantTitleArtifacts.assistantTitle !== undefined ||
+                assistantTitleArtifacts.assistantTitleSourceMessageId !==
+                  undefined) &&
+              (completedState.artifacts.assistantTitle !==
+                assistantTitleArtifacts.assistantTitle ||
+                completedState.artifacts.assistantTitleSourceMessageId !==
+                  assistantTitleArtifacts.assistantTitleSourceMessageId)
+            ) {
+              await persistThreadStateWithRetry(thread, {
+                artifacts: latestArtifacts,
+              });
+            }
+          } catch (commitError) {
+            // The user already saw the reply; keep the turn successful and
+            // record the persistence failure for operators.
+            logException(
+              commitError,
+              "slack_reply_post_delivery_commit_failed",
+              turnTraceContext,
+              messageTs ? { "messaging.message.id": messageTs } : {},
+              "Post-delivery turn state persistence failed after Slack accepted the reply",
+            );
           }
           preparedState.conversation = completedState.conversation;
           persistedAtLeastOnce = true;
@@ -1144,6 +1370,20 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
             }
           }
         } catch (error) {
+          if (finalReplyDelivered) {
+            // Delivered-turn guard: errors after Slack accepted the final
+            // reply (redundant-ack cleanup, completion callbacks) must not
+            // fail the turn or trigger the visible failure fallback.
+            shouldPersistFailureState = false;
+            logException(
+              error,
+              "slack_reply_post_delivery_commit_failed",
+              turnTraceContext,
+              messageTs ? { "messaging.message.id": messageTs } : {},
+              "Post-delivery turn work failed after Slack accepted the reply",
+            );
+            return;
+          }
           if (isCooperativeTurnYieldError(error)) {
             shouldPersistFailureState = false;
             throw error;
@@ -1326,6 +1566,7 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
                   state: "failed",
                   requester,
                   destination,
+                  destinationVisibility,
                   source,
                   traceId: getActiveTraceId(),
                 });

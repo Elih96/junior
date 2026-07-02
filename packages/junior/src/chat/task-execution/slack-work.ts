@@ -8,11 +8,12 @@ import {
   type StateAdapter,
 } from "chat";
 import type {
-  SlackTurnRuntime,
+  SlackTurnOptions,
   SteeringCandidateMessage,
 } from "@/chat/runtime/slack-runtime";
 import {
   isCooperativeTurnYieldError,
+  isTurnInputDeferredError,
   isTurnInputCommitLostError,
   TurnInputCommitLostError,
 } from "@/chat/runtime/turn";
@@ -21,10 +22,6 @@ import { rehydrateAttachmentFetchers } from "@/chat/slack/attachment-fetchers";
 import { getStateAdapter } from "@/chat/state/adapter";
 import type { ConversationStore } from "@/chat/conversations/store";
 import type { AgentInput, InboundMessage } from "@/chat/task-execution/store";
-import {
-  getConversationWorkState,
-  markConversationMessagesInjected,
-} from "@/chat/task-execution/store";
 import type {
   ConversationWorkerContext,
   ConversationWorkerResult,
@@ -50,6 +47,24 @@ export interface SlackConversationMessageMetadata {
   platform: "slack";
   route: SlackConversationRoute;
   thread: SerializedThread;
+}
+
+type SlackInboxTurnOptions = SlackTurnOptions & {
+  ack: () => Promise<void>;
+  isFinalAttempt: boolean;
+};
+
+interface SlackInboxTurnRuntime {
+  handleNewMention(
+    thread: ThreadImpl,
+    message: Message,
+    hooks: SlackInboxTurnOptions,
+  ): Promise<void>;
+  handleSubscribedMessage(
+    thread: ThreadImpl,
+    message: Message,
+    hooks: SlackInboxTurnOptions,
+  ): Promise<void>;
 }
 
 interface SlackResourceEventInboundInput {
@@ -80,10 +95,7 @@ export interface CreateSlackConversationWorkerOptions {
   ) => Promise<SlackRequesterProfile | null | undefined>;
   resumeAwaitingContinuation: (conversationId: string) => Promise<boolean>;
   conversationStore?: ConversationStore;
-  runtime: Pick<
-    SlackTurnRuntime<unknown>,
-    "handleNewMention" | "handleSubscribedMessage"
-  >;
+  runtime: SlackInboxTurnRuntime;
   state?: StateAdapter;
 }
 
@@ -387,14 +399,22 @@ export function createSlackConversationWorker(
     const state = getConnectedState(options.state);
     await state.connect();
 
-    const records = getPendingRecords(
-      await getConversationWorkState({
-        conversationId: context.conversationId,
-        state,
-      }),
-    );
+    const records = getPendingRecords({
+      execution: { pendingMessages: [...context.attempt.messages] },
+    });
     if (records.length === 0) {
-      await options.resumeAwaitingContinuation(context.conversationId);
+      const destination = requireSlackDestination(
+        context.destination,
+        "Slack continuation recovery",
+      );
+      await runWithSlackInstallation({
+        adapter,
+        installation: { teamId: destination.teamId },
+        state,
+        task: async () => {
+          await options.resumeAwaitingContinuation(context.conversationId);
+        },
+      });
       return { status: "completed" };
     }
 
@@ -448,39 +468,28 @@ export function createSlackConversationWorker(
           skipped,
           totalSinceLastHandler: messages.length,
         };
-        const initialInboundMessageIds = records.map(
-          (record) => record.inboundMessageId,
-        );
-        let initialMessagesPersisted = false;
-        const markInitialMessagesInjected = async (): Promise<boolean> => {
-          if (initialMessagesPersisted) {
-            return true;
+        let initialMessagesAcked = false;
+        const ack = async (): Promise<void> => {
+          if (initialMessagesAcked) {
+            return;
           }
-          const marked = await markConversationMessagesInjected({
-            conversationId: context.conversationId,
-            inboundMessageIds: initialInboundMessageIds,
-            leaseToken: context.leaseToken,
-            conversationStore: options.conversationStore,
-            state,
-          });
-          initialMessagesPersisted = marked;
-          return marked;
-        };
-        const onInputCommitted = async (): Promise<void> => {
-          if (!(await markInitialMessagesInjected())) {
+          try {
+            await context.attempt.ack();
+            initialMessagesAcked = true;
+          } catch {
             throw new TurnInputCommitLostError(
-              `Conversation work lease lost before Slack input commit for ${context.conversationId}`,
+              `Conversation work lease lost before Slack inbox ack for ${context.conversationId}`,
             );
           }
         };
         // Restore stored mailbox entries as Slack steering candidates; the
         // runtime returns only the inbound ids it handled durably.
         const drainSteeringMessages = async (
-          inject: (
+          accept: (
             messages: SteeringCandidateMessage[],
           ) => Promise<readonly string[] | void>,
         ): Promise<void> => {
-          await context.drainMailbox(async (pendingRecords) => {
+          await context.attempt.drain(async (pendingRecords) => {
             const messages = pendingRecords.map((record) => {
               const metadata = record.input.metadata;
               if (!isSlackMetadata(metadata)) {
@@ -497,7 +506,7 @@ export function createSlackConversationWorker(
                 message,
               };
             });
-            return await inject(messages);
+            return await accept(messages);
           });
         };
 
@@ -507,7 +516,8 @@ export function createSlackConversationWorker(
               destination: context.destination,
               messageContext,
               drainSteeringMessages,
-              onInputCommitted,
+              ack,
+              isFinalAttempt: context.attempt.isFinalAttempt,
               shouldYield: context.shouldYield,
             });
             return;
@@ -517,10 +527,14 @@ export function createSlackConversationWorker(
             destination: context.destination,
             messageContext,
             drainSteeringMessages,
-            onInputCommitted,
+            ack,
+            isFinalAttempt: context.attempt.isFinalAttempt,
             shouldYield: context.shouldYield,
           });
         } catch (error) {
+          if (isTurnInputDeferredError(error)) {
+            return { status: "deferred" } satisfies ConversationWorkerResult;
+          }
           if (isCooperativeTurnYieldError(error)) {
             return { status: "yielded" } satisfies ConversationWorkerResult;
           }
@@ -532,6 +546,7 @@ export function createSlackConversationWorker(
       },
     });
     if (
+      turnResult?.status === "deferred" ||
       turnResult?.status === "yielded" ||
       turnResult?.status === "lost_lease"
     ) {

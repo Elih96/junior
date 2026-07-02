@@ -94,22 +94,17 @@ export function createSlackSource(input: {
   messageTs?: string;
   teamId: string;
   threadTs?: string;
+  /** Runtime-normalized source visibility. */
+  type: SourceType;
 }): SlackSource {
   return {
     platform: "slack",
-    type: slackSourceType(input.channelId),
+    type: input.type,
     teamId: input.teamId,
     channelId: input.channelId,
     ...(input.messageTs ? { messageTs: input.messageTs } : {}),
     ...(input.threadTs ? { threadTs: input.threadTs } : {}),
   };
-}
-
-/** Classify Slack's documented C/D/G channel id prefixes into source visibility. */
-function slackSourceType(channelId: string): SourceType {
-  if (channelId.startsWith("C")) return "pub";
-  if (channelId.startsWith("D") || channelId.startsWith("G")) return "priv";
-  throw new Error(`Unsupported Slack channel ID prefix: ${channelId}`);
 }
 
 /** Build a normalized local source from a local conversation id. */

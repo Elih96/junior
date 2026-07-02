@@ -5,7 +5,12 @@
  * drop stale callbacks before generation, while any started continuation must
  * durably record success, failure, auth pause, or another safe pause boundary.
  */
-import { logException, logWarn } from "@/chat/logging";
+import { botConfig } from "@/chat/config";
+import {
+  buildTurnFailureResponse,
+  logException,
+  logWarn,
+} from "@/chat/logging";
 import {
   ResumeTurnBusyError,
   resumeSlackTurn,
@@ -43,7 +48,18 @@ import {
   type AgentContinueRequest,
 } from "@/chat/services/agent-continue";
 import { parseSlackThreadId } from "@/chat/slack/context";
-import { createSlackResumeRequester } from "@/chat/requester";
+import { postSlackMessage } from "@/chat/slack/outbound";
+import { getStateAdapter } from "@/chat/state/adapter";
+import { acquireActiveLock } from "@/chat/state/locks";
+import { persistYieldSessionRecord } from "@/chat/services/turn-session-record";
+import { requireTurnFailureEventId } from "@/chat/services/turn-failure-response";
+import {
+  createSlackRequester,
+  createSlackResumeRequester,
+  type Requester,
+  type SlackRequester,
+} from "@/chat/requester";
+import { getConversationWorkState } from "@/chat/task-execution/store";
 import type { AssistantReply, generateAssistantReply } from "@/chat/respond";
 import { persistAuthPauseTurnState } from "@/chat/runtime/auth-pause-state";
 import {
@@ -175,6 +191,54 @@ async function failContinuationStartup(args: {
   }
 }
 
+/**
+ * Resolve the resume requester without ever throwing for missing identity.
+ *
+ * A throw escaping `beforeStart` NACKs the continue queue delivery and
+ * permanently wedges the conversation (issue #727), so identity gaps must
+ * resolve to `undefined` and let the caller fail the session visibly. When
+ * the session record lacks a usable requester, recovery consults the durable
+ * conversation work record — but only an identity that matches the resume
+ * actor (team + user) is ever rebuilt; we never fabricate one.
+ */
+async function resolveContinuationRequester(args: {
+  conversationId: string;
+  sessionRecordRequester: Requester | undefined;
+  teamId: string;
+  userId: string;
+}): Promise<SlackRequester | undefined> {
+  const stored = args.sessionRecordRequester;
+  if (
+    stored?.platform === "slack" &&
+    stored.teamId === args.teamId &&
+    stored.userId === args.userId
+  ) {
+    return createSlackResumeRequester({
+      requester: stored,
+      teamId: args.teamId,
+      userId: args.userId,
+    });
+  }
+
+  const work = await getConversationWorkState({
+    conversationId: args.conversationId,
+  });
+  const workRequester = work?.requester;
+  if (
+    workRequester &&
+    workRequester.teamId === args.teamId &&
+    workRequester.slackUserId === args.userId
+  ) {
+    return createSlackRequester(args.teamId, args.userId, {
+      email: workRequester.email,
+      fullName: workRequester.fullName,
+      userName: workRequester.slackUserName,
+    });
+  }
+
+  return undefined;
+}
+
 function isContinuationResume(summary: AgentTurnSessionSummary): boolean {
   return (
     summary.state === "awaiting_resume" &&
@@ -267,11 +331,20 @@ export async function continueSlackAgentRun(
           payload.destination,
           "Slack continuation",
         );
-        const requester = createSlackResumeRequester({
-          requester: activeSessionRecord.requester,
+        const requester = await resolveContinuationRequester({
+          conversationId: payload.conversationId,
+          sessionRecordRequester: activeSessionRecord.requester,
           teamId: destination.teamId,
           userId: userMessage.author.userId,
         });
+        if (!requester) {
+          await failStrandedSessionWithFallback({
+            conversationId: payload.conversationId,
+            errorMessage: "Stored Slack requester missing for continuation",
+            sessionRecord: activeSessionRecord,
+          });
+          return false;
+        }
         if (!activeSessionRecord.source) {
           await failAgentTurnSessionRecord({
             conversationId: payload.conversationId,
@@ -386,6 +459,137 @@ export async function continueSlackAgentRun(
   });
 }
 
+/** Terminally fail a stranded session and post the standard visible fallback. */
+async function failStrandedSessionWithFallback(args: {
+  conversationId: string;
+  errorMessage: string;
+  sessionRecord: AgentTurnSessionRecord;
+}): Promise<void> {
+  await failAgentTurnSessionRecord({
+    conversationId: args.conversationId,
+    expectedVersion: args.sessionRecord.version,
+    sessionId: args.sessionRecord.sessionId,
+    errorMessage: args.errorMessage,
+  });
+  const currentState = await getPersistedThreadState(args.conversationId);
+  const conversation = coerceThreadConversationState(currentState);
+  markTurnFailed({
+    conversation,
+    nowMs: Date.now(),
+    sessionId: args.sessionRecord.sessionId,
+    userMessageId: getTurnUserMessage(
+      conversation,
+      args.sessionRecord.sessionId,
+    )?.id,
+    markConversationMessage,
+    updateConversationStats,
+  });
+  await persistThreadStateById(args.conversationId, { conversation });
+
+  const thread = parseSlackThreadId(args.conversationId);
+  if (!thread) {
+    return;
+  }
+  const eventName = "agent_turn_stranded_session_failed";
+  const eventId = logException(
+    new Error(args.errorMessage),
+    eventName,
+    { conversationId: args.conversationId },
+    {
+      "app.ai.conversation_id": args.conversationId,
+      "app.ai.session_id": args.sessionRecord.sessionId,
+    },
+    "Stranded running agent session terminally failed",
+  );
+  await postSlackMessage({
+    channelId: thread.channelId,
+    threadTs: thread.threadTs,
+    text: buildTurnFailureResponse(
+      requireTurnFailureEventId(eventId, eventName),
+    ),
+  });
+}
+
+/**
+ * Recover a conversation whose newest session is still `running` with no live
+ * owner (hard worker death mid-slice). The session is re-parked at its latest
+ * durable safe boundary and continued; when no resumable boundary remains it
+ * is terminally failed with the standard visible fallback so the interrupted
+ * request never dies silently.
+ */
+async function recoverStrandedRunningSession(args: {
+  conversationId: string;
+  options: AgentContinueRunnerOptions;
+  summary: AgentTurnSessionSummary;
+}): Promise<boolean> {
+  // A live resume outside the mailbox lease (OAuth/timeout continuation)
+  // holds the thread resume lock for its whole run; only a dead slice leaves
+  // a running record unlocked.
+  const stateAdapter = getStateAdapter();
+  await stateAdapter.connect();
+  const probe = await acquireActiveLock(stateAdapter, args.conversationId);
+  if (!probe) {
+    return false;
+  }
+  await stateAdapter.releaseLock(probe);
+
+  const sessionRecord = await getAgentTurnSessionRecord(
+    args.conversationId,
+    args.summary.sessionId,
+  );
+  if (!sessionRecord || sessionRecord.state !== "running") {
+    return false;
+  }
+
+  const parked = await persistYieldSessionRecord({
+    channelName: sessionRecord.channelName,
+    conversationId: args.conversationId,
+    sessionId: sessionRecord.sessionId,
+    currentSliceId: sessionRecord.sliceId,
+    destination: sessionRecord.destination,
+    source: sessionRecord.source,
+    messages: sessionRecord.piMessages,
+    errorMessage: "Recovered running session after hard worker death",
+    logContext: { modelId: botConfig.modelId },
+    requester: sessionRecord.requester,
+    surface: sessionRecord.surface,
+  });
+  if (!parked) {
+    await failStrandedSessionWithFallback({
+      conversationId: args.conversationId,
+      errorMessage:
+        "Stranded running session had no resumable boundary after worker death",
+      sessionRecord,
+    });
+    return false;
+  }
+
+  const request = await getAwaitingAgentContinueRequest({
+    conversationId: args.conversationId,
+    sessionId: sessionRecord.sessionId,
+  });
+  if (!request) {
+    await failStrandedSessionWithFallback({
+      conversationId: args.conversationId,
+      errorMessage:
+        "Stranded running session could not materialize continuation metadata",
+      sessionRecord: parked,
+    });
+    return false;
+  }
+
+  if (await continueSlackAgentRunWithLockRetry(request, args.options)) {
+    return true;
+  }
+  await failUnresumableContinuation({
+    conversationId: args.conversationId,
+    expectedVersion: request.expectedVersion,
+    summary: args.summary,
+    errorMessage: "Awaiting agent continuation was stale before it could run",
+  });
+  return false;
+}
+
 /** Resume the first valid paused Slack session for an idle conversation. */
 export async function resumeAwaitingSlackContinuation(
   conversationId: string,
@@ -393,6 +597,18 @@ export async function resumeAwaitingSlackContinuation(
 ): Promise<boolean> {
   const summaries =
     await listAgentTurnSessionSummariesForConversation(conversationId);
+
+  // Recovery must cover every non-terminal session: a newest `running` record
+  // under the (already re-acquired) conversation lease means the previous
+  // worker died mid-slice without persisting a pause boundary.
+  const newest = summaries[0];
+  if (newest?.state === "running") {
+    return await recoverStrandedRunningSession({
+      conversationId,
+      options,
+      summary: newest,
+    });
+  }
 
   for (const summary of summaries) {
     if (!isContinuationResume(summary)) {

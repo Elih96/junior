@@ -31,6 +31,7 @@ const SLACK_DESTINATION = {
 const SLACK_SOURCE = createSlackSource({
   teamId: SLACK_DESTINATION.teamId,
   channelId: SLACK_DESTINATION.channelId,
+  type: "priv",
 });
 
 describe("generateAssistantReply error path", () => {
@@ -52,7 +53,10 @@ describe("generateAssistantReply error path", () => {
       },
     });
 
-    expect(reply.text).toContain("Error: discover failed");
+    // Raw exception text stays in diagnostics; it is never reply text.
+    expect(reply.text).toBe("");
+    expect(reply.diagnostics.errorMessage).toBe("discover failed");
+    expect(reply.diagnostics.assistantMessageCount).toBe(0);
     expect(reply.sandboxId).toBe("sb-123");
     expect(reply.sandboxDependencyProfileHash).toBe("hash-abc");
     expect(reply.diagnostics.outcome).toBe("provider_error");

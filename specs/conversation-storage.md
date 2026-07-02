@@ -134,6 +134,41 @@ Opaque JSON columns are allowed for source-specific payloads that are not used
 for authorization, lock ownership, credential routing, or external side-effect
 authority.
 
+### Destination Visibility
+
+`junior_destinations.visibility` is the persisted conversation-visibility
+authority consumed by redaction, transcript access, and dashboard reporting
+(`./data-redaction-policy.md`).
+
+- Visibility is captured from source-provided signals only. For Slack that is
+  the Events API `channel_type` or `conversations.info` `is_private`.
+  Identifier prefixes must not be used to mark a destination public.
+- Ingress refreshes visibility from the current event's signal when it differs
+  from the stored value, so a channel converted between public and private
+  converges on the next message.
+- Readers must treat any value other than `public` as private.
+- Legacy Slack rows whose visibility was derived from id prefixes are migrated
+  to private. Losing historical public classification is acceptable because it
+  only reduces transcript/report exposure; the next live source signal can
+  restore public visibility.
+
+### Retention And Erasure
+
+SQL conversation metadata is durable and includes personal data: identity
+display and contact fields, requester JSON, generated titles, and channel
+names.
+
+- Transcript bodies stay in state-backed storage and expire with the retention
+  window owned by `./agent-session-resumability.md`. One constant owns each
+  transcript key's TTL; writers must not apply divergent retention to the same
+  key.
+- Deferred: single-conversation erasure (deleting one conversation row
+  together with its now-unreferenced identity rows) is a requirement the
+  store does not implement yet; it must be added before erasure requests can
+  be honored.
+- Bulk retention policy for SQL metadata is deployment-owned and out of scope
+  here.
+
 Inbound mailbox rows and lease fields are not part of the SQL schema. Pending
 input payloads and active lease ownership are temporary execution data and
 remain in the state-backed task-execution store until they either become
@@ -275,6 +310,7 @@ normal runtime tests.
 
 - `./task-execution.md`
 - `./chat-architecture.md`
+- `./data-redaction-policy.md`
 - `./agent-session-resumability.md`
 - `./scheduler.md`
 - `./plugin-database.md`

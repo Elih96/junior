@@ -52,6 +52,9 @@ function fixedConversationStore(
         (conversation) => conversation.conversationId === args.conversationId,
       );
     },
+    async getDestinationVisibility() {
+      return undefined;
+    },
     async recordActivity() {},
     async recordExecution() {},
     async listByActivity(args = {}) {
@@ -133,6 +136,9 @@ describe("conversation reporting", () => {
           slackUserName: "alice",
         },
         source: "slack",
+        // Only a source-confirmed public destination may expose the channel
+        // name in labels.
+        visibility: "public",
       }),
       indexedConversation({
         conversationId: "slack:C1:456",
@@ -235,7 +241,8 @@ describe("conversation reporting", () => {
       locations: [
         expect.objectContaining({
           conversations: 2,
-          label: "Public Channel",
+          failed: 1,
+          label: "Private Conversation",
         }),
         expect.objectContaining({
           conversations: 1,

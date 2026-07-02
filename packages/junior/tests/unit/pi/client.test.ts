@@ -185,6 +185,53 @@ describe("completeText", () => {
     );
   });
 
+  it("scrubs C-prefixed channel traces unless the turn confirmed the channel public", async () => {
+    mocks.completeSimple.mockResolvedValue({
+      content: [{ type: "text", text: "maybe private answer" }],
+      stopReason: "stop",
+      usage: { input: 12, output: 4, totalTokens: 16 },
+    });
+
+    const { completeText } = await import("@/chat/pi/client");
+    const { runWithConversationPrivacy } =
+      await import("@/chat/conversation-privacy");
+
+    // Modern Slack private channels also use C ids: without a confirmed
+    // signal the capture stays metadata-only.
+    await completeText({
+      modelId: "openai/gpt-4o-mini",
+      messages: [
+        { role: "user", content: "possibly private question", timestamp: 1 },
+      ] as any,
+      metadata: { conversationId: "slack:C1:123", channelId: "C1" },
+    });
+    const noSignal = mocks.withSpan.mock.calls[0]?.[4] as Record<
+      string,
+      unknown
+    >;
+    expect(noSignal["app.conversation.privacy"]).toBe("private");
+    expect(noSignal["gen_ai.input.messages"]).not.toContain(
+      "possibly private question",
+    );
+
+    // The turn-scoped privacy context carries the source-confirmed signal.
+    await runWithConversationPrivacy("public", () =>
+      completeText({
+        modelId: "openai/gpt-4o-mini",
+        messages: [
+          { role: "user", content: "public question", timestamp: 1 },
+        ] as any,
+        metadata: { conversationId: "slack:C1:123", channelId: "C1" },
+      }),
+    );
+    const publicSignal = mocks.withSpan.mock.calls[1]?.[4] as Record<
+      string,
+      unknown
+    >;
+    expect(publicSignal["app.conversation.privacy"]).toBe("public");
+    expect(publicSignal["gen_ai.input.messages"]).toContain("public question");
+  });
+
   it("uses AI SDK structured output for object completions", async () => {
     mocks.generateObject.mockResolvedValue({
       object: { ok: true },

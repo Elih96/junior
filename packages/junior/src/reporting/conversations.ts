@@ -9,6 +9,7 @@ import { isRecord } from "@/chat/coerce";
 import {
   canExposeConversationPayload,
   resolveConversationPrivacy,
+  type ConversationPrivacy,
 } from "@/chat/conversation-privacy";
 import { unwrapCurrentInstruction } from "@/chat/current-instruction";
 import type { PiMessage } from "@/chat/pi/messages";
@@ -73,6 +74,20 @@ const REQUESTER_PROFILE_RECENT_LIMIT = 25;
 const REQUESTER_PROFILE_ACTIVITY_DAYS = 366;
 const RECENT_CONVERSATION_STATS_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 
+function privateConversationLabel(
+  slackConversation: ReturnType<
+    typeof resolveSlackConversationContextFromThreadId
+  >,
+): string {
+  if (!slackConversation) {
+    return PRIVATE_CONVERSATION_LABEL;
+  }
+  return slackConversation.visibility === "private"
+    ? (formatSlackConversationRedactedLabel(slackConversation) ??
+        PRIVATE_CONVERSATION_LABEL)
+    : PRIVATE_CONVERSATION_LABEL;
+}
+
 interface ConversationReaderOptions {
   conversationStore?: ConversationStore;
 }
@@ -123,6 +138,7 @@ export interface ConversationSummaryReport {
   requesterIdentity?: RequesterIdentity;
   channel?: string;
   channelName?: string;
+  channelNameRedacted?: boolean;
   sentryTraceUrl?: string;
   traceId?: string;
 }
@@ -442,10 +458,12 @@ function sessionReportFromSummary(
   summary: AgentTurnSessionSummary,
   nowMs = Date.now(),
   details?: ConversationDetailsRecord,
+  visibility?: ConversationPrivacy,
 ): ConversationSummaryReport {
   const slackThread = parseSlackThreadId(summary.conversationId);
   const privacy = resolveConversationPrivacy({
     conversationId: summary.conversationId,
+    visibility,
   });
   const effectiveChannelName = details?.channelName ?? summary.channelName;
   const slackConversation = resolveSlackConversationContextFromThreadId({
@@ -454,9 +472,7 @@ function sessionReportFromSummary(
   });
   const privateLabel =
     privacy !== "public"
-      ? slackConversation
-        ? formatSlackConversationRedactedLabel(slackConversation)
-        : PRIVATE_CONVERSATION_LABEL
+      ? privateConversationLabel(slackConversation)
       : undefined;
   const channelName = privateLabel ?? effectiveChannelName;
   const effectiveSurface =
@@ -493,6 +509,7 @@ function sessionReportFromSummary(
     ...(requesterIdentity ? { requesterIdentity } : {}),
     ...(slackThread ? { channel: slackThread.channelId } : {}),
     ...(channelName ? { channelName } : {}),
+    ...(privateLabel ? { channelNameRedacted: true } : {}),
     ...(summary.traceId ? { traceId: summary.traceId } : {}),
     ...(sentryTraceUrl ? { sentryTraceUrl } : {}),
   };
@@ -538,10 +555,9 @@ function titleFromConversation(args: {
   const privateLabel =
     resolveConversationPrivacy({
       conversationId: args.conversation.conversationId,
+      visibility: args.conversation.visibility,
     }) !== "public"
-      ? slackConversation
-        ? formatSlackConversationRedactedLabel(slackConversation)
-        : PRIVATE_CONVERSATION_LABEL
+      ? privateConversationLabel(slackConversation)
       : undefined;
   return (
     privateLabel ??
@@ -571,14 +587,29 @@ function channelNameFromConversation(
   if (
     resolveConversationPrivacy({
       conversationId: conversation.conversationId,
+      visibility: conversation.visibility,
     }) !== "public"
   ) {
-    return (
-      formatSlackConversationRedactedLabel(slackConversation) ??
-      (slackConversation ? undefined : PRIVATE_CONVERSATION_LABEL)
-    );
+    return privateConversationLabel(slackConversation);
   }
   return effectiveChannelName;
+}
+
+function channelNameRedactedFromConversation(
+  conversation: StoredConversation,
+  details?: ConversationDetailsRecord,
+): boolean {
+  const effectiveChannelName = details?.channelName ?? conversation.channelName;
+  const slackThread = parseSlackThreadId(conversation.conversationId);
+  if (!effectiveChannelName && !slackThread) {
+    return false;
+  }
+  return (
+    resolveConversationPrivacy({
+      conversationId: conversation.conversationId,
+      visibility: conversation.visibility,
+    }) !== "public"
+  );
 }
 
 function applyConversationIndexMetadata(args: {
@@ -599,6 +630,10 @@ function applyConversationIndexMetadata(args: {
   const effectiveChannelName =
     channelNameFromConversation(args.conversation, args.details) ??
     args.report.channelName;
+  const channelNameRedacted = channelNameRedactedFromConversation(
+    args.conversation,
+    args.details,
+  );
   const requesterIdentity =
     requesterIdentityReport(args.details?.originRequester) ??
     args.report.requesterIdentity ??
@@ -612,8 +647,10 @@ function applyConversationIndexMetadata(args: {
     reportTime(args.report.lastSeenAt) ?? 0,
     args.conversation.lastActivityAtMs,
   );
+  const { channelNameRedacted: _oldChannelNameRedacted, ...report } =
+    args.report;
   return {
-    ...args.report,
+    ...report,
     displayTitle: titleFromConversation({
       conversation: args.conversation,
       details: args.details,
@@ -625,6 +662,7 @@ function applyConversationIndexMetadata(args: {
     ...(requesterIdentity ? { requesterIdentity } : {}),
     ...(slackThread ? { channel: slackThread.channelId } : {}),
     ...(effectiveChannelName ? { channelName: effectiveChannelName } : {}),
+    ...(channelNameRedacted ? { channelNameRedacted: true } : {}),
   };
 }
 
@@ -641,6 +679,10 @@ function sessionReportFromConversation(
   );
   const slackThread = parseSlackThreadId(conversation.conversationId);
   const channelName = channelNameFromConversation(conversation, details);
+  const channelNameRedacted = channelNameRedactedFromConversation(
+    conversation,
+    details,
+  );
   return {
     conversationId: conversation.conversationId,
     cumulativeDurationMs: 0,
@@ -656,6 +698,7 @@ function sessionReportFromConversation(
     ...(requesterIdentity ? { requesterIdentity } : {}),
     ...(slackThread ? { channel: slackThread.channelId } : {}),
     ...(channelName ? { channelName } : {}),
+    ...(channelNameRedacted ? { channelNameRedacted: true } : {}),
   };
 }
 
@@ -763,10 +806,17 @@ function requesterLabel(
 }
 
 function slackStatsLocationLabel(
-  input: Pick<ConversationSummaryReport, "channel" | "channelName">,
+  input: Pick<
+    ConversationSummaryReport,
+    "channel" | "channelName" | "channelNameRedacted"
+  >,
 ): string | undefined {
   const channelId = input.channel;
   if (!channelId) return undefined;
+
+  if (input.channelNameRedacted && input.channelName) {
+    return input.channelName;
+  }
 
   const name = input.channelName?.replace(/^#/, "");
   if (channelId.startsWith("D")) {
@@ -792,6 +842,7 @@ function surfaceFallbackLabel(surface: ConversationSurface): string {
 function displayTitleFromDetails(
   conversationId: string,
   details: ConversationDetailsRecord | undefined,
+  visibility?: ConversationPrivacy,
 ): string | undefined {
   if (!details) return undefined;
   const slackThread = parseSlackThreadId(conversationId);
@@ -800,9 +851,8 @@ function displayTitleFromDetails(
     channelName: details.channelName,
   });
   const privateLabel =
-    resolveConversationPrivacy({ conversationId }) !== "public"
-      ? (formatSlackConversationRedactedLabel(slackConversation) ??
-        PRIVATE_CONVERSATION_LABEL)
+    resolveConversationPrivacy({ conversationId, visibility }) !== "public"
+      ? privateConversationLabel(slackConversation)
       : undefined;
   return (
     privateLabel ??
@@ -1371,9 +1421,11 @@ export async function readRequesterProfileReport(
 
 function canExposeConversationTranscript(
   summary: AgentTurnSessionSummary,
+  visibility: ConversationPrivacy | undefined,
 ): boolean {
   return canExposeConversationPayload({
     conversationId: summary.conversationId,
+    visibility,
   });
 }
 
@@ -1957,7 +2009,12 @@ async function reportsFromConversations(args: {
               conversation,
               details,
               nowMs: args.nowMs,
-              report: sessionReportFromSummary(summary, args.nowMs, details),
+              report: sessionReportFromSummary(
+                summary,
+                args.nowMs,
+                details,
+                conversation.visibility,
+              ),
             }),
           )
         : [sessionReportFromConversation(conversation, args.nowMs, details)];
@@ -2052,6 +2109,10 @@ export async function listRecentConversationSummaries(
       conversation.conversationId,
     );
     const channelName = channelNameFromConversation(conversation, details);
+    const channelNameRedacted = channelNameRedactedFromConversation(
+      conversation,
+      details,
+    );
     const report = newestRun(
       reportsByConversation.get(conversation.conversationId) ?? [
         sessionReportFromConversation(conversation, nowMs, details),
@@ -2066,6 +2127,7 @@ export async function listRecentConversationSummaries(
       ).toISOString(),
       status: report.status,
       ...(channelName ? { channelName } : {}),
+      ...(channelNameRedacted ? { channelNameRedacted: true } : {}),
       ...(conversation.source ? { source: conversation.source } : {}),
     };
   });
@@ -2105,7 +2167,10 @@ export async function readConversationReport(
             sessionRecord.turnStartMessageIndex,
           )
         : { messages: [], startsAtRunBoundary: false };
-      const canExposeTranscript = canExposeConversationTranscript(summary);
+      const canExposeTranscript = canExposeConversationTranscript(
+        summary,
+        conversation?.visibility,
+      );
       const normalizedTranscript = scopedMessages.messages.map(
         normalizeTranscriptMessage,
       );
@@ -2135,7 +2200,12 @@ export async function readConversationReport(
         (canExposeTranscript ? traceIdFromTranscript(transcript) : undefined);
       const sentryTraceUrl = traceId ? buildSentryTraceUrl(traceId) : undefined;
       const report: ConversationRunReport = {
-        ...sessionReportFromSummary(summary, nowMs, details),
+        ...sessionReportFromSummary(
+          summary,
+          nowMs,
+          details,
+          conversation?.visibility,
+        ),
         ...(traceId ? { traceId } : {}),
         ...(sentryTraceUrl ? { sentryTraceUrl } : {}),
         activity,
@@ -2181,7 +2251,11 @@ export async function readConversationReport(
   const firstRun = effectiveRuns[0];
   const displayTitle =
     firstRun?.displayTitle ??
-    displayTitleFromDetails(conversationId, details) ??
+    displayTitleFromDetails(
+      conversationId,
+      details,
+      conversation?.visibility,
+    ) ??
     surfaceFallbackLabel(firstRun?.surface ?? "slack");
   const sentryConversationUrl = buildSentryConversationUrl(conversationId);
 
@@ -2199,9 +2273,13 @@ export async function readConversationSubagentTranscriptReport(
   conversationId: string,
   runId: string,
   subagentId: string,
+  options: ConversationReaderOptions = {},
 ): Promise<ConversationSubagentTranscriptReport> {
-  const summaries =
-    await listAgentTurnSessionSummariesForConversation(conversationId);
+  const store = conversationStore(options);
+  const [summaries, conversation] = await Promise.all([
+    listAgentTurnSessionSummariesForConversation(conversationId),
+    store.get({ conversationId }),
+  ]);
   const summary = summaries.find((candidate) => candidate.sessionId === runId);
   if (!summary) {
     return {
@@ -2248,7 +2326,10 @@ export async function readConversationSubagentTranscriptReport(
     };
   }
 
-  const canExposeTranscript = canExposeConversationTranscript(summary);
+  const canExposeTranscript = canExposeConversationTranscript(
+    summary,
+    conversation?.visibility,
+  );
   const activity = subagentActivity(start, { canExposeTranscript, end });
   const conversationFields = subagentConversationFields(start.transcriptRef);
   if (!canExposeTranscript) {

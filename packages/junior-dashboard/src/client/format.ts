@@ -612,15 +612,21 @@ export function conversationIdentityMeta(
 
 /** Convert Slack channel ids and names into user-facing location labels. */
 export function slackLocationLabel(
-  input: Pick<ConversationSummary, "channel" | "channelName">,
+  input: Pick<
+    ConversationSummary,
+    "channel" | "channelName" | "channelNameRedacted"
+  >,
   options: { includeId?: boolean } = {},
 ): string | undefined {
   const channelId = input.channel;
   if (!channelId) return undefined;
 
   const includeId = options.includeId ?? true;
-  const name = input.channelName?.replace(/^#/, "");
   const idSuffix = includeId ? ` (${channelId})` : "";
+  if (input.channelNameRedacted && input.channelName) {
+    return `${input.channelName}${idSuffix}`;
+  }
+  const name = input.channelName?.replace(/^#/, "");
   if (channelId.startsWith("D")) {
     return `Direct Message${idSuffix}`;
   }
