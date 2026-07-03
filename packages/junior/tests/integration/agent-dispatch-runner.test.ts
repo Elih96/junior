@@ -15,7 +15,6 @@ import {
   getPersistedThreadState,
   persistThreadStateById,
 } from "@/chat/runtime/thread-state";
-import { RetryableTurnError } from "@/chat/runtime/turn";
 import { coerceThreadConversationState } from "@/chat/state/conversation";
 import { disconnectStateAdapter, getStateAdapter } from "@/chat/state/adapter";
 import type { AssistantReply } from "@/chat/respond";
@@ -25,6 +24,7 @@ import {
   createSlackDirectCredentialSubject,
 } from "@/chat/credentials/subject";
 import { getAgentTurnSessionRecord } from "@/chat/state/turn-session";
+import { completedAgentRun } from "@/chat/runtime/agent-run-outcome";
 import { chatPostMessageOk } from "../fixtures/slack/factories/api";
 import {
   getCapturedSlackApiCalls,
@@ -200,7 +200,7 @@ describe("agent dispatch runner", () => {
       expect(context.sandbox?.tracePropagation).toEqual({
         domains: ["*.sentry.io"],
       });
-      return createReply();
+      return completedAgentRun(createReply());
     });
     const scheduleSessionCompletedPluginTasks = vi.fn(async () => undefined);
 
@@ -309,7 +309,7 @@ describe("agent dispatch runner", () => {
     const generateAssistantReply = vi.fn(async (_input, context) => {
       expect(context.conversationContext).toBeUndefined();
       expect(context.piMessages).toEqual([]);
-      return createReply();
+      return completedAgentRun(createReply());
     });
 
     await runAgentDispatchSlice(
@@ -356,10 +356,7 @@ describe("agent dispatch runner", () => {
     });
     const scheduleCallback = vi.fn(async () => undefined);
     const generateAssistantReply = vi.fn(async () => {
-      throw new RetryableTurnError("agent_continue", "slice timed out", {
-        version: 7,
-        sliceId: 2,
-      });
+      return { status: "suspended" as const, resumeVersion: 7 };
     });
 
     await runAgentDispatchSlice(
@@ -414,7 +411,7 @@ describe("agent dispatch runner", () => {
         },
       });
       expect(context.authorizationFlowMode).toBe("disabled");
-      return createReply();
+      return completedAgentRun(createReply());
     });
 
     await runAgentDispatchSlice(
@@ -466,7 +463,9 @@ describe("agent dispatch runner", () => {
           id: created.record.id,
           expectedVersion: created.record.version,
         },
-        { generateAssistantReply: async () => createReply() },
+        {
+          generateAssistantReply: async () => completedAgentRun(createReply()),
+        },
       );
     } finally {
       setSpy.mockRestore();
@@ -512,17 +511,19 @@ describe("agent dispatch runner", () => {
     });
     const dispatchConversationId = getDispatchConversationId(created.record);
     const failedReply = createReply();
-    const generateAssistantReply = vi.fn(async () => ({
-      ...failedReply,
-      text: "",
-      diagnostics: {
-        ...failedReply.diagnostics,
-        errorMessage: "provider failed",
-        outcome: "provider_error" as const,
-        usedPrimaryText: false,
-      },
-      piMessages: failedDispatchPiMessages(),
-    }));
+    const generateAssistantReply = vi.fn(async () =>
+      completedAgentRun({
+        ...failedReply,
+        text: "",
+        diagnostics: {
+          ...failedReply.diagnostics,
+          errorMessage: "provider failed",
+          outcome: "provider_error" as const,
+          usedPrimaryText: false,
+        },
+        piMessages: failedDispatchPiMessages(),
+      }),
+    );
 
     await runAgentDispatchSlice(
       {
@@ -571,7 +572,7 @@ describe("agent dispatch runner", () => {
         id: created.record.id,
         expectedVersion: created.record.version,
       },
-      { generateAssistantReply: async () => createReply() },
+      { generateAssistantReply: async () => completedAgentRun(createReply()) },
     );
     await expect(getDispatchRecord(created.record.id)).resolves.toMatchObject({
       status: "completed",

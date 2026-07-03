@@ -11,6 +11,7 @@ import {
   getCapturedSlackFileUploadCalls,
   queueSlackApiError,
 } from "../msw/handlers/slack-api";
+import { completedAgentRun } from "@/chat/runtime/agent-run-outcome";
 
 function makeDiagnostics(
   outcome: "success" | "execution_failure" | "provider_error" = "success",
@@ -82,7 +83,7 @@ describe("oauth resume slack integration", () => {
         requester: { platform: "slack", teamId: "T123", userId: "U123" },
       },
       generateReply: async () =>
-        ({
+        completedAgentRun({
           text: "The budget deadline you mentioned earlier was Friday.",
           diagnostics: makeDiagnostics("success", {
             durationMs: 842,
@@ -90,7 +91,7 @@ describe("oauth resume slack integration", () => {
               totalTokens: 1234,
             },
           }),
-        }) as any,
+        }),
     });
 
     expect(getCapturedSlackApiCalls("assistant.threads.setStatus")).toEqual([
@@ -184,7 +185,7 @@ describe("oauth resume slack integration", () => {
         },
       },
       generateReply: async () =>
-        ({
+        completedAgentRun({
           text: "done",
           diagnostics: makeDiagnostics("success", {
             durationMs: 500,
@@ -192,7 +193,7 @@ describe("oauth resume slack integration", () => {
               outputTokens: 7,
             },
           }),
-        }) as any,
+        }),
     });
 
     expect(getCapturedSlackApiCalls("chat.postMessage")).toEqual([
@@ -224,7 +225,6 @@ describe("oauth resume slack integration", () => {
   it("posts resumed auth pause notices with the conversation footer", async () => {
     const { resumeAuthorizedRequest } =
       await import("@/chat/runtime/slack-resume");
-    const { RetryableTurnError } = await import("@/chat/runtime/turn");
 
     await resumeAuthorizedRequest({
       messageText: "continue this turn",
@@ -243,14 +243,10 @@ describe("oauth resume slack integration", () => {
           turnId: "turn-auth-pause",
         },
       },
-      generateReply: async () => {
-        throw new RetryableTurnError("mcp_auth_resume", "auth required", {
-          authDisposition: "link_sent",
-          authKind: "mcp",
-          authProvider: "eval-auth",
-          authProviderDisplayName: "Eval Auth",
-        });
-      },
+      generateReply: async () => ({
+        status: "awaiting_auth" as const,
+        providerDisplayName: "Eval Auth",
+      }),
       onAuthPause: async () => undefined,
     });
 
@@ -291,10 +287,10 @@ describe("oauth resume slack integration", () => {
         requester: { platform: "slack", teamId: "T123", userId: "U123" },
       },
       generateReply: async () =>
-        ({
+        completedAgentRun({
           text: longReply,
           diagnostics: makeDiagnostics(),
-        }) as any,
+        }),
     });
 
     const postCalls = getCapturedSlackApiCalls("chat.postMessage");
@@ -331,10 +327,10 @@ describe("oauth resume slack integration", () => {
         requester: { platform: "slack", teamId: "T123", userId: "U123" },
       },
       generateReply: async () =>
-        ({
+        completedAgentRun({
           text: "Partial output",
           diagnostics: makeDiagnostics("provider_error"),
-        }) as any,
+        }),
     });
 
     const postCalls = getCapturedSlackApiCalls("chat.postMessage");
@@ -368,13 +364,13 @@ describe("oauth resume slack integration", () => {
         requester: { platform: "slack", teamId: "T123", userId: "U123" },
       },
       generateReply: async () =>
-        ({
+        completedAgentRun({
           text: "",
           diagnostics: makeDiagnostics("execution_failure", {
             assistantMessageCount: 0,
             usedPrimaryText: false,
           }),
-        }) as any,
+        }),
     });
 
     const postCalls = getCapturedSlackApiCalls("chat.postMessage");
@@ -406,7 +402,7 @@ describe("oauth resume slack integration", () => {
         requester: { platform: "slack", teamId: "T123", userId: "U123" },
       },
       generateReply: async () =>
-        ({
+        completedAgentRun({
           text: "Here is the resumed artifact.",
           files: [
             {
@@ -415,7 +411,7 @@ describe("oauth resume slack integration", () => {
             },
           ],
           diagnostics: makeDiagnostics(),
-        }) as any,
+        }),
     });
 
     const postCalls = getCapturedSlackApiCalls("chat.postMessage");
@@ -465,7 +461,7 @@ describe("oauth resume slack integration", () => {
         requester: { platform: "slack", teamId: "T123", userId: "U123" },
       },
       generateReply: async () =>
-        ({
+        completedAgentRun({
           text: "Here is the resumed artifact.",
           files: [
             {
@@ -474,7 +470,7 @@ describe("oauth resume slack integration", () => {
             },
           ],
           diagnostics: makeDiagnostics(),
-        }) as any,
+        }),
     });
 
     expect(getCapturedSlackApiCalls("chat.postMessage")).toEqual([

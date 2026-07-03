@@ -11,6 +11,7 @@ import {
   createTestThread,
   createTestDestination,
 } from "../../fixtures/slack-harness";
+import { completedAgentRun } from "@/chat/runtime/agent-run-outcome";
 
 function toPostedText(value: unknown): string {
   if (typeof value === "string") {
@@ -72,10 +73,10 @@ describe("Slack behavior: finalized thread replies", () => {
           generateAssistantReply: async (_prompt, context) => {
             await context?.onTextDelta?.("Hello ");
             await context?.onTextDelta?.("world");
-            return {
+            return completedAgentRun({
               text: "Hello world",
               diagnostics: makeDiagnostics(),
-            };
+            });
           },
         },
       },
@@ -107,10 +108,10 @@ describe("Slack behavior: finalized thread replies", () => {
             await context?.onTextDelta?.("Fetching sources now...");
             await context?.onAssistantMessageStart?.();
             await context?.onTextDelta?.(finalReply);
-            return {
+            return completedAgentRun({
               text: finalReply,
               diagnostics: makeDiagnostics({ toolCalls: ["webSearch"] }),
-            };
+            });
           },
         },
       },
@@ -136,11 +137,12 @@ describe("Slack behavior: finalized thread replies", () => {
     const { slackRuntime } = createTestChatRuntime({
       services: {
         replyExecutor: {
-          generateAssistantReply: async () => ({
-            text: "",
-            files: [{ data: Buffer.from("hello"), filename: "hello.txt" }],
-            diagnostics: makeDiagnostics(),
-          }),
+          generateAssistantReply: async () =>
+            completedAgentRun({
+              text: "",
+              files: [{ data: Buffer.from("hello"), filename: "hello.txt" }],
+              diagnostics: makeDiagnostics(),
+            }),
         },
       },
     });
@@ -168,16 +170,17 @@ describe("Slack behavior: finalized thread replies", () => {
     const { slackRuntime } = createTestChatRuntime({
       services: {
         replyExecutor: {
-          generateAssistantReply: async () => ({
-            text: "Posted it in channel.",
-            files: [{ data: Buffer.from("report"), filename: "report.txt" }],
-            deliveryPlan: {
-              mode: "channel_only",
-              postThreadText: false,
-              attachFiles: "inline",
-            },
-            diagnostics: makeDiagnostics(),
-          }),
+          generateAssistantReply: async () =>
+            completedAgentRun({
+              text: "Posted it in channel.",
+              files: [{ data: Buffer.from("report"), filename: "report.txt" }],
+              deliveryPlan: {
+                mode: "channel_only",
+                postThreadText: false,
+                attachFiles: "inline",
+              },
+              diagnostics: makeDiagnostics(),
+            }),
         },
       },
     });
@@ -205,15 +208,16 @@ describe("Slack behavior: finalized thread replies", () => {
     const { slackRuntime } = createTestChatRuntime({
       services: {
         replyExecutor: {
-          generateAssistantReply: async () => ({
-            text: "",
-            deliveryPlan: {
-              mode: "thread",
-              postThreadText: true,
-              attachFiles: "none",
-            },
-            diagnostics: makeDiagnostics(),
-          }),
+          generateAssistantReply: async () =>
+            completedAgentRun({
+              text: "",
+              deliveryPlan: {
+                mode: "thread",
+                postThreadText: true,
+                attachFiles: "none",
+              },
+              diagnostics: makeDiagnostics(),
+            }),
         },
       },
     });
@@ -240,13 +244,14 @@ describe("Slack behavior: finalized thread replies", () => {
     const { slackRuntime } = createTestChatRuntime({
       services: {
         replyExecutor: {
-          generateAssistantReply: async () => ({
-            text: "ok",
-            files: [{ data: Buffer.from("report"), filename: "report.txt" }],
-            diagnostics: makeDiagnostics({
-              toolCalls: ["slackMessageAddReaction"],
+          generateAssistantReply: async () =>
+            completedAgentRun({
+              text: "ok",
+              files: [{ data: Buffer.from("report"), filename: "report.txt" }],
+              diagnostics: makeDiagnostics({
+                toolCalls: ["slackMessageAddReaction"],
+              }),
             }),
-          }),
         },
       },
     });
@@ -278,10 +283,11 @@ describe("Slack behavior: finalized thread replies", () => {
     const { slackRuntime } = createTestChatRuntime({
       services: {
         replyExecutor: {
-          generateAssistantReply: async () => ({
-            text: longReply,
-            diagnostics: makeDiagnostics(),
-          }),
+          generateAssistantReply: async () =>
+            completedAgentRun({
+              text: longReply,
+              diagnostics: makeDiagnostics(),
+            }),
         },
       },
     });
@@ -314,10 +320,11 @@ describe("Slack behavior: finalized thread replies", () => {
     const { slackRuntime } = createTestChatRuntime({
       services: {
         replyExecutor: {
-          generateAssistantReply: async () => ({
-            text: longReply,
-            diagnostics: makeDiagnostics(),
-          }),
+          generateAssistantReply: async () =>
+            completedAgentRun({
+              text: longReply,
+              diagnostics: makeDiagnostics(),
+            }),
         },
       },
     });
@@ -351,10 +358,11 @@ describe("Slack behavior: finalized thread replies", () => {
     const { slackRuntime } = createTestChatRuntime({
       services: {
         replyExecutor: {
-          generateAssistantReply: async () => ({
-            text: longReply,
-            diagnostics: makeDiagnostics({ outcome: "provider_error" }),
-          }),
+          generateAssistantReply: async () =>
+            completedAgentRun({
+              text: longReply,
+              diagnostics: makeDiagnostics({ outcome: "provider_error" }),
+            }),
         },
       },
     });

@@ -31,9 +31,10 @@ import { buildSlackOutputMessage } from "@/chat/slack/output";
 import { getSlackErrorObservabilityAttributes } from "@/chat/slack/errors";
 import {
   buildSteeringPiMessage,
-  generateAssistantReply as generateAssistantReplyImpl,
+  type AssistantReplyRequestContext,
   type ReplySteeringMessage,
 } from "@/chat/respond";
+import type { AgentRunOutcome } from "@/chat/runtime/agent-run-outcome";
 import type { CredentialContext } from "@/chat/credentials/context";
 import { shouldEmitDevAgentTrace } from "@/chat/runtime/dev-agent-trace";
 import {
@@ -94,9 +95,7 @@ import {
 import { ensureSlackMessageActorIdentity } from "@/chat/services/message-actor-identity";
 import type { AgentContinueRequest } from "@/chat/services/agent-continue";
 import {
-  isAuthResumeRetryableTurnError,
-  isCooperativeTurnYieldError,
-  isRetryableTurnError,
+  CooperativeTurnYieldError,
   TurnInputDeferredError,
 } from "@/chat/runtime/turn";
 import { buildDeterministicTurnId } from "@/chat/runtime/turn";
@@ -279,7 +278,10 @@ async function loadPiMessagesForTurn(args: {
 
 export interface ReplyExecutorServices {
   contextCompactor: ContextCompactor;
-  generateAssistantReply: typeof generateAssistantReplyImpl;
+  generateAssistantReply: (
+    messageText: string,
+    context: AssistantReplyRequestContext,
+  ) => Promise<AgentRunOutcome>;
   generateThreadTitle: ConversationMemoryService["generateThreadTitle"];
   getAwaitingAgentContinueRequest: (args: {
     conversationId: string;
@@ -907,6 +909,7 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
         let finalReplyDelivered = false;
         let latestArtifacts = preparedState.artifacts;
         let assistantTitleArtifacts: Partial<ThreadArtifactsState> = {};
+        let agentContinueScheduleError: unknown;
         const hasVisibleSlackDelivery = (post: {
           files?: unknown[];
           text: string;
@@ -1036,7 +1039,7 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
                 );
               }
             : undefined;
-          let reply = await deps.services.generateAssistantReply(
+          const outcome = await deps.services.generateAssistantReply(
             effectiveUserText,
             {
               credentialContext,
@@ -1108,6 +1111,100 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
               shouldYield: options.shouldYield,
             },
           );
+          if (outcome.status === "awaiting_auth") {
+            if (!requester) {
+              const text = `I could not act on this subscribed event because ${outcome.providerDisplayName} needs user authorization. Ask me in this thread to connect ${outcome.providerDisplayName} before retrying.`;
+              await postThreadReply(
+                buildSlackOutputMessage(text),
+                "thread_reply",
+              );
+              markConversationMessage(
+                preparedState.conversation,
+                preparedState.userMessageId,
+                {
+                  replied: true,
+                  skippedReason: undefined,
+                },
+              );
+              upsertConversationMessage(preparedState.conversation, {
+                id: generateConversationId("assistant"),
+                role: "assistant",
+                text: normalizeConversationText(text),
+                createdAtMs: Date.now(),
+                author: {
+                  userName: botConfig.userName,
+                  isBot: true,
+                },
+                meta: {
+                  replied: true,
+                },
+              });
+              markTurnClosed({
+                conversation: preparedState.conversation,
+                nowMs: Date.now(),
+                sessionId: turnId,
+                updateConversationStats,
+              });
+              await persistThreadState(thread, {
+                conversation: preparedState.conversation,
+              });
+              persistedAtLeastOnce = true;
+              shouldPersistFailureState = false;
+              return;
+            }
+            await postAuthPauseNotice(outcome.providerDisplayName);
+            completeAuthPauseTurn({
+              conversation: preparedState.conversation,
+              sessionId: turnId,
+            });
+            await persistThreadState(thread, {
+              conversation: preparedState.conversation,
+            });
+            persistedAtLeastOnce = true;
+            shouldPersistFailureState = false;
+            return;
+          }
+          if (outcome.status === "suspended") {
+            // A cooperative yield only occurs when this caller's own
+            // shouldYield() fired, so the predicate — not the outcome —
+            // decides the resume route: hand the lease back to the queue
+            // worker, or schedule a direct continuation.
+            if (options.shouldYield?.()) {
+              shouldPersistFailureState = false;
+              throw new CooperativeTurnYieldError();
+            }
+            if (!destination || !conversationId) {
+              throw new Error(
+                "Agent continuation requires a destination and conversation id",
+              );
+            }
+            try {
+              await deps.services.scheduleAgentContinue({
+                conversationId,
+                destination,
+                sessionId: turnId,
+                expectedVersion: outcome.resumeVersion,
+              });
+              shouldPersistFailureState = false;
+            } catch (scheduleError) {
+              logException(
+                scheduleError,
+                "agent_continue_schedule_failed",
+                turnTraceContext,
+                {
+                  ...(messageTs ? { "messaging.message.id": messageTs } : {}),
+                  "app.ai.resume_session_version": outcome.resumeVersion,
+                },
+                "Failed to schedule agent continuation",
+              );
+              shouldPersistFailureState = true;
+              agentContinueScheduleError = scheduleError;
+              throw scheduleError;
+            }
+            return;
+          }
+
+          let reply = outcome.reply;
           const diagnosticsContext = {
             slackThreadId: threadId,
             slackUserId: message.author.userId,
@@ -1338,108 +1435,14 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
             );
             return;
           }
-          if (isCooperativeTurnYieldError(error)) {
+          if (error instanceof CooperativeTurnYieldError) {
             shouldPersistFailureState = false;
             throw error;
           }
-
-          if (isAuthResumeRetryableTurnError(error)) {
-            if (!requester) {
-              const text = `I could not act on this subscribed event because ${error.metadata.authProviderDisplayName} needs user authorization. Ask me in this thread to connect ${error.metadata.authProviderDisplayName} before retrying.`;
-              await postThreadReply(
-                buildSlackOutputMessage(text),
-                "thread_reply",
-              );
-              markConversationMessage(
-                preparedState.conversation,
-                preparedState.userMessageId,
-                {
-                  replied: true,
-                  skippedReason: undefined,
-                },
-              );
-              upsertConversationMessage(preparedState.conversation, {
-                id: generateConversationId("assistant"),
-                role: "assistant",
-                text: normalizeConversationText(text),
-                createdAtMs: Date.now(),
-                author: {
-                  userName: botConfig.userName,
-                  isBot: true,
-                },
-                meta: {
-                  replied: true,
-                },
-              });
-              markTurnClosed({
-                conversation: preparedState.conversation,
-                nowMs: Date.now(),
-                sessionId: turnId,
-                updateConversationStats,
-              });
-              await persistThreadState(thread, {
-                conversation: preparedState.conversation,
-              });
-              persistedAtLeastOnce = true;
-              shouldPersistFailureState = false;
-              return;
-            }
-            await postAuthPauseNotice(error.metadata.authProviderDisplayName);
-            completeAuthPauseTurn({
-              conversation: preparedState.conversation,
-              sessionId: error.metadata?.sessionId ?? turnId,
-            });
-            await persistThreadState(thread, {
-              conversation: preparedState.conversation,
-            });
-            persistedAtLeastOnce = true;
-            shouldPersistFailureState = false;
-            return;
+          if (error === agentContinueScheduleError) {
+            shouldPersistFailureState = true;
+            throw error;
           }
-
-          if (isRetryableTurnError(error, "agent_continue")) {
-            const conversationIdForResume = error.metadata?.conversationId;
-            const sessionIdForResume = error.metadata?.sessionId;
-            const version = error.metadata?.version;
-            if (
-              conversationIdForResume &&
-              sessionIdForResume &&
-              typeof version === "number" &&
-              destination
-            ) {
-              try {
-                await deps.services.scheduleAgentContinue({
-                  conversationId: conversationIdForResume,
-                  destination,
-                  sessionId: sessionIdForResume,
-                  expectedVersion: version,
-                });
-                shouldPersistFailureState = false;
-              } catch (scheduleError) {
-                logException(
-                  scheduleError,
-                  "agent_continue_schedule_failed",
-                  turnTraceContext,
-                  {
-                    ...(messageTs ? { "messaging.message.id": messageTs } : {}),
-                    "app.ai.resume_session_version": version,
-                  },
-                  "Failed to schedule agent continuation",
-                );
-                shouldPersistFailureState = true;
-                throw scheduleError;
-              }
-              return;
-            } else {
-              logWarn(
-                "agent_continue_metadata_missing",
-                turnTraceContext,
-                messageTs ? { "messaging.message.id": messageTs } : {},
-                "Agent continuation could not be scheduled because retry metadata was incomplete",
-              );
-            }
-          }
-
           shouldPersistFailureState = true;
           const createdCanvasUrl = getCurrentTurnCanvasUrl({
             before: preparedState.artifacts,
