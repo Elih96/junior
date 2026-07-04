@@ -27,8 +27,11 @@ async function realSleep(ms: number): Promise<void> {
   await new Promise<void>((resolve) => realSetTimeout(resolve, ms));
 }
 
+// Loop bounds are generous real-time ceilings, not expected waits: the loops
+// return as soon as the condition holds, and saturated coverage workers can
+// starve the event loop well past the nominal schedule.
 async function waitForPromptCall(count: number): Promise<void> {
-  for (let index = 0; index < 100; index += 1) {
+  for (let index = 0; index < 2_000; index += 1) {
     if (counters.promptCalls >= count) {
       return;
     }
@@ -44,6 +47,14 @@ async function advanceUntilContinueCall(maxMs: number): Promise<void> {
     }
     await vi.advanceTimersByTimeAsync(100);
     await realSleep(1);
+  }
+  // Fake time is fully advanced; the continuation is already scheduled and
+  // only needs real event-loop turns to settle.
+  for (let attempt = 0; attempt < 2_000; attempt += 1) {
+    if (counters.continueCalls > 0) {
+      return;
+    }
+    await realSleep(5);
   }
   throw new Error("Expected provider retry continuation to start");
 }
@@ -370,15 +381,18 @@ describe("generateAssistantReply provider retry", () => {
   });
 
   it("continues from the last safe boundary after a transient provider stream error", async () => {
-    const replyPromise = generateAssistantReply("help me", {
-      destination: TEST_DESTINATION,
-      source: TEST_SOURCE,
-      requester: { platform: "slack", teamId: "T123", userId: "U123" },
-      correlation: {
-        conversationId: "conversation-1",
-        turnId: "turn-1",
-        channelId: "C123",
-        threadTs: "1712345.0001",
+    const replyPromise = generateAssistantReply({
+      input: { messageText: "help me" },
+      routing: {
+        destination: TEST_DESTINATION,
+        source: TEST_SOURCE,
+        requester: { platform: "slack", teamId: "T123", userId: "U123" },
+        correlation: {
+          conversationId: "conversation-1",
+          turnId: "turn-1",
+          channelId: "C123",
+          threadTs: "1712345.0001",
+        },
       },
     });
 
@@ -458,24 +472,28 @@ describe("generateAssistantReply provider retry", () => {
     });
 
     const reply = finalReply(
-      await generateAssistantReply("help me", {
-        destination: TEST_DESTINATION,
-        source: TEST_SOURCE,
-        piMessages: priorMessages,
-        requester: { platform: "slack", teamId: "T123", userId: "U123" },
-        correlation: {
-          conversationId: "slack:C123:1712345.0001",
-          turnId: "turn-steering",
-          channelId: "C123",
-          threadTs: "1712345.0001",
+      await generateAssistantReply({
+        input: { messageText: "help me", piMessages: priorMessages },
+        routing: {
+          destination: TEST_DESTINATION,
+          source: TEST_SOURCE,
+          requester: { platform: "slack", teamId: "T123", userId: "U123" },
+          correlation: {
+            conversationId: "slack:C123:1712345.0001",
+            turnId: "turn-steering",
+            channelId: "C123",
+            threadTs: "1712345.0001",
+          },
         },
-        drainSteeringMessages: async (inject) => {
-          const messages = [
-            { text: "actually do the other thing", timestampMs: 2_000 },
-          ];
-          await inject(messages);
-          injectedTexts.push(...messages.map((message) => message.text));
-          return messages;
+        durability: {
+          drainSteeringMessages: async (inject) => {
+            const messages = [
+              { text: "actually do the other thing", timestampMs: 2_000 },
+            ];
+            await inject(messages);
+            injectedTexts.push(...messages.map((message) => message.text));
+            return messages;
+          },
         },
       }),
     );
@@ -529,17 +547,20 @@ describe("generateAssistantReply provider retry", () => {
   it("parks the turn when the worker asks to yield at a Pi boundary", async () => {
     agentMode.value = "cooperativeYield";
 
-    const outcome = await generateAssistantReply("help me", {
-      destination: TEST_DESTINATION,
-      source: TEST_SOURCE,
-      requester: { platform: "slack", teamId: "T123", userId: "U123" },
-      correlation: {
-        conversationId: "conversation-yield",
-        turnId: "turn-yield",
-        channelId: "C123",
-        threadTs: "1712345.0003",
+    const outcome = await generateAssistantReply({
+      input: { messageText: "help me" },
+      routing: {
+        destination: TEST_DESTINATION,
+        source: TEST_SOURCE,
+        requester: { platform: "slack", teamId: "T123", userId: "U123" },
+        correlation: {
+          conversationId: "conversation-yield",
+          turnId: "turn-yield",
+          channelId: "C123",
+          threadTs: "1712345.0003",
+        },
       },
-      shouldYield: () => true,
+      durability: { shouldYield: () => true },
     });
 
     expect(outcome).toMatchObject({
@@ -577,24 +598,29 @@ describe("generateAssistantReply provider retry", () => {
   it("keeps steered messages when yielding after steering drain", async () => {
     agentMode.value = "cooperativeYield";
 
-    const outcome = await generateAssistantReply("help me", {
-      requester: { platform: "slack", teamId: "T123", userId: "U123" },
-      correlation: {
-        conversationId: "conversation-yield-steering",
-        turnId: "turn-yield-steering",
-        channelId: "C123",
-        threadTs: "1712345.0005",
+    const outcome = await generateAssistantReply({
+      input: { messageText: "help me" },
+      routing: {
+        requester: { platform: "slack", teamId: "T123", userId: "U123" },
+        correlation: {
+          conversationId: "conversation-yield-steering",
+          turnId: "turn-yield-steering",
+          channelId: "C123",
+          threadTs: "1712345.0005",
+        },
+        destination: TEST_DESTINATION,
+        source: TEST_SOURCE,
       },
-      destination: TEST_DESTINATION,
-      source: TEST_SOURCE,
-      drainSteeringMessages: async (inject) => {
-        const messages = [
-          { text: "actually do the other thing", timestampMs: 2_000 },
-        ];
-        await inject(messages);
-        return messages;
+      durability: {
+        drainSteeringMessages: async (inject) => {
+          const messages = [
+            { text: "actually do the other thing", timestampMs: 2_000 },
+          ];
+          await inject(messages);
+          return messages;
+        },
+        shouldYield: () => true,
       },
-      shouldYield: () => true,
     });
 
     expect(outcome).toMatchObject({
@@ -628,17 +654,20 @@ describe("generateAssistantReply provider retry", () => {
       .spyOn(turnSessionState, "upsertAgentTurnSessionRecord")
       .mockRejectedValue(new Error("storage unavailable"));
 
-    const error = await generateAssistantReply("help me", {
-      destination: TEST_DESTINATION,
-      source: TEST_SOURCE,
-      requester: { platform: "slack", teamId: "T123", userId: "U123" },
-      correlation: {
-        conversationId: "conversation-yield-persist-failure",
-        turnId: "turn-yield-persist-failure",
-        channelId: "C123",
-        threadTs: "1712345.0004",
+    const error = await generateAssistantReply({
+      input: { messageText: "help me" },
+      routing: {
+        destination: TEST_DESTINATION,
+        source: TEST_SOURCE,
+        requester: { platform: "slack", teamId: "T123", userId: "U123" },
+        correlation: {
+          conversationId: "conversation-yield-persist-failure",
+          turnId: "turn-yield-persist-failure",
+          channelId: "C123",
+          threadTs: "1712345.0004",
+        },
       },
-      shouldYield: () => true,
+      durability: { shouldYield: () => true },
     }).then(
       () => undefined,
       (caught: unknown) => caught,
@@ -662,15 +691,18 @@ describe("generateAssistantReply provider retry", () => {
     sessionLogState.failToolExecutionAppend = true;
 
     const reply = finalReply(
-      await generateAssistantReply("run the tool", {
-        destination: TEST_DESTINATION,
-        source: TEST_SOURCE,
-        requester: { platform: "slack", teamId: "T123", userId: "U123" },
-        correlation: {
-          conversationId: "conversation-tool-activity",
-          turnId: "turn-tool-activity",
-          channelId: "C123",
-          threadTs: "1712345.0006",
+      await generateAssistantReply({
+        input: { messageText: "run the tool" },
+        routing: {
+          destination: TEST_DESTINATION,
+          source: TEST_SOURCE,
+          requester: { platform: "slack", teamId: "T123", userId: "U123" },
+          correlation: {
+            conversationId: "conversation-tool-activity",
+            turnId: "turn-tool-activity",
+            channelId: "C123",
+            threadTs: "1712345.0006",
+          },
         },
       }),
     );
@@ -701,16 +733,18 @@ describe("generateAssistantReply provider retry", () => {
     });
 
     const reply = finalReply(
-      await generateAssistantReply("help me", {
-        destination: TEST_DESTINATION,
-        source: TEST_SOURCE,
-        piMessages: [checkpointedPrompt],
-        requester: { platform: "slack", teamId: "T123", userId: "U123" },
-        correlation: {
-          conversationId,
-          turnId: sessionId,
-          channelId: "C123",
-          threadTs: "1712345.0007",
+      await generateAssistantReply({
+        input: { messageText: "help me", piMessages: [checkpointedPrompt] },
+        routing: {
+          destination: TEST_DESTINATION,
+          source: TEST_SOURCE,
+          requester: { platform: "slack", teamId: "T123", userId: "U123" },
+          correlation: {
+            conversationId,
+            turnId: sessionId,
+            channelId: "C123",
+            threadTs: "1712345.0007",
+          },
         },
       }),
     );
@@ -734,28 +768,33 @@ describe("generateAssistantReply provider retry", () => {
     let injectRejected = false;
     let injectCompleted = false;
 
-    await generateAssistantReply("help me", {
-      destination: TEST_DESTINATION,
-      source: TEST_SOURCE,
-      requester: { platform: "slack", teamId: "T123", userId: "U123" },
-      correlation: {
-        conversationId: "conversation-steering-failure",
-        turnId: "turn-steering-failure",
-        channelId: "C123",
-        threadTs: "1712345.0002",
+    await generateAssistantReply({
+      input: { messageText: "help me" },
+      routing: {
+        destination: TEST_DESTINATION,
+        source: TEST_SOURCE,
+        requester: { platform: "slack", teamId: "T123", userId: "U123" },
+        correlation: {
+          conversationId: "conversation-steering-failure",
+          turnId: "turn-steering-failure",
+          channelId: "C123",
+          threadTs: "1712345.0002",
+        },
       },
-      drainSteeringMessages: async (inject) => {
-        const messages = [
-          { text: "actually do the other thing", timestampMs: 2_000 },
-        ];
-        try {
-          await inject(messages);
-          injectCompleted = true;
-          return messages;
-        } catch {
-          injectRejected = true;
-          throw new Error("inject rejected");
-        }
+      durability: {
+        drainSteeringMessages: async (inject) => {
+          const messages = [
+            { text: "actually do the other thing", timestampMs: 2_000 },
+          ];
+          try {
+            await inject(messages);
+            injectCompleted = true;
+            return messages;
+          } catch {
+            injectRejected = true;
+            throw new Error("inject rejected");
+          }
+        },
       },
     });
 
