@@ -11,6 +11,7 @@ import {
   SLACK_DESTINATION,
   createConversationWorkQueueTestAdapter,
 } from "../../fixtures/conversation-work";
+import { neverRunAgentRunner } from "../../fixtures/agent-runner";
 
 const ORIGINAL_ENV = vi.hoisted(() => {
   const original = {
@@ -27,6 +28,8 @@ function restoreEnv(name: string, value: string | undefined): void {
   }
   process.env[name] = value;
 }
+
+const agentRunnerShouldNotRun = neverRunAgentRunner();
 
 describe("agent continuation scheduling", () => {
   beforeEach(async () => {
@@ -125,7 +128,7 @@ describe("agent continuation scheduling", () => {
         sessionId: "turn_msg_2",
         expectedVersion: 1,
       },
-      { scheduleAgentContinue },
+      { agentRunner: agentRunnerShouldNotRun, scheduleAgentContinue },
     );
 
     await vi.advanceTimersByTimeAsync(4_000);
@@ -156,9 +159,11 @@ describe("agent continuation scheduling", () => {
       piMessages: [],
     });
 
-    await expect(resumeAwaitingSlackContinuation(conversationId)).resolves.toBe(
-      false,
-    );
+    await expect(
+      resumeAwaitingSlackContinuation(conversationId, {
+        agentRunner: agentRunnerShouldNotRun,
+      }),
+    ).resolves.toBe(false);
     await expect(
       getAgentTurnSessionRecord(conversationId, "turn_msg_3"),
     ).resolves.toMatchObject({
@@ -187,13 +192,13 @@ describe("agent continuation scheduling", () => {
 
     await expect(
       resumeAwaitingSlackContinuation(conversationId, {
-        generateReply,
+        agentRunner: { run: generateReply },
         resumeTurn,
       }),
     ).resolves.toBe(true);
 
     expect(resumeTurn).toHaveBeenCalledWith(
-      expect.objectContaining({ generateReply }),
+      expect.objectContaining({ agentRunner: { run: generateReply } }),
     );
   });
 
@@ -253,9 +258,11 @@ describe("agent continuation scheduling", () => {
       },
     });
 
-    await expect(resumeAwaitingSlackContinuation(conversationId)).resolves.toBe(
-      false,
-    );
+    await expect(
+      resumeAwaitingSlackContinuation(conversationId, {
+        agentRunner: agentRunnerShouldNotRun,
+      }),
+    ).resolves.toBe(false);
     await expect(
       getAgentTurnSessionRecord(conversationId, sessionId),
     ).resolves.toMatchObject({

@@ -6,6 +6,7 @@ import {
   getAgentTurnSessionRecord,
   upsertAgentTurnSessionRecord,
 } from "@/chat/state/turn-session";
+import { neverRunAgentRunner } from "../../fixtures/agent-runner";
 import { SLACK_DESTINATION } from "../../fixtures/conversation-work";
 
 const SLACK_SOURCE = createSlackSource({
@@ -30,6 +31,8 @@ function restoreEnv(name: string, value: string | undefined): void {
   }
   process.env[name] = value;
 }
+
+const agentRunnerShouldNotRun = neverRunAgentRunner();
 
 describe("agent continuation runner callbacks", () => {
   beforeEach(async () => {
@@ -117,6 +120,7 @@ describe("agent continuation runner callbacks", () => {
           expectedVersion: sessionRecord.version,
         },
         {
+          agentRunner: agentRunnerShouldNotRun,
           resumeTurn: async (args) => {
             const prepared = await args.beforeStart?.();
             if (!prepared) {
@@ -219,6 +223,7 @@ describe("agent continuation runner callbacks", () => {
           expectedVersion: sessionRecord.version,
         },
         {
+          agentRunner: agentRunnerShouldNotRun,
           resumeTurn: async (args) => {
             const prepared = await args.beforeStart?.();
             if (prepared !== false) {
@@ -308,6 +313,7 @@ describe("agent continuation runner callbacks", () => {
           expectedVersion: sessionRecord.version,
         },
         {
+          agentRunner: agentRunnerShouldNotRun,
           resumeTurn: async (args) => {
             const prepared = await args.beforeStart?.();
             if (prepared !== false) {

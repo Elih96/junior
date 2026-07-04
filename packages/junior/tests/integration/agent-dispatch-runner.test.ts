@@ -25,6 +25,7 @@ import {
 } from "@/chat/credentials/subject";
 import { getAgentTurnSessionRecord } from "@/chat/state/turn-session";
 import { completedAgentRun } from "@/chat/runtime/agent-run-outcome";
+import { createAgentRunner } from "@/chat/runtime/agent-runner";
 import { chatPostMessageOk } from "../fixtures/slack/factories/api";
 import {
   getCapturedSlackApiCalls,
@@ -210,9 +211,10 @@ describe("agent dispatch runner", () => {
         expectedVersion: created.record.version,
       },
       {
-        generateAssistantReply,
+        agentRunner: createAgentRunner(generateAssistantReply, {
+          tracePropagation: { domains: ["*.sentry.io"] },
+        }),
         scheduleSessionCompletedPluginTasks,
-        tracePropagation: { domains: ["*.sentry.io"] },
       },
     );
 
@@ -317,7 +319,7 @@ describe("agent dispatch runner", () => {
         id: created.record.id,
         expectedVersion: created.record.version,
       },
-      { generateAssistantReply },
+      { agentRunner: { run: generateAssistantReply } },
     );
 
     const persistedDestination =
@@ -364,7 +366,7 @@ describe("agent dispatch runner", () => {
         id: created.record.id,
         expectedVersion: created.record.version,
       },
-      { generateAssistantReply, scheduleCallback },
+      { agentRunner: { run: generateAssistantReply }, scheduleCallback },
     );
 
     await expect(getDispatchRecord(created.record.id)).resolves.toMatchObject({
@@ -419,7 +421,7 @@ describe("agent dispatch runner", () => {
         id: created.record.id,
         expectedVersion: created.record.version,
       },
-      { generateAssistantReply },
+      { agentRunner: { run: generateAssistantReply } },
     );
 
     await expect(getDispatchRecord(created.record.id)).resolves.toMatchObject({
@@ -464,7 +466,7 @@ describe("agent dispatch runner", () => {
           expectedVersion: created.record.version,
         },
         {
-          generateAssistantReply: async () => completedAgentRun(createReply()),
+          agentRunner: { run: async () => completedAgentRun(createReply()) },
         },
       );
     } finally {
@@ -486,7 +488,7 @@ describe("agent dispatch runner", () => {
         id: created.record.id,
         expectedVersion: created.record.version,
       },
-      { generateAssistantReply: rerunGenerate },
+      { agentRunner: { run: rerunGenerate } },
     );
     expect(rerunGenerate).not.toHaveBeenCalled();
     expect(getCapturedSlackApiCalls("chat.postMessage")).toHaveLength(1);
@@ -530,7 +532,7 @@ describe("agent dispatch runner", () => {
         id: created.record.id,
         expectedVersion: created.record.version,
       },
-      { generateAssistantReply },
+      { agentRunner: { run: generateAssistantReply } },
     );
 
     await expect(getDispatchRecord(created.record.id)).resolves.toMatchObject({
@@ -572,7 +574,7 @@ describe("agent dispatch runner", () => {
         id: created.record.id,
         expectedVersion: created.record.version,
       },
-      { generateAssistantReply: async () => completedAgentRun(createReply()) },
+      { agentRunner: { run: async () => completedAgentRun(createReply()) } },
     );
     await expect(getDispatchRecord(created.record.id)).resolves.toMatchObject({
       status: "completed",
@@ -608,7 +610,7 @@ describe("agent dispatch runner", () => {
         id: created.record.id,
         expectedVersion: reverted.version,
       },
-      { generateAssistantReply: rerunGenerate },
+      { agentRunner: { run: rerunGenerate } },
     );
 
     expect(rerunGenerate).not.toHaveBeenCalled();
@@ -645,8 +647,10 @@ describe("agent dispatch runner", () => {
           expectedVersion: created.record.version,
         },
         {
-          generateAssistantReply: async () => {
-            throw new Error("busy conversation should not run");
+          agentRunner: {
+            run: async () => {
+              throw new Error("busy conversation should not run");
+            },
           },
         },
       );
