@@ -14,7 +14,6 @@ import {
   buildReplyDeliveryPlan,
   type ReplyDeliveryPlan,
 } from "@/chat/services/reply-delivery-plan";
-import { isExplicitChannelPostIntent } from "@/chat/services/channel-intent";
 import { enforceAttachmentClaimTruth } from "@/chat/services/attachment-claims";
 import type { ThreadArtifactsState } from "@/chat/state/artifacts";
 import {
@@ -205,11 +204,17 @@ function stripThinkingXmlBlocks(text: string): string {
   return result;
 }
 
+function sendMessageResultTarget(
+  result: unknown,
+): "channel" | "thread" | undefined {
+  const target = (result as { details?: { target?: unknown } }).details?.target;
+  return target === "channel" || target === "thread" ? target : undefined;
+}
+
 /** Process raw agent messages into a structured AgentRunResult. */
 export function buildTurnResult(input: TurnResultInput): AgentRunResult {
   const {
     newMessages,
-    userInput,
     replyFiles,
     artifactStatePatch,
     toolCalls,
@@ -243,27 +248,37 @@ export function buildTurnResult(input: TurnResultInput): AgentRunResult {
       : rawPrimaryText;
 
   const toolErrorCount = toolResults.filter((result) => result.isError).length;
-  const explicitChannelPostIntent = isExplicitChannelPostIntent(userInput);
+  const successfulToolResults = toolResults.filter(
+    (result) => !isToolResultError(result),
+  );
   const successfulToolNames = new Set(
-    toolResults
-      .filter((result) => !isToolResultError(result))
+    successfulToolResults
       .map((result) => normalizeToolNameFromResult(result))
       .filter((value): value is string => Boolean(value)),
   );
-  const channelPostPerformed = successfulToolNames.has(
-    "slackChannelPostMessage",
+  const channelPostPerformed = successfulToolResults.some(
+    (result) =>
+      normalizeToolNameFromResult(result) === "sendMessage" &&
+      sendMessageResultTarget(result) === "channel",
   );
   const canvasCreated = successfulToolNames.has("slackCanvasCreate");
-  const reactionPerformed = successfulToolNames.has("slackMessageAddReaction");
+  const reactionPerformed = successfulToolNames.has("addReaction");
   const markerSideEffectSuccess =
     exactNoReplyMarker &&
     toolErrorCount === 0 &&
     (reactionPerformed || channelPostPerformed || replyFiles.length > 0);
   const fileOnlySuccess =
     !rawPrimaryText && toolErrorCount === 0 && replyFiles.length > 0;
-  const sideEffectOnlySuccess = markerSideEffectSuccess || fileOnlySuccess;
+  const channelMessageOnlySuccess =
+    !rawPrimaryText && toolErrorCount === 0 && channelPostPerformed;
+  const sideEffectOnlySuccess =
+    markerSideEffectSuccess || fileOnlySuccess || channelMessageOnlySuccess;
+  const channelOnlySideEffect =
+    channelPostPerformed &&
+    replyFiles.length === 0 &&
+    (exactNoReplyMarker || channelMessageOnlySuccess);
   const baseDeliveryPlan = buildReplyDeliveryPlan({
-    explicitChannelPostIntent: exactNoReplyMarker && explicitChannelPostIntent,
+    channelOnlySideEffect,
     channelPostPerformed,
     hasFiles: replyFiles.length > 0,
   });

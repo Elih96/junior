@@ -61,27 +61,27 @@ describe("Slack tool registration", () => {
   it("does not register channel-scope tools in DM context", () => {
     const tools = createTools([], {}, ctx("D12345"));
 
-    expect(tools).not.toHaveProperty("slackChannelPostMessage");
+    expect(tools).not.toHaveProperty("sendMessage");
     expect(tools).not.toHaveProperty("slackChannelListMessages");
-    expect(tools).toHaveProperty("slackMessageAddReaction");
+    expect(tools).toHaveProperty("addReaction");
     expect(tools).toHaveProperty("slackCanvasCreate");
   });
 
   it("registers channel-scope tools in shared channel context", () => {
     const tools = createTools([], {}, ctx("C12345"));
 
-    expect(tools).toHaveProperty("slackChannelPostMessage");
+    expect(tools).toHaveProperty("sendMessage");
     expect(tools).toHaveProperty("slackChannelListMessages");
-    expect(tools).toHaveProperty("slackMessageAddReaction");
+    expect(tools).toHaveProperty("addReaction");
     expect(tools).toHaveProperty("slackCanvasCreate");
   });
 
   it("registers tools when runtime channel ids are Junior Slack references", () => {
     const tools = createTools([], {}, ctx("slack:C12345"));
 
-    expect(tools).toHaveProperty("slackChannelPostMessage");
+    expect(tools).toHaveProperty("sendMessage");
     expect(tools).toHaveProperty("slackChannelListMessages");
-    expect(tools).toHaveProperty("slackMessageAddReaction");
+    expect(tools).toHaveProperty("addReaction");
     expect(tools).toHaveProperty("slackCanvasCreate");
   });
 
@@ -95,7 +95,7 @@ describe("Slack tool registration", () => {
       },
     );
 
-    expect(tools).not.toHaveProperty("slackChannelPostMessage");
+    expect(tools).not.toHaveProperty("sendMessage");
     expect(tools).toHaveProperty("slackChannelListMessages");
     expect(tools).toHaveProperty("slackThreadRead");
   });
@@ -114,9 +114,9 @@ describe("Slack tool registration", () => {
       },
     );
 
-    expect(tools).toHaveProperty("slackChannelPostMessage");
+    expect(tools).toHaveProperty("sendMessage");
     expect(tools).toHaveProperty("slackChannelListMessages");
-    expect(tools).toHaveProperty("slackMessageAddReaction");
+    expect(tools).toHaveProperty("addReaction");
     expect(tools).toHaveProperty("slackCanvasCreate");
   });
 
@@ -169,9 +169,9 @@ describe("Slack tool registration", () => {
 
     expect(tools).not.toHaveProperty("slackCanvasCreate");
     expect(tools).not.toHaveProperty("slackCanvasRead");
-    expect(tools).not.toHaveProperty("slackChannelPostMessage");
+    expect(tools).not.toHaveProperty("sendMessage");
     expect(tools).not.toHaveProperty("slackChannelListMessages");
-    expect(tools).not.toHaveProperty("slackMessageAddReaction");
+    expect(tools).not.toHaveProperty("addReaction");
   });
 
   it("does not register Slack tools for local destinations", () => {
@@ -192,5 +192,19 @@ describe("Slack tool registration", () => {
     expect(
       Object.keys(tools).filter((name) => name.startsWith("slack")),
     ).toEqual([]);
+  });
+
+  it("registers image generation only when artifact persistence is available", () => {
+    expect(createTools([], {}, ctx())).not.toHaveProperty("imageGenerate");
+
+    const tools = createTools(
+      [],
+      {
+        writeGeneratedArtifacts: async () => [],
+      },
+      ctx(),
+    );
+
+    expect(tools).toHaveProperty("imageGenerate");
   });
 });

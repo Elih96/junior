@@ -141,8 +141,8 @@ Current rules:
 6. Junior removes an automatic `:eyes:` reaction without adding `:white_check_mark:` when the handler stops before completion, including auth-pause, timeout-continuation, cooperative-yield, and fallback-error paths.
 7. When an OAuth/MCP callback resumes an auth-paused request, Junior re-adds `:eyes:` to the original triggering Slack message while resumed processing runs, then replaces it with `:white_check_mark:` only after the resumed final reply is delivered.
 8. Processing-reaction add, remove, and completion calls are best effort. Failures are observable but must not fail the turn or change reply routing.
-9. The automatic processing reaction is runtime-owned. It must not be exposed as model progress, and it must not count as a successful user-requested reaction tool call.
-10. If the assistant explicitly uses the Slack reaction tool to add `:eyes:` to the same inbound message, Junior leaves the reaction in place instead of replacing the automatic acknowledgement.
+9. The automatic processing reaction is runtime-owned. It must not be exposed as model progress, and it must not count as a successful user-requested `addReaction` call.
+10. If the assistant explicitly uses `addReaction` to add `:eyes:` to the same inbound message, Junior leaves the reaction in place instead of replacing the automatic acknowledgement.
 
 ### 6. Primary Reply Contract
 
@@ -153,7 +153,7 @@ Current rules:
 1. Do not create a visible Slack text artifact until the assistant reply is final enough to budget, normalize, and persist.
 2. Deliver visible reply text through finalized thread posts, not through incremental text streaming.
 3. Only mark a text-reply turn successful after the final visible Slack reply has been accepted by Slack. When a successful requested Slack side effect, such as a reaction or in-channel post, fully satisfies the turn and the assistant uses the no-reply marker, that side effect is the visible completion.
-4. If explicit user intent requested a Slack side effect and that successful side effect already satisfied the request, Junior may suppress the thread text reply according to the reply-delivery plan only when the assistant used the no-reply marker.
+4. If the assistant chose a Slack side-effect tool and that successful side effect already satisfied the request, Junior may suppress the thread text reply according to the reply-delivery plan only when the assistant used the no-reply marker or produced no assistant text. Delivery code must rely on tool results and structured markers for this decision, not regex or keyword matching against user or assistant prose.
 5. Persisted assistant conversation state must reflect the same finalized reply content the user saw, not provisional pre-tool text.
 6. Reply text must be rendered through the shared Slack output translator before delivery; raw Slack API writers do not own markdown translation rules.
 7. When Junior adds finalized reply footer metadata, it attaches that metadata as a Slack `context` block on the final text chunk only, while keeping the main reply text as the top-level fallback.
@@ -195,8 +195,9 @@ Current rules:
 
 1. Thread replies attach files inline on the first visible reply post when possible.
 2. File-only replies must still create a visible Slack thread reply carrying the file payload.
-3. If thread text is intentionally suppressed, files may still be delivered through the thread reply planner when the reply contract requires visible artifacts.
-4. Resume and OAuth callback flows must use the same file-delivery semantics as the main runtime path.
+3. `sendMessage` with `target: "thread"` may send text, files, or both into the current Slack thread as a side effect. It does not replace the final assistant reply contract.
+4. If thread text is intentionally suppressed, files may still be delivered through the thread reply planner when the reply contract requires visible artifacts.
+5. Resume and OAuth callback flows must use the same file-delivery semantics as the main runtime path.
 
 ### 10. Image Ingress Contract
 

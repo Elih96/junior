@@ -1,3 +1,4 @@
+import type { FileUpload } from "chat";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@/chat/pi/client", () => ({
@@ -60,6 +61,15 @@ function imagePayload() {
   };
 }
 
+function writeGeneratedArtifacts(files: FileUpload[]) {
+  return files.map((file) => ({
+    bytes: Buffer.isBuffer(file.data) ? file.data.byteLength : 0,
+    filename: file.filename,
+    mimeType: file.mimeType,
+    path: `/tmp/junior/artifacts/${file.filename}`,
+  }));
+}
+
 describe("createImageGenerateTool", () => {
   afterEach(() => {
     delete process.env.AI_GATEWAY_API_KEY;
@@ -78,10 +88,11 @@ describe("createImageGenerateTool", () => {
     vi.stubGlobal("fetch", fetchMock);
     vi.spyOn(Date, "now").mockReturnValue(1_737_000_000_000);
 
-    const uploads: Array<{ filename: string }> = [];
+    const uploads: FileUpload[] = [];
     const tool = createImageGenerateTool({
-      onGeneratedArtifactFiles: (files: Array<{ filename: string }>) => {
-        uploads.push(...files.map((file) => ({ filename: file.filename })));
+      writeGeneratedArtifacts: (files: FileUpload[]) => {
+        uploads.push(...files);
+        return writeGeneratedArtifacts(files);
       },
     } as any);
     if (typeof tool.execute !== "function") {
@@ -104,14 +115,19 @@ describe("createImageGenerateTool", () => {
       model: "google/gemini-3-pro-image",
       image_count: 1,
     });
-    expect(result).toMatchObject({
+    const generated = result as {
+      images: Array<{ attachment_path: string }>;
+    };
+    expect(generated).toMatchObject({
       images: [
         expect.objectContaining({
-          attachment_path: "generated-image-1737000000000-1.png",
+          attachment_path:
+            "/tmp/junior/artifacts/generated-image-1737000000000-1.png",
         }),
       ],
     });
     expect(uploads[0]?.filename).toContain("generated-image-1737000000000-1");
+    expect(uploads[0]?.data).toEqual(Buffer.from("img"));
   });
 
   it("uses AI_IMAGE_MODEL when configured", async () => {
@@ -123,7 +139,9 @@ describe("createImageGenerateTool", () => {
       .mockResolvedValueOnce(createJsonResponse(imagePayload()));
     vi.stubGlobal("fetch", fetchMock);
 
-    const tool = createImageGenerateTool({} as any);
+    const tool = createImageGenerateTool({
+      writeGeneratedArtifacts,
+    } as any);
     if (typeof tool.execute !== "function") {
       throw new Error("imageGenerate execute function missing");
     }
@@ -155,7 +173,9 @@ describe("createImageGenerateTool", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
 
-    const tool = createImageGenerateTool({} as any);
+    const tool = createImageGenerateTool({
+      writeGeneratedArtifacts,
+    } as any);
     if (typeof tool.execute !== "function") {
       throw new Error("imageGenerate execute function missing");
     }
@@ -177,7 +197,7 @@ describe("createImageGenerateTool", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const tool = createImageGenerateTool({
-      onGeneratedArtifactFiles: vi.fn(),
+      writeGeneratedArtifacts,
     } as any);
     const result = await tool.execute!({ prompt: "draw a dog" }, {} as any);
 
@@ -200,7 +220,7 @@ describe("createImageGenerateTool", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const tool = createImageGenerateTool({
-      onGeneratedArtifactFiles: vi.fn(),
+      writeGeneratedArtifacts,
     } as any);
     const result = await tool.execute!({ prompt: "draw a dog" }, {} as any);
 
@@ -221,7 +241,7 @@ describe("createImageGenerateTool", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const tool = createImageGenerateTool({
-      onGeneratedArtifactFiles: vi.fn(),
+      writeGeneratedArtifacts,
     } as any);
     const result = await tool.execute!({ prompt: "draw a dog" }, {} as any);
 
