@@ -16,7 +16,7 @@ vi.mock("@/chat/skills", () => ({
   parseSkillInvocation: vi.fn(),
 }));
 
-const { executeAgentRun } = await import("@/chat/agent-run");
+const { executeAgentRun } = await import("@/chat/agent");
 
 const LOCAL_DESTINATION = {
   platform: "local" as const,
@@ -47,7 +47,7 @@ describe("executeAgentRun error path", () => {
     const outcome = await executeAgentRun({
       input: { messageText: "hello" },
       routing: { destination: LOCAL_DESTINATION, source: LOCAL_SOURCE },
-      policy: {
+      state: {
         sandbox: {
           sandboxId: "sb-123",
           sandboxDependencyProfileHash: "hash-abc",
