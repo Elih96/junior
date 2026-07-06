@@ -121,6 +121,22 @@ function toAgentToolContent(
   return [{ type: "text", text: "ok" }];
 }
 
+function toModelVisibleMcpContent(
+  result: PluginMcpToolCallResult,
+): Array<TextContent | ImageContent> {
+  const content = toAgentToolContent(result);
+  if (content.some((part) => part.type === "image")) {
+    return content;
+  }
+
+  const structured = summarizeStructuredContent(result.structuredContent);
+  if (structured) {
+    return [{ type: "text", text: structured }];
+  }
+
+  return content;
+}
+
 function describeMcpTool(provider: string, tool: PluginMcpListedTool): string {
   const prefix = `[${provider}]`;
   const details = tool.description?.trim() || tool.title?.trim() || tool.name;
@@ -167,11 +183,6 @@ export interface McpToolManagerOptions {
 
 export interface ManagedMcpToolResult {
   content: Array<TextContent | ImageContent>;
-  details: {
-    provider: string;
-    tool: string;
-    rawResult: PluginMcpToolCallResult;
-  };
 }
 
 export interface ManagedMcpToolDescriptor {
@@ -412,12 +423,7 @@ export class McpToolManager {
               }
 
               return {
-                content: toAgentToolContent(result),
-                details: {
-                  provider: plugin.manifest.name,
-                  tool: tool.name,
-                  rawResult: result,
-                },
+                content: toModelVisibleMcpContent(result),
               };
             } catch (error) {
               if (
@@ -427,22 +433,15 @@ export class McpToolManager {
                   error,
                 ))
               ) {
-                const parkedResult = {
-                  toolResult: {
-                    authorizationPending: true,
-                  },
-                };
+                const parkedContent = [
+                  { type: "text" as const, text: "Authorization pending." },
+                ];
+                // Pi turns thrown tool errors into toolResult isError frames.
+                // Once auth pause has been requested, return a placeholder result
+                // and let the aborted turn park cleanly instead of surfacing a
+                // spurious tool failure to the model.
                 return {
-                  // Pi turns thrown tool errors into toolResult isError frames.
-                  // Once auth pause has been requested, return a placeholder result
-                  // and let the aborted turn park cleanly instead of surfacing a
-                  // spurious tool failure to the model.
-                  content: [{ type: "text", text: "Authorization pending." }],
-                  details: {
-                    provider: plugin.manifest.name,
-                    tool: tool.name,
-                    rawResult: parkedResult,
-                  },
+                  content: parkedContent,
                 };
               }
               const errorAttributes = {

@@ -145,17 +145,7 @@ describe("McpToolManager", () => {
     expect(callToolMock).toHaveBeenCalledWith(plugin, "ping", {
       query: "hello",
     });
-    expect(result).toEqual({
-      content: [{ type: "text", text: "pong" }],
-      details: {
-        provider: "demo",
-        tool: "ping",
-        rawResult: {
-          content: [{ type: "text", text: "pong" }],
-          isError: false,
-        },
-      },
-    });
+    expect(result.content).toEqual([{ type: "text", text: "pong" }]);
 
     await manager.close();
     expect(closeMock).toHaveBeenCalledTimes(1);
@@ -183,6 +173,63 @@ describe("McpToolManager", () => {
     await expect(resolvedTools[0]!.execute({})).rejects.toThrow(
       "expected object, received undefined",
     );
+  });
+
+  it("keeps native MCP image content without duplicating text content", async () => {
+    const plugin = buildPlugin();
+    const manager = new McpToolManager([plugin]);
+    await manager.activateProvider("demo");
+    callToolMock.mockResolvedValueOnce({
+      content: [
+        { type: "text", text: "image generated" },
+        { type: "image", data: "base64-image", mimeType: "image/png" },
+      ],
+      isError: false,
+    });
+
+    const result = await manager.getResolvedActiveTools()[0]!.execute({});
+
+    expect(result.content).toEqual([
+      { type: "text", text: "image generated" },
+      {
+        type: "image",
+        data: "base64-image",
+        mimeType: "image/png",
+      },
+    ]);
+
+    await manager.close();
+  });
+
+  it("uses MCP structuredContent as model-visible text when no image content is present", async () => {
+    const plugin = buildPlugin();
+    const manager = new McpToolManager([plugin]);
+    await manager.activateProvider("demo");
+    callToolMock.mockResolvedValueOnce({
+      content: [{ type: "text", text: "raw text" }],
+      structuredContent: {
+        count: 2,
+        values: ["alpha", "beta"],
+      },
+      isError: false,
+    });
+
+    const result = await manager.getResolvedActiveTools()[0]!.execute({});
+
+    expect(result.content).toEqual([
+      {
+        type: "text",
+        text: JSON.stringify(
+          {
+            count: 2,
+            values: ["alpha", "beta"],
+          },
+          null,
+          2,
+        ),
+      },
+    ]);
+    await manager.close();
   });
 
   it("surfaces MCP authorization challenges through the callback hook", async () => {
@@ -221,17 +268,8 @@ describe("McpToolManager", () => {
     );
 
     const resolvedTools = manager.getResolvedActiveTools();
-    await expect(resolvedTools[0]!.execute({})).resolves.toEqual({
+    await expect(resolvedTools[0]!.execute({})).resolves.toMatchObject({
       content: [{ type: "text", text: "Authorization pending." }],
-      details: {
-        provider: "demo",
-        tool: "ping",
-        rawResult: {
-          toolResult: {
-            authorizationPending: true,
-          },
-        },
-      },
     });
     expect(onAuthorizationRequiredMock).toHaveBeenCalledTimes(1);
   });
@@ -399,11 +437,8 @@ describe("McpToolManager", () => {
     const createPagesTool = manager
       .getResolvedActiveTools()
       .find((t) => t.name === "mcp__notion__notion-create-pages");
-    await expect(createPagesTool!.execute({})).resolves.toMatchObject({
-      details: {
-        provider: "notion",
-        tool: "notion-create-pages",
-      },
+    await expect(createPagesTool!.execute({})).resolves.toEqual({
+      content: [{ type: "text", text: "pong" }],
     });
   });
 
