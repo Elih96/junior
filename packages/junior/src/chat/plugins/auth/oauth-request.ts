@@ -94,11 +94,20 @@ export function buildOAuthTokenRequest(input: OAuthTokenRequestInput): {
 export function parseOAuthTokenResponse(
   data: unknown,
   requestedScope?: string,
-  options?: { treatEmptyScopeAsUnreported?: boolean },
+  options?: {
+    treatEmptyScopeAsUnreported?: boolean;
+    currentRefreshToken?: string;
+  },
 ): OAuthTokenResponse {
   const response = requireTokenResponseObject(data);
   const accessToken = requireNonEmptyTokenField(response, "access_token");
-  const refreshToken = requireNonEmptyTokenField(response, "refresh_token");
+  const refreshToken =
+    response.refresh_token === undefined
+      ? options?.currentRefreshToken
+      : requireNonEmptyTokenField(response, "refresh_token");
+  if (!refreshToken) {
+    throw new Error("OAuth token response missing refresh_token");
+  }
   const expiresIn = response.expires_in;
   const refreshTokenExpiresIn = response.refresh_token_expires_in;
   const responseScope = response.scope;
