@@ -134,6 +134,47 @@ describe("persistAuthPauseSessionRecord", () => {
     });
   });
 
+  it("migrates legacy requester turn-session records while reading", async () => {
+    const { getAgentTurnSessionRecord } =
+      await import("@/chat/state/turn-session");
+    const { getStateAdapter } = await import("@/chat/state/adapter");
+    const stateAdapter = getStateAdapter();
+    await stateAdapter.connect();
+    await stateAdapter.set(
+      "junior:agent_turn_session:conversation-legacy:turn-legacy",
+      {
+        version: 1,
+        conversationId: "conversation-legacy",
+        sessionId: "turn-legacy",
+        sliceId: 1,
+        state: "completed",
+        startedAtMs: 1,
+        lastProgressAtMs: 2,
+        updatedAtMs: 3,
+        committedMessageCount: 0,
+        cumulativeDurationMs: 0,
+        requester: {
+          platform: "slack",
+          teamId: "T123",
+          userId: "U123",
+          userName: "alice",
+        },
+      },
+      60_000,
+    );
+
+    await expect(
+      getAgentTurnSessionRecord("conversation-legacy", "turn-legacy"),
+    ).resolves.toMatchObject({
+      actor: {
+        platform: "slack",
+        teamId: "T123",
+        userId: "U123",
+        userName: "alice",
+      },
+    });
+  });
+
   it("records Slack turn activity in SQL conversation metadata", async () => {
     vi.useFakeTimers({ now: 10_000 });
     const { upsertAgentTurnSessionRecord } =
@@ -274,7 +315,7 @@ describe("persistAuthPauseSessionRecord", () => {
       conversationId: "conversation-auth-complete",
       kind: "plugin",
       provider: "sentry",
-      requesterId: "U123",
+      actorId: "U123",
       authorizationId: "auth-1",
       ttlMs: 60_000,
     });
@@ -301,7 +342,7 @@ describe("persistAuthPauseSessionRecord", () => {
     });
   });
 
-  it("persists requester identity when updating an unchanged projection", async () => {
+  it("persists actor identity when updating an unchanged projection", async () => {
     const { getAgentTurnSessionRecord, upsertAgentTurnSessionRecord } =
       await import("@/chat/state/turn-session");
 
@@ -312,20 +353,20 @@ describe("persistAuthPauseSessionRecord", () => {
     } as PiMessage;
 
     await upsertAgentTurnSessionRecord({
-      conversationId: "conversation-requester-empty-commit",
-      sessionId: "turn-requester-empty-commit",
+      conversationId: "conversation-actor-empty-commit",
+      sessionId: "turn-actor-empty-commit",
       sliceId: 1,
       state: "awaiting_resume",
       piMessages: [userMessage],
       resumeReason: "timeout",
     });
     await upsertAgentTurnSessionRecord({
-      conversationId: "conversation-requester-empty-commit",
-      sessionId: "turn-requester-empty-commit",
+      conversationId: "conversation-actor-empty-commit",
+      sessionId: "turn-actor-empty-commit",
       sliceId: 2,
       state: "awaiting_resume",
       piMessages: [userMessage],
-      requester: {
+      actor: {
         platform: "slack",
         teamId: "T123",
         userId: "U123",
@@ -338,11 +379,11 @@ describe("persistAuthPauseSessionRecord", () => {
 
     await expect(
       getAgentTurnSessionRecord(
-        "conversation-requester-empty-commit",
-        "turn-requester-empty-commit",
+        "conversation-actor-empty-commit",
+        "turn-actor-empty-commit",
       ),
     ).resolves.toMatchObject({
-      requester: {
+      actor: {
         platform: "slack",
         teamId: "T123",
         userId: "U123",
@@ -354,13 +395,13 @@ describe("persistAuthPauseSessionRecord", () => {
     });
   });
 
-  it("persists turn transcript scope and requester in the session log", async () => {
+  it("persists turn transcript scope and actor in the session log", async () => {
     const {
       getAgentTurnSessionRecord,
       listAgentTurnSessionSummariesForConversation,
       upsertAgentTurnSessionRecord,
     } = await import("@/chat/state/turn-session");
-    const { loadProjectionWithRequester } =
+    const { loadProjectionWithActor } =
       await import("@/chat/state/session-log");
 
     const previousQuestion: PiMessage = {
@@ -380,7 +421,7 @@ describe("persistAuthPauseSessionRecord", () => {
       sliceId: 1,
       state: "running",
       piMessages: [previousQuestion, currentQuestion],
-      requester: {
+      actor: {
         platform: "slack",
         teamId: "T123",
         userId: "U123",
@@ -399,7 +440,7 @@ describe("persistAuthPauseSessionRecord", () => {
     await expect(
       getAgentTurnSessionRecord("conversation-turn-scope", "turn-scope"),
     ).resolves.toMatchObject({
-      requester: {
+      actor: {
         platform: "slack",
         teamId: "T123",
         userId: "U123",
@@ -409,11 +450,11 @@ describe("persistAuthPauseSessionRecord", () => {
       piMessages: [previousQuestion, currentQuestion],
     });
     await expect(
-      loadProjectionWithRequester({
+      loadProjectionWithActor({
         conversationId: "conversation-turn-scope",
       }),
     ).resolves.toMatchObject({
-      requester: {
+      actor: {
         slackUserId: "U123",
         slackUserName: "alice",
       },
@@ -695,7 +736,7 @@ describe("persistAuthPauseSessionRecord", () => {
         logContext: {
           channelId: "C123",
           modelId: "test-model",
-          requesterId: "U123",
+          actorId: "U123",
           threadId: "slack:C123:1",
         },
       }),
