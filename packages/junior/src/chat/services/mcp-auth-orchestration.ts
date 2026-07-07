@@ -15,6 +15,7 @@ import {
   getMcpAuthSession,
   patchMcpAuthSession,
 } from "@/chat/mcp/auth-store";
+import { formatOAuthAuthorizationMessage } from "@/chat/oauth-authorization-message";
 import { deliverPrivateMessage, formatProviderLabel } from "@/chat/oauth-flow";
 import { canReusePendingAuthLink } from "@/chat/services/pending-auth";
 import {
@@ -170,7 +171,12 @@ export function createMcpAuthOrchestration(
         channelId: authSession.channelId,
         threadTs: authSession.threadTs,
         userId: authSession.userId,
-        text: `<${authSession.authorizationUrl}|Click here to link your ${providerLabel} MCP access>. Once you've authorized, this thread will continue automatically.`,
+        text: formatOAuthAuthorizationMessage({
+          authorizationUrl: authSession.authorizationUrl,
+          label: `Click here to link your ${providerLabel} MCP access`,
+          completionText:
+            "Once you've authorized, this thread will continue automatically.",
+        }),
       });
       if (!delivery) {
         throw new Error(
