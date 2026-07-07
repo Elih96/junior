@@ -54,6 +54,29 @@ describe("parseOAuthTokenResponse", () => {
     expect(result.scope).toBe("gist repo");
   });
 
+  it("keeps the current refresh token when a refresh response omits refresh_token", () => {
+    const result = parseOAuthTokenResponse({ access_token: "access" }, "repo", {
+      fallbackRefreshToken: "current-refresh",
+    });
+    expect(result.refreshToken).toBe("current-refresh");
+    expect(result.accessToken).toBe("access");
+  });
+
+  it("prefers a rotated refresh token over the fallback", () => {
+    const result = parseOAuthTokenResponse(
+      { access_token: "access", refresh_token: "rotated" },
+      "repo",
+      { fallbackRefreshToken: "current-refresh" },
+    );
+    expect(result.refreshToken).toBe("rotated");
+  });
+
+  it("rejects a missing refresh_token when no fallback is provided", () => {
+    expect(() =>
+      parseOAuthTokenResponse({ access_token: "access" }, "repo"),
+    ).toThrow("OAuth token response missing refresh_token");
+  });
+
   it("records refresh token expiry separately from access token expiry", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-06-24T00:00:00Z"));

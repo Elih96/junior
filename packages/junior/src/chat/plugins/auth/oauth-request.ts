@@ -94,11 +94,21 @@ export function buildOAuthTokenRequest(input: OAuthTokenRequestInput): {
 export function parseOAuthTokenResponse(
   data: unknown,
   requestedScope?: string,
-  options?: { treatEmptyScopeAsUnreported?: boolean },
+  options?: {
+    treatEmptyScopeAsUnreported?: boolean;
+    /** RFC 6749 §6: a refresh response that omits refresh_token means "keep the current one". */
+    fallbackRefreshToken?: string;
+  },
 ): OAuthTokenResponse {
   const response = requireTokenResponseObject(data);
   const accessToken = requireNonEmptyTokenField(response, "access_token");
-  const refreshToken = requireNonEmptyTokenField(response, "refresh_token");
+  const refreshToken =
+    typeof response.refresh_token === "string" && response.refresh_token.trim()
+      ? response.refresh_token
+      : options?.fallbackRefreshToken;
+  if (!refreshToken) {
+    throw new Error("OAuth token response missing refresh_token");
+  }
   const expiresIn = response.expires_in;
   const refreshTokenExpiresIn = response.refresh_token_expires_in;
   const responseScope = response.scope;
