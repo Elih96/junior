@@ -182,11 +182,16 @@ describe("context compaction projection reset", () => {
       conversationId: "conversation-1",
       messages: priorMessages,
       ttlMs: 60_000,
-      actor: {
-        slackUserId: "U123",
-        slackUserName: "alice",
-        fullName: "Alice Example",
-        email: "alice@sentry.io",
+      newMessageProvenance: {
+        authority: "instruction",
+        actor: {
+          platform: "slack",
+          teamId: "T123",
+          userId: "U123",
+          userName: "alice",
+          fullName: "Alice Example",
+          email: "alice@sentry.io",
+        },
       },
     });
     const conversation = coerceThreadConversationState({});
@@ -228,6 +233,64 @@ describe("context compaction projection reset", () => {
         email: "alice@sentry.io",
       },
     });
+  });
+
+  it("preserves retained user provenance positionally when authors send identical text", async () => {
+    const { createContextCompactor } =
+      await import("@/chat/services/context-compaction");
+    const { coerceThreadConversationState } =
+      await import("@/chat/state/conversation");
+    const { commitMessages, loadProjectionWithProvenance } =
+      await import("@/chat/state/session-log");
+
+    const alice = {
+      platform: "slack" as const,
+      teamId: "T123",
+      userId: "U_ALICE",
+      userName: "alice",
+    };
+    const bob = {
+      platform: "slack" as const,
+      teamId: "T123",
+      userId: "U_BOB",
+      userName: "bob",
+    };
+    const priorMessages = [user("same request", 1), user("same request", 2)];
+
+    await commitMessages({
+      conversationId: "conversation-identical-retained-text",
+      messages: priorMessages,
+      ttlMs: 60_000,
+      provenance: [
+        { authority: "instruction", actor: alice },
+        { authority: "instruction", actor: bob },
+      ],
+    });
+
+    const compactor = createContextCompactor({
+      completeText: async () =>
+        ({ text: "Both matching requests remain distinct." }) as never,
+      autoCompactionTriggerTokens: 0,
+    });
+
+    const result = await compactor.maybeCompact({
+      conversation: coerceThreadConversationState({}),
+      conversationId: "conversation-identical-retained-text",
+      piMessages: priorMessages,
+    });
+
+    expect(result.compacted).toBe(true);
+    const projection = await loadProjectionWithProvenance({
+      conversationId: "conversation-identical-retained-text",
+    });
+    expect(projection.messages.slice(0, 2).map(textOf)).toEqual([
+      "same request",
+      "same request",
+    ]);
+    expect(projection.provenance.slice(0, 2)).toEqual([
+      { authority: "instruction", actor: alice },
+      { authority: "instruction", actor: bob },
+    ]);
   });
 
   it("summarizes recent history when compaction input is oversized", async () => {

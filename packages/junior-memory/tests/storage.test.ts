@@ -12,8 +12,10 @@ import {
   PluginToolInputError,
   type PluginLogger,
   type PluginModel,
+  type PluginRunTranscriptEntry,
   type PluginState,
   type PluginTaskContext,
+  type Actor,
 } from "@sentry/junior-plugin-api";
 import { Command, CommanderError } from "commander";
 import { eq } from "drizzle-orm";
@@ -220,6 +222,7 @@ function extractionModel(
     content: string;
     expiresAtMs?: number | null;
     kind: "preference" | "procedure" | "knowledge";
+    evidenceMessageIndices?: number[];
   }>,
 ) {
   const calls: Parameters<PluginModel["completeObject"]>[0][] = [];
@@ -230,6 +233,7 @@ function extractionModel(
         canonicalFact: memory.content,
         expiresAtMs: memory.expiresAtMs ?? null,
         kind: memory.kind,
+        evidenceMessageIndices: memory.evidenceMessageIndices ?? [0],
       });
       return {
         object: {
@@ -239,6 +243,50 @@ function extractionModel(
     },
   };
   return { calls, model };
+}
+
+const localInstructionActor: Actor = {
+  platform: "local",
+  userId: "local-user",
+};
+
+/** A run-actor instruction transcript message. */
+function instructionMessage(
+  text: string,
+  actor: Actor = localInstructionActor,
+): PluginRunTranscriptEntry {
+  return {
+    type: "message",
+    role: "user",
+    text,
+    provenance: { authority: "instruction", actor },
+    isRunActor: true,
+  };
+}
+
+/** An attributed public participant instruction that is not run authority. */
+function nonRunActorInstructionMessage(
+  text: string,
+  actor: Actor,
+): PluginRunTranscriptEntry {
+  return {
+    type: "message",
+    role: "user",
+    text,
+    provenance: { authority: "instruction", actor },
+    isRunActor: false,
+  };
+}
+
+/** A non-run-actor ambient context transcript message. */
+function contextMessage(text: string, actor?: Actor): PluginRunTranscriptEntry {
+  return {
+    type: "message",
+    role: "user",
+    text,
+    provenance: { authority: "context", ...(actor ? { actor } : {}) },
+    isRunActor: false,
+  };
 }
 
 const throwingExtractionModel: PluginModel = {
@@ -315,11 +363,7 @@ function completedRun(
       conversationId: runtime.conversationId,
     },
     transcript: [
-      {
-        type: "message",
-        role: "user",
-        text: "I prefer terse PR summaries.",
-      },
+      instructionMessage("I prefer terse PR summaries."),
       {
         type: "message",
         role: "assistant",
@@ -466,6 +510,7 @@ describe("memory plugin storage", () => {
                   "Prefers causes before mitigations in incident writeups.",
                 expiresAtMs: null,
                 kind: "preference",
+                evidenceMessageIndices: [0],
               },
             ],
           },
@@ -495,6 +540,7 @@ describe("memory plugin storage", () => {
         content: "Prefers causes before mitigations in incident writeups.",
         expiresAtMs: null,
         kind: "preference",
+        evidenceMessageIndices: [0],
       },
     ]);
   });
@@ -509,26 +555,31 @@ describe("memory plugin storage", () => {
                 canonicalFact: "Fact one.",
                 expiresAtMs: null,
                 kind: "knowledge",
+                evidenceMessageIndices: [0],
               },
               {
                 canonicalFact: "Fact two.",
                 expiresAtMs: null,
                 kind: "knowledge",
+                evidenceMessageIndices: [0],
               },
               {
                 canonicalFact: "Prefers one.",
                 expiresAtMs: null,
                 kind: "preference",
+                evidenceMessageIndices: [0],
               },
               {
                 canonicalFact: "Prefers two.",
                 expiresAtMs: null,
                 kind: "preference",
+                evidenceMessageIndices: [0],
               },
               {
                 canonicalFact: "Procedure one.",
                 expiresAtMs: null,
                 kind: "procedure",
+                evidenceMessageIndices: [0],
               },
             ],
           },
@@ -560,6 +611,7 @@ describe("memory plugin storage", () => {
               canonicalFact: `Fact ${index + 1}.`,
               expiresAtMs: null,
               kind: "knowledge",
+              evidenceMessageIndices: [0],
             })),
           },
         };
@@ -648,11 +700,9 @@ describe("memory plugin storage", () => {
             async load() {
               return completedRun({
                 transcript: [
-                  {
-                    type: "message",
-                    role: "user",
-                    text: "I prefer QA notes that mention database row checks. Deploy runbooks live in Notion.",
-                  },
+                  instructionMessage(
+                    "I prefer QA notes that mention database row checks. Deploy runbooks live in Notion.",
+                  ),
                   {
                     type: "message",
                     role: "assistant",
@@ -743,6 +793,7 @@ describe("memory plugin storage", () => {
                   canonicalFact: "Prefers TypeScript for automation scripts.",
                   expiresAtMs: null,
                   kind: "preference",
+                  evidenceMessageIndices: [0],
                 },
               ],
             },
@@ -758,11 +809,9 @@ describe("memory plugin storage", () => {
             async load() {
               return completedRun({
                 transcript: [
-                  {
-                    type: "message",
-                    role: "user",
-                    text: "Actually, I prefer TypeScript for automation scripts.",
-                  },
+                  instructionMessage(
+                    "Actually, I prefer TypeScript for automation scripts.",
+                  ),
                   {
                     type: "message",
                     role: "assistant",
@@ -824,6 +873,7 @@ describe("memory plugin storage", () => {
                     "Signup funnel analysis should use the modeled warehouse cohort table.",
                   expiresAtMs: null,
                   kind: "procedure",
+                  evidenceMessageIndices: [1],
                 },
               ],
             },
@@ -893,11 +943,7 @@ describe("memory plugin storage", () => {
         async load() {
           return completedRun({
             transcript: [
-              {
-                type: "message",
-                role: "user",
-                text: "I prefer retry-safe memory extraction.",
-              },
+              instructionMessage("I prefer retry-safe memory extraction."),
             ],
           });
         },
@@ -938,6 +984,59 @@ describe("memory plugin storage", () => {
     }
   }, 15_000);
 
+  it("re-extracts when cached extraction output predates evidence citations", async () => {
+    const fixture = await createMemoryFixture();
+
+    try {
+      const state = createMemoryState();
+      await state.set("memory-extraction:stale-cache-task", [
+        {
+          content: "Stale cache content should not be stored.",
+          expiresAtMs: null,
+          kind: "knowledge",
+        },
+      ]);
+      const { calls, model } = extractionModel([
+        {
+          content: "Fresh extraction content is stored.",
+          kind: "knowledge",
+          evidenceMessageIndices: [0],
+        },
+      ]);
+
+      await processMemorySession(
+        processSessionContext({
+          db: memoryDb(fixture),
+          id: "stale-cache-task",
+          model,
+          run: {
+            async load() {
+              return completedRun({
+                transcript: [
+                  instructionMessage("Fresh extraction content is stored."),
+                ],
+              });
+            },
+          },
+          state,
+        }),
+      );
+
+      expect(calls).toHaveLength(1);
+      await expect(
+        memoryDb(fixture).select().from(memorySqlSchema.juniorMemoryMemories),
+      ).resolves.toEqual([
+        expect.objectContaining({
+          content: "Fresh extraction content is stored.",
+          scope: "conversation",
+          kind: "knowledge",
+        }),
+      ]);
+    } finally {
+      await fixture.close();
+    }
+  }, 15_000);
+
   it("keeps passive extraction idempotency distinct by memory kind", async () => {
     const fixture = await createMemoryFixture();
 
@@ -961,11 +1060,9 @@ describe("memory plugin storage", () => {
             async load() {
               return completedRun({
                 transcript: [
-                  {
-                    type: "message",
-                    role: "user",
-                    text: "Memory classification compatibility is important.",
-                  },
+                  instructionMessage(
+                    "Memory classification compatibility is important.",
+                  ),
                 ],
               });
             },
@@ -1209,11 +1306,7 @@ describe("memory plugin storage", () => {
                   conversationId: runtime.conversationId,
                 },
                 transcript: [
-                  {
-                    type: "message",
-                    role: "user",
-                    text: "I prefer local passive memory QA.",
-                  },
+                  instructionMessage("I prefer local passive memory QA."),
                 ],
                 actor: runtime.actor,
                 source: runtime.source,
@@ -1267,11 +1360,14 @@ describe("memory plugin storage", () => {
                 },
                 actor: undefined,
                 transcript: [
-                  {
-                    type: "message",
-                    role: "user",
-                    text: "For release triage, check deployment markers first.",
-                  },
+                  contextMessage(
+                    "For release triage, check deployment markers first.",
+                    {
+                      platform: "slack",
+                      teamId: "T123",
+                      userId: "U_OTHER",
+                    },
+                  ),
                 ],
                 source: runtime.source,
               });
@@ -1294,6 +1390,257 @@ describe("memory plugin storage", () => {
       await fixture.close();
     }
   });
+
+  it("stores a personal preference when every cited entry is a run-actor instruction", async () => {
+    const fixture = await createMemoryFixture();
+
+    try {
+      const { model } = extractionModel([
+        {
+          kind: "preference",
+          content: "Prefers concise standup notes.",
+          evidenceMessageIndices: [0, 1],
+        },
+      ]);
+
+      await processMemorySession(
+        processSessionContext({
+          db: memoryDb(fixture),
+          model,
+          run: {
+            async load() {
+              return completedRun({
+                transcript: [
+                  instructionMessage("I prefer concise standup notes."),
+                  instructionMessage("Keep standup notes short."),
+                ],
+              });
+            },
+          },
+        }),
+      );
+
+      await expect(
+        memoryDb(fixture).select().from(memorySqlSchema.juniorMemoryMemories),
+      ).resolves.toEqual([
+        expect.objectContaining({
+          content: "Prefers concise standup notes.",
+          scope: "personal",
+          kind: "preference",
+        }),
+      ]);
+    } finally {
+      await fixture.close();
+    }
+  }, 15_000);
+
+  it("drops a passive preference when a cited entry is context authority", async () => {
+    const fixture = await createMemoryFixture();
+
+    try {
+      const { model } = extractionModel([
+        {
+          kind: "preference",
+          content: "Prefers dark mode dashboards.",
+          evidenceMessageIndices: [0],
+        },
+      ]);
+
+      await processMemorySession(
+        processSessionContext({
+          db: memoryDb(fixture),
+          model,
+          run: {
+            async load() {
+              return completedRun({
+                transcript: [
+                  contextMessage("Someone in the channel likes dark mode."),
+                ],
+              });
+            },
+          },
+        }),
+      );
+
+      await expect(
+        memoryDb(fixture).select().from(memorySqlSchema.juniorMemoryMemories),
+      ).resolves.toEqual([]);
+    } finally {
+      await fixture.close();
+    }
+  }, 15_000);
+
+  it("drops a passive preference when a cited entry lacks provenance", async () => {
+    const fixture = await createMemoryFixture();
+
+    try {
+      const { model } = extractionModel([
+        {
+          kind: "preference",
+          content: "Prefers weekly digests.",
+          evidenceMessageIndices: [0],
+        },
+      ]);
+
+      await processMemorySession(
+        processSessionContext({
+          db: memoryDb(fixture),
+          model,
+          run: {
+            async load() {
+              return completedRun({
+                transcript: [
+                  {
+                    type: "message",
+                    role: "user",
+                    text: "I prefer weekly digests.",
+                  },
+                ],
+              });
+            },
+          },
+        }),
+      );
+
+      await expect(
+        memoryDb(fixture).select().from(memorySqlSchema.juniorMemoryMemories),
+      ).resolves.toEqual([]);
+    } finally {
+      await fixture.close();
+    }
+  }, 15_000);
+
+  it("stores conversation knowledge cited to a context-authority message", async () => {
+    const fixture = await createMemoryFixture();
+
+    try {
+      const { model } = extractionModel([
+        {
+          kind: "knowledge",
+          content: "Deploy runbooks live in Notion.",
+          evidenceMessageIndices: [0],
+        },
+      ]);
+
+      await processMemorySession(
+        processSessionContext({
+          db: memoryDb(fixture),
+          model,
+          run: {
+            async load() {
+              return completedRun({
+                transcript: [contextMessage("Deploy runbooks live in Notion.")],
+              });
+            },
+          },
+        }),
+      );
+
+      await expect(
+        memoryDb(fixture).select().from(memorySqlSchema.juniorMemoryMemories),
+      ).resolves.toEqual([
+        expect.objectContaining({
+          content: "Deploy runbooks live in Notion.",
+          scope: "conversation",
+          subjectType: "conversation",
+          kind: "knowledge",
+        }),
+      ]);
+    } finally {
+      await fixture.close();
+    }
+  }, 15_000);
+
+  it("stores conversation knowledge cited to a non-run-actor instruction message", async () => {
+    const fixture = await createMemoryFixture();
+
+    try {
+      const runtime = slackContext({ userId: "U_ALICE" });
+      const bob = {
+        platform: "slack" as const,
+        teamId: runtime.source.teamId,
+        userId: "U_BOB",
+        userName: "bob",
+      };
+      const { model } = extractionModel([
+        {
+          kind: "knowledge",
+          content: "Deploy runbooks live in Notion.",
+          evidenceMessageIndices: [0],
+        },
+      ]);
+
+      await processMemorySession(
+        processSessionContext({
+          db: memoryDb(fixture),
+          model,
+          run: {
+            async load() {
+              return completedRun({
+                actor: runtime.actor,
+                conversationId: runtime.conversationId,
+                destination: slackDestination(runtime),
+                source: runtime.source,
+                transcript: [
+                  nonRunActorInstructionMessage(
+                    "Bob said deploy runbooks live in Notion.",
+                    bob,
+                  ),
+                ],
+              });
+            },
+          },
+        }),
+      );
+
+      await expect(
+        memoryDb(fixture).select().from(memorySqlSchema.juniorMemoryMemories),
+      ).resolves.toEqual([
+        expect.objectContaining({
+          content: "Deploy runbooks live in Notion.",
+          scope: "conversation",
+          subjectType: "conversation",
+          kind: "knowledge",
+        }),
+      ]);
+    } finally {
+      await fixture.close();
+    }
+  }, 15_000);
+
+  it("drops an extracted memory that cites an out-of-range transcript index", async () => {
+    const fixture = await createMemoryFixture();
+
+    try {
+      const { model } = extractionModel([
+        {
+          kind: "preference",
+          content: "Prefers monospaced fonts.",
+          evidenceMessageIndices: [5],
+        },
+      ]);
+
+      await processMemorySession(
+        processSessionContext({
+          db: memoryDb(fixture),
+          model,
+          run: {
+            async load() {
+              return completedRun({
+                transcript: [instructionMessage("I prefer monospaced fonts.")],
+              });
+            },
+          },
+        }),
+      );
+
+      await expect(
+        memoryDb(fixture).select().from(memorySqlSchema.juniorMemoryMemories),
+      ).resolves.toEqual([]);
+    } finally {
+      await fixture.close();
+    }
+  }, 15_000);
 
   it("persists, recalls, and archives visible memories", async () => {
     const fixture = await createMemoryFixture();
