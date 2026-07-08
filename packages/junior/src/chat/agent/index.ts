@@ -34,10 +34,14 @@ import {
 import { McpToolManager } from "@/chat/mcp/tool-manager";
 import type { ThreadArtifactsState } from "@/chat/state/artifacts";
 import {
+  instructionActors,
+  instructionProvenanceFor,
   loadConnectedMcpProviders,
   recordToolExecutionStarted,
   recordMcpProviderConnected,
+  type PiMessageProvenance,
 } from "@/chat/state/session-log";
+import type { Actor } from "@/chat/actor";
 import {
   GEN_AI_PROVIDER_NAME,
   GEN_AI_SERVER_ADDRESS,
@@ -299,6 +303,22 @@ async function executeAgentRunInPrivacyContext(
       currentSliceId,
       existingSessionRecord,
     } = await restoreSessionRecord(routing);
+    // Mirror the committed provenance prefix the turn session record owns. A
+    // fresh run may already include batched parked input committed before the
+    // agent starts, then adds the current actor's turn-start instruction.
+    // Steering appends to this array as it drains, so `run.actors` stays a
+    // pure, live projection of committed instruction provenance.
+    const committedInstructionProvenance: PiMessageProvenance[] =
+      existingSessionRecord?.piMessageProvenance
+        ? [
+            ...existingSessionRecord.piMessageProvenance,
+            ...(resumedFromSessionRecord
+              ? []
+              : [instructionProvenanceFor(actor)]),
+          ]
+        : [instructionProvenanceFor(actor)];
+    const runActors = (): Actor[] =>
+      instructionActors(committedInstructionProvenance);
     canRecordMcpProviders = Boolean(
       sessionRecordState.canUseTurnSession &&
       sessionConversationId &&
@@ -439,6 +459,7 @@ async function executeAgentRunInPrivacyContext(
       abortAgent: () => agent?.abort(),
       activeSkills,
       currentActor: actor,
+      currentActors: runActors,
       artifactStatePatch,
       availableSkills,
       configurationValues,
@@ -524,6 +545,9 @@ async function executeAgentRunInPrivacyContext(
           await runResume.requireDurableInputCheckpoint(
             [...agent!.state.messages, ...piMessages],
             messages.map((message) => message.provenance),
+          );
+          committedInstructionProvenance.push(
+            ...messages.map((message) => message.provenance),
           );
           for (const message of piMessages) {
             agent!.steer(message);

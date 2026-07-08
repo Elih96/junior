@@ -918,6 +918,8 @@ function createSandboxCapability(sandbox: SandboxInstance): PluginSandbox {
 export function createPluginHookRunner(
   input: {
     actor?: Actor;
+    /** Live getter for the run's committed instruction actors; see `multi-actor-runs.md`. */
+    actors?: () => Actor[];
   } = {},
 ): PluginHookRunner {
   const loaded = getPlugins();
@@ -947,6 +949,9 @@ export function createPluginHookRunner(
     async beforeToolExecute(tool) {
       let nextInput = { ...tool.input };
       const env = normalizeEnv(nextInput.env);
+      // Materialize once per tool call so every plugin sees the same
+      // committed-so-far set, even though it can still grow before the next call.
+      const actors = input.actors?.() ?? (input.actor ? [input.actor] : []);
 
       for (const plugin of loaded) {
         const pluginName = plugin.manifest.name;
@@ -959,6 +964,7 @@ export function createPluginHookRunner(
         await hook({
           ...basePluginContext(plugin),
           actor: input.actor,
+          actors,
           tool: {
             name: tool.name,
             input: nextInput,

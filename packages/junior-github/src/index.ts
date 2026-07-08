@@ -306,10 +306,65 @@ function actorEmail(actor?: Actor): string | undefined {
   return /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(email) ? email : undefined;
 }
 
-function isGitCommitCommand(command: string): boolean {
-  return /(?:^|[\s;|&])git(?:\s+(?:-C\s+\S+|-c\s+\S+|--git-dir(?:=\S+|\s+\S+)|--work-tree(?:=\S+|\s+\S+)|--namespace(?:=\S+|\s+\S+)))*\s+commit(?:\s|$)/.test(
-    command,
-  );
+/**
+ * Stable identity key for an actor, matching the distinctness rule
+ * `instructionActors` uses to build `run.actors` (identity ids only, never
+ * display fields) so the run actor is recognized here even under a different
+ * display profile.
+ */
+function actorIdentityKey(actor: Actor): string {
+  if (actor.platform === "system") {
+    return `system ${actor.name}`;
+  }
+  return actor.platform === "slack"
+    ? `slack ${actor.teamId} ${actor.userId}`
+    : `${actor.platform} ${actor.userId}`;
+}
+
+/**
+ * Build `Co-Authored-By` trailers crediting run actors beyond the git author.
+ *
+ * `run.actors` is attribution only (see `multi-actor-runs.md`): a steerer
+ * without a resolvable name and email is silently omitted rather than
+ * denying the commit, and the run actor is excluded because it is already
+ * the git author. Dedupes by resolved email so the same human under two
+ * display profiles, or a steerer matching the author or bot identity, only
+ * ever produces one line.
+ */
+function additionalActorCoauthorTrailers(args: {
+  actors?: Actor[];
+  authorEmail?: string;
+  botEmail: string;
+  runActor?: Actor;
+}): string[] {
+  if (!args.actors || args.actors.length === 0) {
+    return [];
+  }
+  const runActorKey = args.runActor
+    ? actorIdentityKey(args.runActor)
+    : undefined;
+  const seenEmails = new Set<string>([args.botEmail.toLowerCase()]);
+  if (args.authorEmail) {
+    seenEmails.add(args.authorEmail.toLowerCase());
+  }
+  const trailers: string[] = [];
+  for (const candidate of args.actors) {
+    if (runActorKey && actorIdentityKey(candidate) === runActorKey) {
+      continue;
+    }
+    const name = actorName(candidate);
+    const email = actorEmail(candidate);
+    if (!name || !email) {
+      continue;
+    }
+    const emailKey = email.toLowerCase();
+    if (seenEmails.has(emailKey)) {
+      continue;
+    }
+    seenEmails.add(emailKey);
+    trailers.push(`Co-Authored-By: ${name} <${email}>`);
+  }
+  return trailers;
 }
 
 function prepareCommitMsgHook(): string {
@@ -336,12 +391,86 @@ if [ -z "\${JUNIOR_GIT_COAUTHOR_NAME:-}" ] || [ -z "\${JUNIOR_GIT_COAUTHOR_EMAIL
   exit 1
 fi
 
-trailer="Co-Authored-By: $JUNIOR_GIT_COAUTHOR_NAME <$JUNIOR_GIT_COAUTHOR_EMAIL>"
-if grep -Fqx "$trailer" "$message_file"; then
+# Git and GitHub only interpret the final contiguous paragraph as the trailer
+# block, so all missing trailers are collected and appended as one block:
+# actor trailers in order, Junior's agent trailer last.
+desired_trailers=""
+add_trailer() {
+  desired_trailers="$desired_trailers$1"$'\\n'
+}
+
+if [ -n "\${JUNIOR_GIT_ACTOR_COAUTHOR_TRAILERS:-}" ]; then
+  while IFS= read -r actor_trailer; do
+    if [ -n "$actor_trailer" ]; then
+      add_trailer "$actor_trailer"
+    fi
+  done <<< "$JUNIOR_GIT_ACTOR_COAUTHOR_TRAILERS"
+fi
+
+add_trailer "Co-Authored-By: $JUNIOR_GIT_COAUTHOR_NAME <$JUNIOR_GIT_COAUTHOR_EMAIL>"
+
+final_trailer_block=$(awk '
+  { lines[NR] = $0 }
+  END {
+    line = NR
+    while (line > 0 && lines[line] == "") {
+      line--
+    }
+    if (line == 0) {
+      exit 0
+    }
+    start = line
+    while (start > 0 && lines[start] != "") {
+      start--
+    }
+    for (i = start + 1; i <= line; i++) {
+      if (lines[i] !~ /^[[:alnum:]-]+: .+/) {
+        exit 0
+      }
+    }
+    for (i = start + 1; i <= line; i++) {
+      print lines[i]
+    }
+  }
+' "$message_file")
+
+missing_trailers=""
+collect_missing_trailer() {
+  if ! printf '%s\\n' "$final_trailer_block" | grep -Fqx -- "$1"; then
+    missing_trailers="\${missing_trailers}\${1}"$'\\n'
+  fi
+}
+
+while IFS= read -r desired_trailer; do
+  if [ -n "$desired_trailer" ]; then
+    collect_missing_trailer "$desired_trailer"
+  fi
+done <<< "$desired_trailers"
+
+if [ -z "$missing_trailers" ]; then
   exit 0
 fi
 
-printf '\\n%s\\n' "$trailer" >> "$message_file"
+if [ -n "$(tail -c 1 "$message_file")" ]; then
+  printf '\\n' >> "$message_file"
+fi
+
+# When the message already ends with Junior's bot trailer, insert missing
+# actor trailers before it so the bot trailer stays last.
+last_line=$(tail -n 1 "$message_file")
+bot_trailer="Co-Authored-By: $JUNIOR_GIT_COAUTHOR_NAME <$JUNIOR_GIT_COAUTHOR_EMAIL>"
+if [ "$last_line" = "$bot_trailer" ]; then
+  tmp_file=$(mktemp)
+  trap 'rm -f "$tmp_file"' EXIT
+  sed '$d' "$message_file" > "$tmp_file"
+  printf '%s' "$missing_trailers" >> "$tmp_file"
+  printf '%s\\n' "$bot_trailer" >> "$tmp_file"
+  cat "$tmp_file" > "$message_file"
+elif [ -n "$final_trailer_block" ]; then
+  printf '%s' "$missing_trailers" >> "$message_file"
+else
+  printf '\\n%s' "$missing_trailers" >> "$message_file"
+fi
 `;
 }
 
@@ -1510,31 +1639,13 @@ export function githubPlugin(
         if (ctx.tool.name !== "bash") {
           return;
         }
-        const command =
-          typeof ctx.tool.input === "object" &&
-          ctx.tool.input &&
-          "command" in ctx.tool.input
-            ? String(ctx.tool.input.command ?? "")
-            : "";
         const botName = readEnv(botNameEnv);
         const botEmail = readEnv(botEmailEnv);
-        if ((!botName || !botEmail) && isGitCommitCommand(command)) {
-          ctx.decision.deny(
-            `Junior GitHub plugin is misconfigured: host env vars ${botNameEnv} and ${botEmailEnv} are missing. This is an internal deployment configuration error; do not set them in the sandbox.`,
-          );
-          return;
-        }
         if (!botName || !botEmail) {
           return;
         }
         const authorName = actorName(ctx.actor);
         const authorEmail = actorEmail(ctx.actor);
-        if ((!authorName || !authorEmail) && isGitCommitCommand(command)) {
-          ctx.decision.deny(
-            "Junior GitHub plugin could not determine a resolved actor name and email for commit attribution. This is an internal request-context error; do not set author env vars manually.",
-          );
-          return;
-        }
         if (authorName && authorEmail) {
           ctx.env.set("GIT_AUTHOR_NAME", authorName);
           ctx.env.set("GIT_AUTHOR_EMAIL", authorEmail);
@@ -1545,6 +1656,16 @@ export function githubPlugin(
         ctx.env.set("GIT_COMMITTER_EMAIL", botEmail);
         ctx.env.set("JUNIOR_GIT_COAUTHOR_NAME", botName);
         ctx.env.set("JUNIOR_GIT_COAUTHOR_EMAIL", botEmail);
+        const actorTrailers = additionalActorCoauthorTrailers({
+          actors: ctx.actors,
+          authorEmail,
+          botEmail,
+          runActor: ctx.actor,
+        });
+        ctx.env.set(
+          "JUNIOR_GIT_ACTOR_COAUTHOR_TRAILERS",
+          actorTrailers.join("\n"),
+        );
       },
       grantForEgress(ctx) {
         return githubGrantForEgress(ctx);
