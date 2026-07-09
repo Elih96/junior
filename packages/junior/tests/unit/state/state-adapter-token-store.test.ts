@@ -42,6 +42,33 @@ describe("StateAdapterTokenStore", () => {
     );
   });
 
+  it("uses a long-lived ttl when refresh token expiry is missing, ignoring access token expiry", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-24T00:00:00Z"));
+    const adapter = createAdapter();
+    const store = new StateAdapterTokenStore(adapter);
+
+    try {
+      await store.set("U123", "slack", {
+        accessToken: "access-token",
+        refreshToken: "refresh-token",
+        expiresAt: Date.now() + 8 * 60 * 60 * 1000,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(adapter.set).toHaveBeenCalledWith(
+      "oauth-token:U123:slack",
+      {
+        accessToken: "access-token",
+        refreshToken: "refresh-token",
+        expiresAt: new Date("2026-06-24T08:00:00Z").getTime(),
+      },
+      365 * 24 * 60 * 60 * 1000,
+    );
+  });
+
   it("uses refresh token expiry instead of access token expiry for ttl", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-06-24T00:00:00Z"));
