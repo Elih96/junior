@@ -41,8 +41,8 @@ vi.mock("@/chat/logging", async (importOriginal) => ({
 }));
 
 vi.mock("@/chat/pi/client", () => ({
-  GEN_AI_PROVIDER_NAME: "vercel-ai-gateway",
-  GEN_AI_SERVER_ADDRESS: "ai-gateway.vercel.sh",
+  GEN_AI_PROVIDER_NAME: "openrouter",
+  GEN_AI_SERVER_ADDRESS: "openrouter.ai",
   GEN_AI_SERVER_PORT: 443,
   getPiGatewayApiKey: vi.fn(() => undefined),
   resolveGatewayModel: vi.fn((modelId: string) => ({ id: modelId })),
@@ -80,11 +80,11 @@ describe("createAdvisorTool", () => {
       unknown
     >;
     expect(startAttributes).toMatchObject({
-      "gen_ai.provider.name": "vercel-ai-gateway",
+      "gen_ai.provider.name": "openrouter",
       "gen_ai.operation.name": "invoke_agent",
       "gen_ai.request.model": "openai/gpt-5.4",
       "gen_ai.output.type": "text",
-      "server.address": "ai-gateway.vercel.sh",
+      "server.address": "openrouter.ai",
       "server.port": 443,
       "app.conversation.privacy": "private",
       "app.ai.input.message_count": 1,

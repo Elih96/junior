@@ -3,8 +3,9 @@ import { z } from "zod";
 
 const mocks = vi.hoisted(() => ({
   completeSimple: vi.fn(),
-  createGatewayProvider: vi.fn(() => ({
+  createOpenRouter: vi.fn(() => ({
     chat: vi.fn((modelId: string) => ({ modelId })),
+    textEmbeddingModel: vi.fn((modelId: string) => ({ modelId })),
   })),
   generateObject: vi.fn(),
   getEnvApiKey: vi.fn(),
@@ -14,7 +15,9 @@ const mocks = vi.hoisted(() => ({
   registerApiProvider: vi.fn(),
   setSpanAttributes: vi.fn(),
   streamAnthropic: vi.fn(),
+  streamOpenAICompletions: vi.fn(),
   streamSimpleAnthropic: vi.fn(),
+  streamSimpleOpenAICompletions: vi.fn(),
   withSpan: vi.fn(
     async (
       _name: string,
@@ -38,8 +41,13 @@ vi.mock("@earendil-works/pi-ai/anthropic", () => ({
   streamSimpleAnthropic: mocks.streamSimpleAnthropic,
 }));
 
-vi.mock("@ai-sdk/gateway", () => ({
-  createGatewayProvider: mocks.createGatewayProvider,
+vi.mock("@earendil-works/pi-ai/openai-completions", () => ({
+  streamOpenAICompletions: mocks.streamOpenAICompletions,
+  streamSimpleOpenAICompletions: mocks.streamSimpleOpenAICompletions,
+}));
+
+vi.mock("@openrouter/ai-sdk-provider", () => ({
+  createOpenRouter: mocks.createOpenRouter,
 }));
 
 vi.mock("ai", () => ({
@@ -102,7 +110,7 @@ describe("completeText", () => {
         "gen_ai.operation.name": "chat",
         "gen_ai.request.model": "openai/gpt-4o-mini",
         "gen_ai.output.type": "text",
-        "server.address": "ai-gateway.vercel.sh",
+        "server.address": "openrouter.ai",
         "server.port": 443,
         "gen_ai.request.reasoning.level": "low",
       }),
@@ -116,7 +124,7 @@ describe("completeText", () => {
         "gen_ai.operation.name": "chat",
         "gen_ai.request.model": "openai/gpt-4o-mini",
         "gen_ai.output.type": "text",
-        "server.address": "ai-gateway.vercel.sh",
+        "server.address": "openrouter.ai",
         "server.port": 443,
         "gen_ai.output.messages": expect.any(String),
         "gen_ai.response.finish_reasons": ["stop"],
@@ -159,7 +167,7 @@ describe("completeText", () => {
       modelId: "openai/gpt-4o-mini",
     });
     expect(attributes["app.conversation.privacy"]).toBe("private");
-    expect(attributes["server.address"]).toBe("ai-gateway.vercel.sh");
+    expect(attributes["server.address"]).toBe("openrouter.ai");
     expect(attributes["server.port"]).toBe(443);
     expect(attributes["gen_ai.output.type"]).toBe("text");
     expect(attributes["app.ai.input.message_count"]).toBe(1);

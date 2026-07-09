@@ -2,8 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { getGatewayApiKey, getPiGatewayApiKey } from "@/chat/pi/client";
 
 const ORIGINAL_ENV = {
-  AI_GATEWAY_API_KEY: process.env.AI_GATEWAY_API_KEY,
-  VERCEL_OIDC_TOKEN: process.env.VERCEL_OIDC_TOKEN,
+  OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY,
 };
 
 function restoreEnvVar(name: keyof typeof ORIGINAL_ENV): void {
@@ -17,49 +16,36 @@ function restoreEnvVar(name: keyof typeof ORIGINAL_ENV): void {
 
 describe("getGatewayApiKey", () => {
   afterEach(() => {
-    restoreEnvVar("AI_GATEWAY_API_KEY");
-    restoreEnvVar("VERCEL_OIDC_TOKEN");
+    restoreEnvVar("OPENROUTER_API_KEY");
   });
 
-  it("prefers explicit AI gateway API key", () => {
-    process.env.AI_GATEWAY_API_KEY = "  api-key  ";
-    process.env.VERCEL_OIDC_TOKEN = "oidc-token";
+  it("uses the explicit OpenRouter API key", () => {
+    process.env.OPENROUTER_API_KEY = "  api-key  ";
 
     expect(getGatewayApiKey()).toBe("api-key");
   });
 
-  it("uses Vercel OIDC token from env when no API key is configured", () => {
-    delete process.env.AI_GATEWAY_API_KEY;
-    process.env.VERCEL_OIDC_TOKEN = "oidc-token";
+  it("returns undefined when no OpenRouter API key is configured", () => {
+    delete process.env.OPENROUTER_API_KEY;
 
-    expect(getGatewayApiKey()).toBe("oidc-token");
+    expect(getGatewayApiKey()).toBeUndefined();
   });
 });
 
 describe("getPiGatewayApiKey", () => {
   afterEach(() => {
-    restoreEnvVar("AI_GATEWAY_API_KEY");
-    restoreEnvVar("VERCEL_OIDC_TOKEN");
+    restoreEnvVar("OPENROUTER_API_KEY");
   });
 
-  it("prefers explicit API key when both Gateway credentials are present", () => {
-    process.env.AI_GATEWAY_API_KEY = "api-key";
-    process.env.VERCEL_OIDC_TOKEN = "oidc-token";
+  it("returns the OpenRouter API key for Pi Agent auth hooks", () => {
+    process.env.OPENROUTER_API_KEY = "api-key";
 
     expect(getPiGatewayApiKey()).toBe("api-key");
   });
 
-  it("returns the Gateway API key for Pi Agent auth hooks", () => {
-    process.env.AI_GATEWAY_API_KEY = "api-key";
-    delete process.env.VERCEL_OIDC_TOKEN;
+  it("returns undefined when no OpenRouter API key is configured", () => {
+    delete process.env.OPENROUTER_API_KEY;
 
-    expect(getPiGatewayApiKey()).toBe("api-key");
-  });
-
-  it("uses Vercel OIDC when no explicit API key is configured", () => {
-    delete process.env.AI_GATEWAY_API_KEY;
-    process.env.VERCEL_OIDC_TOKEN = "oidc-token";
-
-    expect(getPiGatewayApiKey()).toBe("oidc-token");
+    expect(getPiGatewayApiKey()).toBeUndefined();
   });
 });

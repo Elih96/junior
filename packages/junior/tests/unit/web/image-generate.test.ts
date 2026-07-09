@@ -3,12 +3,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@/chat/pi/client", () => ({
   completeText: vi.fn(),
-  getGatewayApiKey: vi.fn(
-    () => process.env.AI_GATEWAY_API_KEY ?? process.env.VERCEL_OIDC_TOKEN,
-  ),
+  getGatewayApiKey: vi.fn(() => process.env.OPENROUTER_API_KEY),
   resolveGatewayModel: vi.fn((modelId: string) => modelId),
   MISSING_GATEWAY_CREDENTIALS_ERROR:
-    "Missing AI gateway credentials (AI_GATEWAY_API_KEY or VERCEL_OIDC_TOKEN)",
+    "Missing AI gateway credentials (OPENROUTER_API_KEY)",
 }));
 
 vi.mock("@/chat/prompt", () => ({
@@ -72,15 +70,14 @@ function writeGeneratedArtifacts(files: FileUpload[]) {
 
 describe("createImageGenerateTool", () => {
   afterEach(() => {
-    delete process.env.AI_GATEWAY_API_KEY;
-    delete process.env.VERCEL_OIDC_TOKEN;
+    delete process.env.OPENROUTER_API_KEY;
     delete process.env.AI_IMAGE_MODEL;
     vi.unstubAllGlobals();
     vi.clearAllMocks();
   });
 
   it("uses the default image model when AI_IMAGE_MODEL is not set", async () => {
-    process.env.AI_GATEWAY_API_KEY = "test-key";
+    process.env.OPENROUTER_API_KEY = "test-key";
     mockCompleteText.mockResolvedValueOnce({ text: "enriched prompt" } as any);
     const fetchMock = vi
       .fn()
@@ -104,15 +101,15 @@ describe("createImageGenerateTool", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const request = fetchMock.mock.calls[0];
     expect(request).toBeDefined();
-    expect(request[0]).toBe("https://ai-gateway.vercel.sh/v1/chat/completions");
+    expect(request[0]).toBe("https://openrouter.ai/api/v1/chat/completions");
     expect(getRequestBody(fetchMock)).toMatchObject({
-      model: "google/gemini-3-pro-image",
+      model: "google/gemini-3-pro-image-preview",
       messages: [{ role: "user", content: "enriched prompt" }],
       modalities: ["image"],
     });
     expect(result).toMatchObject({
       ok: true,
-      model: "google/gemini-3-pro-image",
+      model: "google/gemini-3-pro-image-preview",
       image_count: 1,
       delivery: expect.stringContaining("no file-send tool"),
     });
@@ -133,7 +130,7 @@ describe("createImageGenerateTool", () => {
   });
 
   it("recommends sendMessage when active file-send support is available", async () => {
-    process.env.AI_GATEWAY_API_KEY = "test-key";
+    process.env.OPENROUTER_API_KEY = "test-key";
     mockCompleteText.mockResolvedValueOnce({ text: "enriched prompt" } as any);
     const fetchMock = vi
       .fn()
@@ -157,7 +154,7 @@ describe("createImageGenerateTool", () => {
   });
 
   it("uses AI_IMAGE_MODEL when configured", async () => {
-    process.env.AI_GATEWAY_API_KEY = "test-key";
+    process.env.OPENROUTER_API_KEY = "test-key";
     process.env.AI_IMAGE_MODEL = "openai/dall-e-3";
     mockCompleteText.mockResolvedValueOnce({ text: "enriched cat" } as any);
     const fetchMock = vi
@@ -183,8 +180,8 @@ describe("createImageGenerateTool", () => {
   });
 
   it("returns an actionable error when model is not image-capable", async () => {
-    process.env.AI_GATEWAY_API_KEY = "test-key";
-    process.env.AI_IMAGE_MODEL = "google/gemini-3-pro-image";
+    process.env.OPENROUTER_API_KEY = "test-key";
+    process.env.AI_IMAGE_MODEL = "google/gemini-3-pro-image-preview";
     mockCompleteText.mockResolvedValueOnce({ text: "enriched prompt" } as any);
     const fetchMock = vi.fn().mockResolvedValueOnce(
       createErrorResponse(
@@ -192,7 +189,7 @@ describe("createImageGenerateTool", () => {
         JSON.stringify({
           error: {
             message:
-              "Model 'google/gemini-3-pro-image' is a language model, not an image model. Use the language generation API instead.",
+              "Model 'google/gemini-3-pro-image-preview' is a language model, not an image model. Use the language generation API instead.",
           },
         }),
       ),
@@ -208,12 +205,12 @@ describe("createImageGenerateTool", () => {
     await expect(
       tool.execute({ prompt: "person in a forest" }, {} as any),
     ).rejects.toThrow(
-      'configured model "google/gemini-3-pro-image" is not an image generation model',
+      'configured model "google/gemini-3-pro-image-preview" is not an image generation model',
     );
   });
 
   it("forwards enriched prompt to image API when enrichment succeeds", async () => {
-    process.env.AI_GATEWAY_API_KEY = "test-key";
+    process.env.OPENROUTER_API_KEY = "test-key";
     mockCompleteText.mockResolvedValueOnce({
       text: "a dark, high-contrast dog with glowing eyes",
     } as any);
@@ -238,7 +235,7 @@ describe("createImageGenerateTool", () => {
   });
 
   it("falls back to raw prompt when enrichment returns empty text", async () => {
-    process.env.AI_GATEWAY_API_KEY = "test-key";
+    process.env.OPENROUTER_API_KEY = "test-key";
     mockCompleteText.mockResolvedValueOnce({ text: "   " } as any);
     const fetchMock = vi
       .fn()
@@ -259,7 +256,7 @@ describe("createImageGenerateTool", () => {
   });
 
   it("falls back to raw prompt when enrichment fails", async () => {
-    process.env.AI_GATEWAY_API_KEY = "test-key";
+    process.env.OPENROUTER_API_KEY = "test-key";
     mockCompleteText.mockRejectedValueOnce(new Error("LLM unavailable"));
     const fetchMock = vi
       .fn()

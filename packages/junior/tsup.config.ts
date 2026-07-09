@@ -30,12 +30,12 @@ export default defineConfig({
     "hono",
     "@sentry/node",
     // All runtime npm dependencies stay external
-    "@ai-sdk/gateway",
     "@chat-adapter/slack",
     "@chat-adapter/state-memory",
     "@chat-adapter/state-redis",
     "@earendil-works/pi-agent-core",
     "@earendil-works/pi-ai",
+    "@openrouter/ai-sdk-provider",
     "@sinclair/typebox",
     "@slack/web-api",
     "@vercel/functions",

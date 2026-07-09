@@ -55,6 +55,7 @@
     "build": "tsup && tsc -p tsconfig.build.json --emitDeclarationOnly",
     "lint": "oxlint --config .oxlintrc.json --deny-warnings src tests scripts bin tsup.config.ts && depcruise --config .dependency-cruiser.mjs src/chat",
     "lint:fix": "oxlint --config .oxlintrc.json --deny-warnings --fix src tests scripts bin tsup.config.ts",
+    "openrouter:smoke": "tsx scripts/openrouter-smoke.ts",
     "test": "vitest run --maxWorkers=4",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
@@ -62,7 +63,6 @@
     "test:coverage": "vitest run --maxWorkers=4 --coverage --reporter=default --reporter=junit --outputFile.junit=coverage/results.junit.xml"
   },
   "dependencies": {
-    "@ai-sdk/gateway": "^3.0.119",
     "@chat-adapter/slack": "4.29.0",
     "@chat-adapter/state-memory": "4.29.0",
     "@chat-adapter/state-redis": "4.29.0",
@@ -71,6 +71,7 @@
     "@logtape/logtape": "^2.1.1",
     "@modelcontextprotocol/sdk": "1.29.0",
     "@neondatabase/serverless": "^1.1.0",
+    "@openrouter/ai-sdk-provider": "^2.9.1",
     "@sentry/junior-plugin-api": "workspace:*",
     "@sentry/node": "catalog:",
     "@sinclair/typebox": "^0.34.49",

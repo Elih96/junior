@@ -11,7 +11,7 @@ import {
 import { JUNIOR_PERSONALITY } from "@/chat/prompt";
 import { logInfo, logWarn } from "@/chat/logging";
 
-const DEFAULT_IMAGE_MODEL = "google/gemini-3-pro-image";
+const DEFAULT_IMAGE_MODEL = "google/gemini-3-pro-image-preview";
 
 const imageGenerateOutputSchema = juniorToolResultSchema
   .extend({
@@ -114,7 +114,7 @@ export function createImageGenerateTool(
     outputSchema: imageGenerateOutputSchema,
     execute: async ({ prompt }) => {
       const fetchImpl = deps.fetch ?? fetch;
-      // Raw fetch does not resolve AI Gateway env auth on its own, so this
+      // Raw fetch does not resolve OpenRouter env auth on its own, so this
       // path has to turn the documented env credential into a bearer token.
       const apiKey = getGatewayApiKey();
       if (!apiKey) {
@@ -123,7 +123,7 @@ export function createImageGenerateTool(
       const model = process.env.AI_IMAGE_MODEL ?? DEFAULT_IMAGE_MODEL;
       const enrichedPrompt = await enrichImagePrompt(prompt);
       const response = await fetchImpl(
-        "https://ai-gateway.vercel.sh/v1/chat/completions",
+        "https://openrouter.ai/api/v1/chat/completions",
         {
           method: "POST",
           headers: {

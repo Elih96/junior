@@ -7,12 +7,16 @@ import {
   type Model,
   type ThinkingLevel,
 } from "@earendil-works/pi-ai";
-import { createGatewayProvider } from "@ai-sdk/gateway";
+import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import { embedMany, generateObject } from "ai";
 import {
   streamAnthropic,
   streamSimpleAnthropic,
 } from "@earendil-works/pi-ai/anthropic";
+import {
+  streamOpenAICompletions,
+  streamSimpleOpenAICompletions,
+} from "@earendil-works/pi-ai/openai-completions";
 
 // Directly register the anthropic provider at import time. pi-ai's built-in
 // registration relies on opaque dynamic import() calls that break under
@@ -22,6 +26,11 @@ registerApiProvider({
   api: "anthropic-messages",
   stream: streamAnthropic,
   streamSimple: streamSimpleAnthropic,
+});
+registerApiProvider({
+  api: "openai-completions",
+  stream: streamOpenAICompletions,
+  streamSimple: streamSimpleOpenAICompletions,
 });
 import type { ZodTypeAny, z } from "zod";
 import {
@@ -50,24 +59,21 @@ import {
   isProviderRetryError,
 } from "@/chat/services/provider-retry";
 
-const GATEWAY_PROVIDER = "vercel-ai-gateway" as const;
+const GATEWAY_PROVIDER = "openrouter" as const;
 export const GEN_AI_PROVIDER_NAME = GATEWAY_PROVIDER;
-export const GEN_AI_SERVER_ADDRESS = "ai-gateway.vercel.sh";
+export const GEN_AI_SERVER_ADDRESS = "openrouter.ai";
 export const GEN_AI_SERVER_PORT = 443;
 const GEN_AI_OPERATION_CHAT = "chat" as const;
 const GEN_AI_OPERATION_EMBEDDINGS = "embeddings" as const;
 export const MISSING_GATEWAY_CREDENTIALS_ERROR =
-  "Missing AI gateway credentials (AI_GATEWAY_API_KEY or VERCEL_OIDC_TOKEN)";
+  "Missing AI gateway credentials (OPENROUTER_API_KEY)";
 
 /**
- * Resolve the documented AI Gateway env credentials for the paths that need
+ * Resolve the documented OpenRouter env credentials for paths that need
  * the bearer token string directly.
  */
 export function getGatewayApiKey(): string | undefined {
-  return (
-    toOptionalTrimmed(getEnvApiKey("vercel-ai-gateway")) ??
-    toOptionalTrimmed(process.env.VERCEL_OIDC_TOKEN)
-  );
+  return toOptionalTrimmed(getEnvApiKey(GATEWAY_PROVIDER));
 }
 
 /** Return the Gateway credential shape expected by Pi Agent getApiKey hooks. */
@@ -114,11 +120,7 @@ export async function completeText(params: {
 }) {
   const model = resolveGatewayModel(params.modelId);
   const apiKey = getPiGatewayApiKey();
-  const authMode = toOptionalTrimmed(process.env.AI_GATEWAY_API_KEY)
-    ? "api_key"
-    : toOptionalTrimmed(process.env.VERCEL_OIDC_TOKEN)
-      ? "oidc"
-      : "api_key";
+  const authMode = "api_key";
   // Identifier metadata can only narrow toward private; the turn-scoped
   // privacy context carries the source-confirmed classification.
   const privacy =
@@ -293,7 +295,7 @@ export async function completeObject<TSchema extends ZodTypeAny>(params: {
   metadata?: Record<string, unknown>;
 }): Promise<{ object: z.infer<TSchema> }> {
   const apiKey = getGatewayApiKey();
-  const provider = createGatewayProvider(apiKey ? { apiKey } : {});
+  const provider = createOpenRouter(apiKey ? { apiKey } : {});
   try {
     const result = await withSpan(
       `${GEN_AI_OPERATION_CHAT} ${params.modelId}`,
@@ -359,7 +361,7 @@ export async function completeObject<TSchema extends ZodTypeAny>(params: {
   }
 }
 
-/** Generate text embeddings through the host-owned AI Gateway provider. */
+/** Generate text embeddings through the host-owned OpenRouter provider. */
 export async function embedTexts(params: {
   modelId: string;
   texts: string[];
@@ -376,7 +378,7 @@ export async function embedTexts(params: {
     throw new Error("Embedding text is required.");
   }
   const apiKey = getGatewayApiKey();
-  const provider = createGatewayProvider(apiKey ? { apiKey } : {});
+  const provider = createOpenRouter(apiKey ? { apiKey } : {});
   try {
     const result = await withSpan(
       `${GEN_AI_OPERATION_EMBEDDINGS} ${params.modelId}`,
@@ -384,7 +386,7 @@ export async function embedTexts(params: {
       logContextFromMetadata(params.modelId, params.metadata),
       async () =>
         await embedMany({
-          model: provider.embeddingModel(params.modelId),
+          model: provider.textEmbeddingModel(params.modelId),
           values: texts,
           ...(params.signal !== undefined
             ? { abortSignal: params.signal }
