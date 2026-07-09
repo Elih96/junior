@@ -3,16 +3,14 @@ import {
   getEnvApiKey,
   getModels,
   registerApiProvider,
+  streamAnthropic,
+  streamSimpleAnthropic,
   type Message,
   type Model,
   type ThinkingLevel,
-} from "@earendil-works/pi-ai";
+} from "@/chat/pi/sdk";
 import { createGatewayProvider } from "@ai-sdk/gateway";
 import { embedMany, generateObject } from "ai";
-import {
-  streamAnthropic,
-  streamSimpleAnthropic,
-} from "@earendil-works/pi-ai/anthropic";
 
 // Directly register the anthropic provider at import time. pi-ai's built-in
 // registration relies on opaque dynamic import() calls that break under
