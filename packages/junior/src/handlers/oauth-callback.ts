@@ -20,7 +20,7 @@ import {
   resumeSlackTurn,
 } from "@/chat/runtime/slack-resume";
 import { persistAuthPauseTurnState } from "@/chat/runtime/auth-pause-state";
-import { logException, logInfo } from "@/chat/logging";
+import { logException, logInfo, logWarn } from "@/chat/logging";
 import { htmlCallbackResponse } from "@/handlers/oauth-html";
 import {
   getChannelConfigurationServiceById,
@@ -738,6 +738,23 @@ export async function GET(
         }
       } catch (error) {
         if (error instanceof ResumeTurnBusyError) {
+          logWarn(
+            "oauth_callback_resume_busy",
+            {
+              ...(stored.resumeConversationId && {
+                conversationId: stored.resumeConversationId,
+              }),
+              ...(stored.userId && { actorId: stored.userId }),
+              ...(stored.channelId && { channelId: stored.channelId }),
+            },
+            {
+              "app.credential.provider": stored.provider,
+              ...(stored.resumeSessionId && {
+                "app.ai.session_id": stored.resumeSessionId,
+              }),
+            },
+            "OAuth callback resume was busy; user must send another message to continue",
+          );
           return;
         }
         throw error;

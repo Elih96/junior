@@ -13,7 +13,6 @@
 import { THREAD_STATE_TTL_MS } from "chat";
 import type { Destination, Source } from "@sentry/junior-plugin-api";
 import type { ChannelConfigurationService } from "@/chat/configuration/types";
-import { unlinkProvider } from "@/chat/credentials/unlink-provider";
 import type { UserTokenStore } from "@/chat/credentials/user-token-store";
 import { formatProviderLabel, startOAuthFlow } from "@/chat/oauth-flow";
 import { canReusePendingAuthLink } from "@/chat/services/pending-auth";
@@ -134,7 +133,6 @@ export function createPluginAuthOrchestration(
     provider: string,
     options?: {
       scope?: string;
-      unlinkExistingProvider?: boolean;
     },
   ): Promise<never> => {
     if (pendingPause) {
@@ -189,14 +187,6 @@ export function createPluginAuthOrchestration(
           `I need to connect your ${providerLabel} account first, but I wasn't able to send you a private authorization link. Please send me a direct message and try again.`,
         );
       }
-    }
-
-    if (
-      options?.unlinkExistingProvider &&
-      input.actorId &&
-      input.userTokenStore
-    ) {
-      await unlinkProvider(input.actorId, provider, input.userTokenStore);
     }
 
     if (input.sessionId && recordPendingAuth) {
@@ -281,10 +271,16 @@ export function createPluginAuthOrchestration(
         );
       }
 
-      await startAuthorizationPause(authorization.provider, {
-        ...(authorization.scope ? { scope: authorization.scope } : {}),
-        unlinkExistingProvider: true,
-      });
+      // Do not unlink here. This signal can represent either missing credentials
+      // before lease issuance or an upstream 401 after credential injection. In
+      // the latter case the token may be valid and the 401 caused by a
+      // scope/org/permission mismatch unrelated to the stored credential.
+      // OAuth completion overwrites the stored token via userTokenStore.set(),
+      // so proactive deletion is unnecessary and destroys a working connection.
+      await startAuthorizationPause(
+        authorization.provider,
+        authorization.scope ? { scope: authorization.scope } : undefined,
+      );
     },
     getPendingPause: () => pendingPause,
   };
