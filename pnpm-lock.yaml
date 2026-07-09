@@ -160,11 +160,11 @@ importers:
         specifier: 4.29.0
         version: 4.29.0(ai@6.0.190(zod@4.4.3))(zod@4.4.3)
       "@earendil-works/pi-agent-core":
-        specifier: 0.74.2
-        version: 0.74.2(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(zod@4.4.3)
+        specifier: 0.79.10
+        version: 0.79.10(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(zod@4.4.3)
       "@earendil-works/pi-ai":
-        specifier: 0.74.2
-        version: 0.74.2(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(zod@4.4.3)
+        specifier: 0.79.10
+        version: 0.79.10(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(zod@4.4.3)
       "@logtape/logtape":
         specifier: ^2.1.1
         version: 2.1.1
@@ -440,7 +440,7 @@ importers:
         version: 6.0.3
       vitest:
         specifier: ^4.1.7
-        version: 4.1.7(@types/node@25.9.1)(@vitest/coverage-v8@4.1.7)(jiti@2.7.0)(msw@2.14.6(@types/node@25.9.1)(typescript@6.0.3))(tsx@4.22.3)(yaml@2.9.0)
+        version: 4.1.7(@types/node@25.9.1)(msw@2.14.6(@types/node@25.9.1)(typescript@6.0.3))(tsx@4.22.3)
 
   packages/junior-hex: {}
 
@@ -1184,19 +1184,19 @@ packages:
         integrity: sha512-z33Il7l5dKjUgGULTqBsQBQwckHh5AbIuxhdsIxDDiZAzBOrZO6q9ogcWC65kU382AfynTfgNumVcNIjuIua6w==,
       }
 
-  "@earendil-works/pi-agent-core@0.74.2":
+  "@earendil-works/pi-agent-core@0.79.10":
     resolution:
       {
-        integrity: sha512-RPlB3bi2z+VQK0HRhBK73kXOQI1fFmRgWzzT6+ihB7JYfh29jb7eAfYvpx8rlf248gUAYaLQ8JYa+43l09rPmQ==,
+        integrity: sha512-XKxgdjhcPuyjrthCOFSgfzT3xZ1uBrJ1IMVDxci1to6hIN6BIg9J5iY8q0pGXK1DLgATLP23da+1UyZLwA360Q==,
       }
-    engines: { node: ">=20.0.0" }
+    engines: { node: ">=22.19.0" }
 
-  "@earendil-works/pi-ai@0.74.2":
+  "@earendil-works/pi-ai@0.79.10":
     resolution:
       {
-        integrity: sha512-ukQBHGDm20k9ZUS2cGjNN9vDJp/48r35xmvgSx3paCaC06r2N/PLuRZoJmwQ1ZM7f8T3072odv9YPWn+77w0LA==,
+        integrity: sha512-9jR23tOl0BIUdQMn70Gr72xYBpM7Xgl9Lyv7gAnU1USfkNRuYG/f/edLl+n/Dp/RafDW3JI4DF7y/GhgkORuew==,
       }
-    engines: { node: ">=20.0.0" }
+    engines: { node: ">=22.19.0" }
     hasBin: true
 
   "@edge-runtime/format@2.2.1":
@@ -2906,11 +2906,16 @@ packages:
         integrity: sha512-f6ZO2ifpwAQIpzGWaBQT2TXxPv6z3RBzQKpVftEWN78Vl/YweF1uwussDx8ECAXVtr3Rs89fKyG9YlzUs9DyGQ==,
       }
 
-  "@mistralai/mistralai@2.2.1":
+  "@mistralai/mistralai@2.2.6":
     resolution:
       {
-        integrity: sha512-uKU8CZmL2RzYKmplsU01hii4p3pe4HqJefpWNRWXm1Tcm0Sm4xXfwSLIy4k7ZCPlbETCGcp69E7hZs+WOJ5itQ==,
+        integrity: sha512-W8pX7zHxjJvMIpw8JMxeJEleapXX0Q9NPszdNzqkM3MIEoIGPObdodujj+WHteXEvGfaP/AMwlNyRfEzSY6dQQ==,
       }
+    peerDependencies:
+      "@opentelemetry/api": ^1.9.0
+    peerDependenciesMeta:
+      "@opentelemetry/api":
+        optional: true
 
   "@mixmark-io/domino@2.2.0":
     resolution:
@@ -3044,6 +3049,13 @@ packages:
     resolution:
       {
         integrity: sha512-40lSJeqYO8Uz2Yj7u94/SJWE/wONa7rmMKjI1ZcIjgf3MHNHv1OZUCrCETGuaRF62d5pQD1wKIW+L4lmSMTzZA==,
+      }
+    engines: { node: ">=8.0.0" }
+
+  "@opentelemetry/api@1.9.0":
+    resolution:
+      {
+        integrity: sha512-3giAOQvZiH5F9bMlMiv8+GSPMeqg0dbaeo58/0SlA9sxSqZhnUtxzX9/2FzyhS9sWQf5S0GJE0AKBrFqjpeYcg==,
       }
     engines: { node: ">=8.0.0" }
 
@@ -4818,6 +4830,13 @@ packages:
         integrity: sha512-GGP3O9QFD24uGeAXYUjwSTXARoqpZykHadOmA8G5vfJPK0/DC67qa//0qvqrJzL1xc8WQWX7/yc7fwudjPHPhA==,
       }
     engines: { node: ">=14.0.0" }
+
+  "@smithy/node-http-handler@4.7.3":
+    resolution:
+      {
+        integrity: sha512-/jPhevcTFPMVl6KNjbaI47iOg1zxC7IsnX4PQDGVZKMFceOXtB8IEYaB7a9VvkP/3oC60WzTeKocvSI7vLT0vA==,
+      }
+    engines: { node: ">=18.0.0" }
 
   "@smithy/node-http-handler@4.7.4":
     resolution:
@@ -11785,6 +11804,12 @@ packages:
         integrity: sha512-Zz+aZWSj8LE6zoxD+xrjh4VfkIG8Ya6LvYkZqtUQGJPZjYl53ypCaUwWqo7eI0x66KBGeRo+mlBEkMSeSZ38Nw==,
       }
 
+  undici-types@7.24.6:
+    resolution:
+      {
+        integrity: sha512-WRNW+sJgj5OBN4/0JpHFqtqzhpbnV0GuB+OozA9gCL7a993SmU+1JBZCzLNxYsbMfIeDL+lTsphD5jN5N+n0zg==,
+      }
+
   undici@5.28.4:
     resolution:
       {
@@ -13266,9 +13291,9 @@ snapshots:
 
   "@drizzle-team/brocli@0.10.2": {}
 
-  "@earendil-works/pi-agent-core@0.74.2(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(zod@4.4.3)":
+  "@earendil-works/pi-agent-core@0.79.10(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(zod@4.4.3)":
     dependencies:
-      "@earendil-works/pi-ai": 0.74.2(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(zod@4.4.3)
+      "@earendil-works/pi-ai": 0.79.10(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(zod@4.4.3)
       ignore: 7.0.5
       typebox: 1.1.38
       yaml: 2.9.0
@@ -13280,12 +13305,14 @@ snapshots:
       - ws
       - zod
 
-  "@earendil-works/pi-ai@0.74.2(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(zod@4.4.3)":
+  "@earendil-works/pi-ai@0.79.10(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(zod@4.4.3)":
     dependencies:
       "@anthropic-ai/sdk": 0.91.1(zod@4.4.3)
       "@aws-sdk/client-bedrock-runtime": 3.1048.0
       "@google/genai": 1.52.0(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))
-      "@mistralai/mistralai": 2.2.1
+      "@mistralai/mistralai": 2.2.6(@opentelemetry/api@1.9.0)
+      "@opentelemetry/api": 1.9.0
+      "@smithy/node-http-handler": 4.7.3
       http-proxy-agent: 7.0.2
       https-proxy-agent: 7.0.6
       openai: 6.26.0(zod@4.4.3)
@@ -14019,11 +14046,14 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  "@mistralai/mistralai@2.2.1":
+  "@mistralai/mistralai@2.2.6(@opentelemetry/api@1.9.0)":
     dependencies:
+      "@opentelemetry/semantic-conventions": 1.41.1
       ws: 8.20.1
       zod: 4.4.3
       zod-to-json-schema: 3.25.2(zod@4.4.3)
+    optionalDependencies:
+      "@opentelemetry/api": 1.9.0
     transitivePeerDependencies:
       - bufferutil
       - utf-8-validate
@@ -14116,6 +14146,8 @@ snapshots:
   "@opentelemetry/api-logs@0.214.0":
     dependencies:
       "@opentelemetry/api": 1.9.1
+
+  "@opentelemetry/api@1.9.0": {}
 
   "@opentelemetry/api@1.9.1": {}
 
@@ -15147,8 +15179,8 @@ snapshots:
       "@chat-adapter/slack": 4.29.0(ai@6.0.190(zod@4.4.3))(zod@4.4.3)
       "@chat-adapter/state-memory": 4.29.0(ai@6.0.190(zod@4.4.3))(zod@4.4.3)
       "@chat-adapter/state-redis": 4.29.0(ai@6.0.190(zod@4.4.3))(zod@4.4.3)
-      "@earendil-works/pi-agent-core": 0.74.2(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(zod@4.4.3)
-      "@earendil-works/pi-ai": 0.74.2(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(zod@4.4.3)
+      "@earendil-works/pi-agent-core": 0.79.10(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(zod@4.4.3)
+      "@earendil-works/pi-ai": 0.79.10(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(zod@4.4.3)
       "@logtape/logtape": 2.1.1
       "@modelcontextprotocol/sdk": 1.29.0(zod@4.4.3)
       "@neondatabase/serverless": 1.1.0
@@ -15445,6 +15477,12 @@ snapshots:
     dependencies:
       tslib: 2.8.1
 
+  "@smithy/node-http-handler@4.7.3":
+    dependencies:
+      "@smithy/core": 3.24.4
+      "@smithy/types": 4.14.2
+      tslib: 2.8.1
+
   "@smithy/node-http-handler@4.7.4":
     dependencies:
       "@smithy/core": 3.24.4
@@ -15657,13 +15695,19 @@ snapshots:
     dependencies:
       undici-types: 7.16.0
 
-  "@types/node@25.9.1": {}
+  "@types/node@25.9.1":
+    dependencies:
+      undici-types: 7.24.6
 
   "@types/pg-pool@2.0.7":
     dependencies:
       "@types/pg": 8.15.6
 
-  "@types/pg@8.15.6": {}
+  "@types/pg@8.15.6":
+    dependencies:
+      "@types/node": 25.9.1
+      pg-protocol: 1.14.0
+      pg-types: 2.2.0
 
   "@types/react-dom@19.2.3(@types/react@19.2.15)":
     dependencies:
@@ -16075,6 +16119,15 @@ snapshots:
     optionalDependencies:
       msw: 2.14.6(@types/node@25.9.1)(typescript@6.0.3)
       vite: 8.0.14(@types/node@25.9.1)(jiti@2.7.0)(tsx@4.22.3)(yaml@2.9.0)
+
+  "@vitest/mocker@4.1.7(msw@2.14.6(@types/node@25.9.1)(typescript@6.0.3))(vite@8.0.14(@types/node@25.9.1)(tsx@4.22.3))":
+    dependencies:
+      "@vitest/spy": 4.1.7
+      estree-walker: 3.0.3
+      magic-string: 0.30.21
+    optionalDependencies:
+      msw: 2.14.6(@types/node@25.9.1)(typescript@6.0.3)
+      vite: 8.0.14(@types/node@25.9.1)(tsx@4.22.3)
 
   "@vitest/mocker@4.1.7(vite@8.0.14(@types/node@25.9.1)(tsx@4.22.3))":
     dependencies:
@@ -20542,6 +20595,8 @@ snapshots:
 
   undici-types@7.16.0: {}
 
+  undici-types@7.24.6: {}
+
   undici@5.28.4:
     dependencies:
       "@fastify/busboy": 2.1.1
@@ -20854,6 +20909,44 @@ snapshots:
     optionalDependencies:
       "@types/node": 25.9.1
       "@vitest/coverage-v8": 4.1.7(vitest@4.1.7)
+    transitivePeerDependencies:
+      - "@vitejs/devtools"
+      - esbuild
+      - jiti
+      - less
+      - msw
+      - sass
+      - sass-embedded
+      - stylus
+      - sugarss
+      - terser
+      - tsx
+      - yaml
+
+  vitest@4.1.7(@types/node@25.9.1)(msw@2.14.6(@types/node@25.9.1)(typescript@6.0.3))(tsx@4.22.3):
+    dependencies:
+      "@vitest/expect": 4.1.7
+      "@vitest/mocker": 4.1.7(msw@2.14.6(@types/node@25.9.1)(typescript@6.0.3))(vite@8.0.14(@types/node@25.9.1)(tsx@4.22.3))
+      "@vitest/pretty-format": 4.1.7
+      "@vitest/runner": 4.1.7
+      "@vitest/snapshot": 4.1.7
+      "@vitest/spy": 4.1.7
+      "@vitest/utils": 4.1.7
+      es-module-lexer: 2.1.0
+      expect-type: 1.3.0
+      magic-string: 0.30.21
+      obug: 2.1.1
+      pathe: 2.0.3
+      picomatch: 4.0.4
+      std-env: 4.1.0
+      tinybench: 2.9.0
+      tinyexec: 1.1.2
+      tinyglobby: 0.2.16
+      tinyrainbow: 3.1.0
+      vite: 8.0.14(@types/node@25.9.1)(tsx@4.22.3)
+      why-is-node-running: 2.3.0
+    optionalDependencies:
+      "@types/node": 25.9.1
     transitivePeerDependencies:
       - "@vitejs/devtools"
       - esbuild
