@@ -1,6 +1,6 @@
 {
   "name": "@sentry/junior-dashboard",
-  "version": "0.92.1",
+  "version": "0.93.0",
   "private": false,
   "publishConfig": {
     "access": "public"
