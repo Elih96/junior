@@ -139,7 +139,9 @@ export async function persistRunningSessionRecord(args: {
   trailingMessageProvenance?: PiMessageProvenance[];
   loadedSkillNames?: string[];
   logContext: SessionRecordLogContext;
+  modelId?: string;
   actor?: Actor;
+  reasoningLevel?: string;
   surface?: AgentTurnSurface;
   turnStartMessageIndex?: number;
 }): Promise<boolean> {
@@ -178,6 +180,8 @@ export async function persistRunningSessionRecord(args: {
       ...(args.loadedSkillNames
         ? { loadedSkillNames: args.loadedSkillNames }
         : {}),
+      ...(args.modelId ? { modelId: args.modelId } : {}),
+      ...(args.reasoningLevel ? { reasoningLevel: args.reasoningLevel } : {}),
       ...((args.actor ?? latestSessionRecord?.actor)
         ? { actor: args.actor ?? latestSessionRecord?.actor }
         : {}),
@@ -232,7 +236,9 @@ export async function persistCompletedSessionRecord(args: {
   allMessages: PiMessage[];
   loadedSkillNames?: string[];
   logContext: SessionRecordLogContext;
+  modelId?: string;
   actor?: Actor;
+  reasoningLevel?: string;
   surface?: AgentTurnSurface;
   turnStartMessageIndex?: number;
 }): Promise<void> {
@@ -251,6 +257,10 @@ export async function persistCompletedSessionRecord(args: {
       "Completed session record requires a slice id from the caller or the latest stored record",
     );
   }
+  const modelId =
+    latestSessionRecord?.modelId ?? args.modelId ?? args.logContext.modelId;
+  const reasoningLevel =
+    args.reasoningLevel ?? latestSessionRecord?.reasoningLevel;
   const target: Parameters<typeof upsertAgentTurnSessionRecord>[0] = {
     ...((args.channelName ?? latestSessionRecord?.channelName)
       ? { channelName: args.channelName ?? latestSessionRecord?.channelName }
@@ -286,6 +296,8 @@ export async function persistCompletedSessionRecord(args: {
             args.loadedSkillNames ?? latestSessionRecord?.loadedSkillNames,
         }
       : {}),
+    ...(modelId ? { modelId } : {}),
+    ...(reasoningLevel ? { reasoningLevel } : {}),
     ...((args.actor ?? latestSessionRecord?.actor)
       ? { actor: args.actor ?? latestSessionRecord?.actor }
       : {}),
@@ -317,6 +329,7 @@ export async function completeDeliveredTurn(args: {
   logContext: SessionRecordLogContext;
   messages: PiMessage[];
   actor?: Actor;
+  reasoningLevel?: string;
   sessionId: string;
   sliceId: number;
   source: Source;
@@ -337,7 +350,9 @@ export async function completeDeliveredTurn(args: {
     allMessages: args.messages,
     loadedSkillNames: args.loadedSkillNames,
     logContext: args.logContext,
+    modelId: args.logContext.modelId,
     actor: args.actor,
+    reasoningLevel: args.reasoningLevel,
     surface: args.surface,
     turnStartMessageIndex: args.turnStartMessageIndex,
   });
@@ -358,9 +373,11 @@ export async function persistAuthPauseSessionRecord(args: {
   source?: Source;
   messages: PiMessage[];
   loadedSkillNames?: string[];
+  modelId?: string;
   errorMessage: string;
   logContext: SessionRecordLogContext;
   actor?: Actor;
+  reasoningLevel?: string;
   surface?: AgentTurnSurface;
 }): Promise<AgentTurnSessionRecord | undefined> {
   const nextSliceId = args.currentSliceId + 1;
@@ -405,6 +422,15 @@ export async function persistAuthPauseSessionRecord(args: {
       ...(args.loadedSkillNames
         ? { loadedSkillNames: args.loadedSkillNames }
         : {}),
+      ...((args.modelId ?? latestSessionRecord?.modelId)
+        ? { modelId: args.modelId ?? latestSessionRecord?.modelId }
+        : {}),
+      ...((args.reasoningLevel ?? latestSessionRecord?.reasoningLevel)
+        ? {
+            reasoningLevel:
+              args.reasoningLevel ?? latestSessionRecord?.reasoningLevel,
+          }
+        : {}),
       resumeReason: "auth",
       resumedFromSliceId: args.currentSliceId,
       errorMessage: args.errorMessage,
@@ -445,9 +471,11 @@ export async function persistTimeoutSessionRecord(args: {
   source?: Source;
   messages: PiMessage[];
   loadedSkillNames?: string[];
+  modelId?: string;
   errorMessage: string;
   logContext: SessionRecordLogContext;
   actor?: Actor;
+  reasoningLevel?: string;
   surface?: AgentTurnSurface;
 }): Promise<AgentTurnSessionRecord | undefined> {
   const nextSliceId = args.currentSliceId + 1;
@@ -500,6 +528,15 @@ export async function persistTimeoutSessionRecord(args: {
         ...(args.loadedSkillNames
           ? { loadedSkillNames: args.loadedSkillNames }
           : {}),
+        ...((args.modelId ?? latestSessionRecord?.modelId)
+          ? { modelId: args.modelId ?? latestSessionRecord?.modelId }
+          : {}),
+        ...((args.reasoningLevel ?? latestSessionRecord?.reasoningLevel)
+          ? {
+              reasoningLevel:
+                args.reasoningLevel ?? latestSessionRecord?.reasoningLevel,
+            }
+          : {}),
         resumeReason: "timeout",
         resumedFromSliceId: latestSessionRecord?.resumedFromSliceId,
         errorMessage: `Agent continuation exceeded slice limit (${AGENT_CONTINUE_MAX_SLICES})`,
@@ -533,6 +570,15 @@ export async function persistTimeoutSessionRecord(args: {
         : {}),
       ...(args.loadedSkillNames
         ? { loadedSkillNames: args.loadedSkillNames }
+        : {}),
+      ...((args.modelId ?? latestSessionRecord?.modelId)
+        ? { modelId: args.modelId ?? latestSessionRecord?.modelId }
+        : {}),
+      ...((args.reasoningLevel ?? latestSessionRecord?.reasoningLevel)
+        ? {
+            reasoningLevel:
+              args.reasoningLevel ?? latestSessionRecord?.reasoningLevel,
+          }
         : {}),
       resumeReason: "timeout",
       resumedFromSliceId: args.currentSliceId,
@@ -573,9 +619,11 @@ export async function persistYieldSessionRecord(args: {
   source?: Source;
   messages: PiMessage[];
   loadedSkillNames?: string[];
+  modelId?: string;
   errorMessage: string;
   logContext: SessionRecordLogContext;
   actor?: Actor;
+  reasoningLevel?: string;
   surface?: AgentTurnSurface;
 }): Promise<AgentTurnSessionRecord | undefined> {
   try {
@@ -618,6 +666,15 @@ export async function persistYieldSessionRecord(args: {
         : {}),
       ...(args.loadedSkillNames
         ? { loadedSkillNames: args.loadedSkillNames }
+        : {}),
+      ...((args.modelId ?? latestSessionRecord?.modelId)
+        ? { modelId: args.modelId ?? latestSessionRecord?.modelId }
+        : {}),
+      ...((args.reasoningLevel ?? latestSessionRecord?.reasoningLevel)
+        ? {
+            reasoningLevel:
+              args.reasoningLevel ?? latestSessionRecord?.reasoningLevel,
+          }
         : {}),
       resumeReason: "yield",
       resumedFromSliceId: latestSessionRecord?.resumedFromSliceId,

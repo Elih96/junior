@@ -672,6 +672,8 @@ describe("dashboard reporting", () => {
       sessionId: "turn-current",
       sliceId: 1,
       state: "completed",
+      modelId: "openai/gpt-5.5",
+      reasoningLevel: "high",
       piMessages: [
         {
           role: "user",
@@ -733,6 +735,8 @@ describe("dashboard reporting", () => {
 
     expect(report.runs).toHaveLength(1);
     expect(report.runs[0]).toMatchObject({
+      modelId: "openai/gpt-5.5",
+      reasoningLevel: "high",
       transcriptMessageCount: 4,
     });
     expect(report.runs[0]!.transcript).toEqual([
@@ -783,6 +787,42 @@ describe("dashboard reporting", () => {
     ]);
   });
 
+  it("omits execution settings when the current run has no matching summary", async () => {
+    const { upsertAgentTurnSessionRecord } =
+      await import("@/chat/state/turn-session");
+    const { readConversationReport } =
+      await import("@/reporting/conversations");
+    const conversationId = "internal:missing-current-summary";
+
+    await upsertAgentTurnSessionRecord({
+      conversationId,
+      sessionId: "turn-older",
+      sliceId: 1,
+      state: "completed",
+      modelId: "openai/gpt-4.1",
+      reasoningLevel: "low",
+      piMessages: [],
+    });
+
+    const report = await readConversationReport(conversationId, {
+      conversationStore: fixedConversationStore([
+        indexedConversation({
+          conversationId,
+          createdAtMs: 1,
+          lastActivityAtMs: 2,
+          execution: {
+            runId: "turn-current",
+            status: "running",
+            updatedAtMs: 2,
+          },
+        }),
+      ]),
+    });
+
+    expect(report.runs[0]).not.toHaveProperty("modelId");
+    expect(report.runs[0]).not.toHaveProperty("reasoningLevel");
+  });
+
   it("reports private execution activity as safe metadata", async () => {
     const { upsertAgentTurnSessionRecord } =
       await import("@/chat/state/turn-session");
@@ -829,6 +869,8 @@ describe("dashboard reporting", () => {
           parentToolCallId: "advisor-call-1",
           childConversationId: "advisor:slack:G1:activity",
           historyMode: "shared",
+          modelId: "openai/gpt-5.6-sol",
+          reasoningLevel: "high",
         },
         createdAtMs: 3,
       },
@@ -860,6 +902,8 @@ describe("dashboard reporting", () => {
             id: "advisor-call-1",
             outcome: "success",
             parentToolCallId: "advisor-call-1",
+            modelId: "openai/gpt-5.6-sol",
+            reasoningLevel: "high",
             status: "success",
             subagentKind: "advisor",
           }),
@@ -956,6 +1000,8 @@ describe("dashboard reporting", () => {
             parentToolCallId: subagentId,
             childConversationId,
             historyMode: "shared",
+            modelId: "openai/gpt-5.6-sol",
+            reasoningLevel: "high",
           },
           createdAtMs: subagentId === "advisor-plan" ? 3 : 31,
         },
@@ -983,6 +1029,8 @@ describe("dashboard reporting", () => {
     );
 
     expect(first.subagentConversationId).toBe(childConversationId);
+    expect(first.modelId).toBe("openai/gpt-5.6-sol");
+    expect(first.reasoningLevel).toBe("high");
     expect(first.transcriptAvailable).toBe(true);
     expect(JSON.stringify(first.transcript)).toContain(
       "first advisor question",

@@ -754,6 +754,8 @@ describe("persistAuthPauseSessionRecord", () => {
       sessionId: "turn-auth-empty",
       currentSliceId: 1,
       messages: [],
+      modelId: "openai/gpt-5.5",
+      reasoningLevel: "high",
       errorMessage: "auth pause",
       logContext: {
         modelId: "test-model",
@@ -765,6 +767,8 @@ describe("persistAuthPauseSessionRecord", () => {
       sessionId: "turn-auth-empty",
       state: "awaiting_resume",
       piMessages: [],
+      modelId: "openai/gpt-5.5",
+      reasoningLevel: "high",
       resumeReason: "auth",
     });
     await expect(
@@ -905,11 +909,14 @@ describe("persistAuthPauseSessionRecord", () => {
       logContext: {
         modelId: "test-model",
       },
+      reasoningLevel: "high",
     });
 
     await expect(
       getAgentTurnSessionRecord("conversation-completed", "turn-completed"),
     ).resolves.toMatchObject({
+      modelId: "test-model",
+      reasoningLevel: "high",
       state: "completed",
       piMessages: [
         {
@@ -1141,6 +1148,51 @@ describe("persistAuthPauseSessionRecord", () => {
     ).resolves.toMatchObject({
       state: "running",
       piMessages: [user, replacementToolResult],
+    });
+  });
+
+  it("updates reasoning while keeping the turn model fixed across slices", async () => {
+    const {
+      getAgentTurnSessionRecord,
+      listAgentTurnSessionSummaries,
+      upsertAgentTurnSessionRecord,
+    } = await import("@/chat/state/turn-session");
+    const conversationId = "conversation-execution-profile";
+    const sessionId = "turn-execution-profile";
+
+    await upsertAgentTurnSessionRecord({
+      conversationId,
+      sessionId,
+      sliceId: 1,
+      state: "awaiting_resume",
+      modelId: "openai/gpt-5.5",
+      reasoningLevel: "high",
+      resumeReason: "timeout",
+      piMessages: [userMessage("continue")],
+    });
+    await upsertAgentTurnSessionRecord({
+      conversationId,
+      sessionId,
+      sliceId: 2,
+      state: "running",
+      modelId: "openai/gpt-5.6",
+      reasoningLevel: "low",
+      piMessages: [userMessage("continue")],
+    });
+
+    await expect(
+      getAgentTurnSessionRecord(conversationId, sessionId),
+    ).resolves.toMatchObject({
+      modelId: "openai/gpt-5.5",
+      reasoningLevel: "low",
+    });
+    expect(
+      (await listAgentTurnSessionSummaries()).find(
+        (summary) => summary.sessionId === sessionId,
+      ),
+    ).toMatchObject({
+      modelId: "openai/gpt-5.5",
+      reasoningLevel: "low",
     });
   });
 
