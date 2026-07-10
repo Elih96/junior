@@ -185,7 +185,7 @@ describe("sentry credential broker (oauth-bearer plugin)", () => {
     ).rejects.toThrow(CredentialUnavailableError);
   });
 
-  it("refreshes tokens that are near expiry", async () => {
+  it("retains the refresh token when refreshing near expiry without rotation", async () => {
     process.env.SENTRY_CLIENT_ID = "client-id";
     process.env.SENTRY_CLIENT_SECRET = "client-secret";
     const refreshTokenExpiresAt = Date.now() + 30 * 24 * 60 * 60 * 1000;
@@ -204,7 +204,6 @@ describe("sentry credential broker (oauth-bearer plugin)", () => {
       ok: true,
       json: async () => ({
         access_token: "new-access-token",
-        refresh_token: "new-refresh-token",
         expires_in: 3600,
       }),
     })) as unknown as typeof fetch;
@@ -228,7 +227,7 @@ describe("sentry credential broker (oauth-bearer plugin)", () => {
 
     const stored = await tokenStore.get("U123", "sentry");
     expect(stored?.accessToken).toBe("new-access-token");
-    expect(stored?.refreshToken).toBe("new-refresh-token");
+    expect(stored?.refreshToken).toBe("old-refresh-token");
     expect(stored?.refreshTokenExpiresAt).toBe(refreshTokenExpiresAt);
     expect(globalThis.fetch).toHaveBeenCalledWith(
       "https://sentry.io/oauth/token/",

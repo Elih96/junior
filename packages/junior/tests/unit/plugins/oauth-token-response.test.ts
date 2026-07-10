@@ -56,7 +56,7 @@ describe("parseOAuthTokenResponse", () => {
 
   it("keeps the current refresh token when a refresh response omits refresh_token", () => {
     const result = parseOAuthTokenResponse({ access_token: "access" }, "repo", {
-      currentRefreshToken: "current-refresh",
+      refreshToken: "current-refresh",
     });
     expect(result.refreshToken).toBe("current-refresh");
     expect(result.accessToken).toBe("access");
@@ -66,7 +66,7 @@ describe("parseOAuthTokenResponse", () => {
     const result = parseOAuthTokenResponse(
       { access_token: "access", refresh_token: "rotated" },
       "repo",
-      { currentRefreshToken: "current-refresh" },
+      { refreshToken: "current-refresh" },
     );
     expect(result.refreshToken).toBe("rotated");
   });
@@ -82,7 +82,7 @@ describe("parseOAuthTokenResponse", () => {
       parseOAuthTokenResponse(
         { access_token: "access", refresh_token: "" },
         "repo",
-        { currentRefreshToken: "current-refresh" },
+        { refreshToken: "current-refresh" },
       ),
     ).toThrow("OAuth token response missing refresh_token");
   });

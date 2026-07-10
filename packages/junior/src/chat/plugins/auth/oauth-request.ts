@@ -91,21 +91,22 @@ export function buildOAuthTokenRequest(input: OAuthTokenRequestInput): {
   };
 }
 
+/** Parse provider tokens, retaining the request token when a refresh response omits rotation. */
 export function parseOAuthTokenResponse(
   data: unknown,
   requestedScope?: string,
   options?: {
     treatEmptyScopeAsUnreported?: boolean;
-    currentRefreshToken?: string;
+    refreshToken?: string;
   },
 ): OAuthTokenResponse {
   const response = requireTokenResponseObject(data);
   const accessToken = requireNonEmptyTokenField(response, "access_token");
-  const refreshToken =
+  const resolvedRefreshToken =
     response.refresh_token === undefined
-      ? options?.currentRefreshToken
+      ? options?.refreshToken
       : requireNonEmptyTokenField(response, "refresh_token");
-  if (!refreshToken) {
+  if (!resolvedRefreshToken) {
     throw new Error("OAuth token response missing refresh_token");
   }
   const expiresIn = response.expires_in;
@@ -135,7 +136,11 @@ export function parseOAuthTokenResponse(
     expiresAt?: number;
     refreshTokenExpiresAt?: number;
     scope?: string;
-  } = { accessToken, refreshToken, ...(scope ? { scope } : {}) };
+  } = {
+    accessToken,
+    refreshToken: resolvedRefreshToken,
+    ...(scope ? { scope } : {}),
+  };
 
   if (expiresIn !== undefined) {
     if (
