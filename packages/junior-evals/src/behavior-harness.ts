@@ -305,6 +305,7 @@ export interface EvalOverrides {
   auto_complete_mcp_oauth?: string[];
   auto_complete_oauth?: string[];
   credential_providers?: Array<"github" | "sentry">;
+  expired_oauth_tokens?: string[];
   fail_reply_call?: number;
   mock_image_generation?: boolean;
   plugin_dirs?: string[];
@@ -688,7 +689,8 @@ function isSandboxReachableBaseUrl(value: string): boolean {
 function scenarioNeedsEvalEgress(scenario: EvalScenario): boolean {
   return Boolean(
     scenario.overrides?.credential_providers?.length ||
-    scenario.overrides?.auto_complete_oauth?.length,
+    scenario.overrides?.auto_complete_oauth?.length ||
+    scenario.overrides?.expired_oauth_tokens?.length,
   );
 }
 
@@ -1345,6 +1347,28 @@ async function seedCredentialProviderTokens(input: {
   }
 }
 
+async function seedExpiredOAuthTokens(input: {
+  providers: Set<string>;
+  userIds: Iterable<string>;
+}): Promise<void> {
+  const userTokenStore = createUserTokenStore();
+  for (const provider of input.providers) {
+    if (provider !== EVAL_OAUTH_PROVIDER) {
+      throw new Error(
+        `No expired OAuth eval fixture for provider "${provider}"`,
+      );
+    }
+    for (const userId of input.userIds) {
+      await userTokenStore.set(userId, provider, {
+        accessToken: "expired-eval-oauth-access-token",
+        refreshToken: "eval-oauth-refresh-token",
+        expiresAt: Date.now() - 1,
+        scope: "read",
+      });
+    }
+  }
+}
+
 function getDefaultAuthCode(
   type: "mcp-oauth" | "oauth",
   provider: string,
@@ -1588,6 +1612,7 @@ interface HarnessEnvironment {
   autoCompleteMcpOauthProviders: Set<string>;
   autoCompleteOauthProviders: Set<string>;
   credentialProviders: Set<"github" | "sentry">;
+  expiredOauthProviders: Set<string>;
   configuredPluginDirs: string[];
   configuredSkillDirs: string[];
   envSnapshot: EnvSnapshot;
@@ -1620,6 +1645,11 @@ async function setupHarnessEnvironment(
     );
     const credentialProviders = new Set(
       scenario.overrides?.credential_providers ?? [],
+    );
+    const expiredOauthProviders = new Set(
+      scenario.overrides?.expired_oauth_tokens?.map((provider) =>
+        provider.trim(),
+      ) ?? [],
     );
     const authActorUsers = new Set(
       scenarioEvents(scenario).flatMap((event) =>
@@ -1661,8 +1691,13 @@ async function setupHarnessEnvironment(
     await cleanupMcpAuthState(authActorUsers, autoCompleteMcpOauthProviders);
     await cleanupOAuthTokens(authActorUsers, autoCompleteOauthProviders);
     await cleanupOAuthTokens(authActorUsers, credentialProviders);
+    await cleanupOAuthTokens(authActorUsers, expiredOauthProviders);
     await seedCredentialProviderTokens({
       providers: credentialProviders,
+      userIds: authActorUsers,
+    });
+    await seedExpiredOAuthTokens({
+      providers: expiredOauthProviders,
       userIds: authActorUsers,
     });
 
@@ -1671,6 +1706,7 @@ async function setupHarnessEnvironment(
       autoCompleteMcpOauthProviders,
       autoCompleteOauthProviders,
       credentialProviders,
+      expiredOauthProviders,
       configuredPluginDirs,
       configuredSkillDirs,
       envSnapshot,
@@ -1701,6 +1737,7 @@ async function teardownHarnessEnvironment(
   );
   await cleanupOAuthTokens(env.authActorUsers, env.autoCompleteOauthProviders);
   await cleanupOAuthTokens(env.authActorUsers, env.credentialProviders);
+  await cleanupOAuthTokens(env.authActorUsers, env.expiredOauthProviders);
   await env.egressServer?.close();
   env.envSnapshot.restore();
   await env.pluginApp?.cleanup();

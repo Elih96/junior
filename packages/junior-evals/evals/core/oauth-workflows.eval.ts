@@ -1,6 +1,7 @@
 import { assistantMessages, describeEval, toolCalls } from "vitest-evals";
 import type { HarnessRun } from "vitest-evals/harness";
 import { expect } from "vitest";
+import { readEvalOAuthRefreshTokens } from "@junior-tests/msw/handlers/eval-oauth";
 import {
   authorizationCompletions,
   rubric,
@@ -191,6 +192,44 @@ describeEval("OAuth Workflows", slackEvals, (it) => {
     ).toBeGreaterThanOrEqual(3);
     expectFinalThreadReply(result, oauthResumeThread, /\bFriday\b/i);
     expectFinalThreadReply(result, oauthResumeThread, /eval-oauth-user/i);
+  });
+
+  const oauthRefreshThread = {
+    id: "thread-oauth-refresh",
+    channel_id: "COAUTHREFRESH",
+    thread_ts: "17000000.1004",
+  };
+
+  it("refreshes an expired generic OAuth credential during a normal turn", async ({
+    run,
+  }) => {
+    const result = await run({
+      overrides: {
+        expired_oauth_tokens: ["eval-oauth"],
+        plugin_dirs: ["fixtures/plugins"],
+      },
+      initialEvents: [
+        threadMessage(
+          "/eval-oauth Tell me which eval identity is currently active.",
+          { thread: oauthRefreshThread, is_mention: true },
+        ),
+      ],
+      criteria: rubric({
+        pass: [
+          "The response identifies the active account as eval-oauth-user.",
+          "The request completes without asking the user to authorize or reconnect.",
+        ],
+        fail: [
+          "Do not post a generic failure message.",
+          "Do not ask the user to authorize, connect, or reconnect the account.",
+        ],
+      }),
+    });
+
+    expectEvalOauthIdentityCheck(result);
+    expect(authorizationCompletions(result)).toEqual([]);
+    expect(readEvalOAuthRefreshTokens()).toEqual(["eval-oauth-refresh-token"]);
+    expectFinalThreadReply(result, oauthRefreshThread, /eval-oauth-user/i);
   });
 
   const oauthReconnectThread = {

@@ -99,6 +99,7 @@ async function refreshAccessToken(
   const data = (await response.json()) as Record<string, unknown>;
   return parseOAuthTokenResponse(data, requestedScope, {
     treatEmptyScopeAsUnreported: oauth.treatEmptyScopeAsUnreported,
+    refreshToken,
   });
 }
 
