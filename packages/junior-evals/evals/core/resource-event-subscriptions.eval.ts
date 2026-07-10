@@ -1,6 +1,7 @@
-import { assistantMessages, describeEval } from "vitest-evals";
+import { assistantMessages, describeEval, toolCalls } from "vitest-evals";
 import { expect } from "vitest";
 import {
+  mention,
   resourceEventNotification,
   rubric,
   slackEvals,
@@ -21,6 +22,64 @@ function visibleThreadReplies(
 }
 
 describeEval("Resource Event Subscriptions", slackEvals, (it) => {
+  it("when a created PR can emit requested events, subscribe instead of polling", async ({
+    run,
+  }) => {
+    const result = await run({
+      overrides: {
+        plugin_dirs: ["fixtures/resource-event-plugins"],
+      },
+      events: [
+        mention(
+          "/eval-resource-events Use the provider to create a pull request titled 'Prefer event subscriptions', then check it every five minutes and tell this thread if checks fail, review feedback arrives, it merges, or it closes.",
+        ),
+      ],
+      criteria: rubric({
+        pass: [
+          "The reply confirms the pull request will be monitored through event-based updates for the requested outcomes.",
+        ],
+        fail: [
+          "Do not ask the user to monitor GitHub manually.",
+          "Do not claim a recurring five-minute polling task or schedule was created.",
+        ],
+      }),
+    });
+
+    expect(toolCalls(result.session)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: "callMcpTool",
+          arguments: expect.objectContaining({
+            tool_name:
+              "mcp__eval-resource-events__create-watchable-pull-request",
+            arguments: expect.objectContaining({
+              title: "Prefer event subscriptions",
+            }),
+          }),
+        }),
+        expect.objectContaining({
+          name: "subscribeToResourceEvents",
+          arguments: expect.objectContaining({
+            provider: "github",
+            resourceRef: "github:pull_request:getsentry/junior#208",
+            resourceType: "pull_request",
+            events: expect.arrayContaining([
+              "checks.failed",
+              "review.changes_requested",
+              "review.commented",
+              "review_comment.created",
+              "state.merged",
+              "state.closed_unmerged",
+            ]),
+          }),
+        }),
+      ]),
+    );
+    expect(toolCalls(result.session).map((call) => call.name)).not.toContain(
+      "scheduler_slackScheduleCreateTask",
+    );
+  });
+
   it("when a subscribed PR check fails, summarize the failure and suggest next steps", async ({
     run,
   }) => {
@@ -39,7 +98,6 @@ describeEval("Resource Event Subscriptions", slackEvals, (it) => {
       ],
       criteria: rubric({
         pass: [
-          "The normalized transcript contains exactly one assistant thread reply.",
           "The reply says GitHub PR getsentry/junior#691 has a failed CI/checks result.",
           'The reply mentions the failing workflow "test" or commit abcdef123456.',
           "The reply gives a concrete next step such as checking CI logs, inspecting the failed workflow, or preparing a fix.",
@@ -71,7 +129,6 @@ describeEval("Resource Event Subscriptions", slackEvals, (it) => {
       ],
       criteria: rubric({
         pass: [
-          "The normalized transcript contains exactly one assistant thread reply.",
           "The reply says GitHub PR getsentry/junior#702 was merged.",
           "The reply frames the merge as the subscribed outcome this thread was waiting for.",
           "The reply stays brief and does not propose unnecessary follow-up work.",
