@@ -38,6 +38,12 @@ export interface Conversation {
   source?: ConversationSource;
   title?: string;
   updatedAtMs: number;
+  /**
+   * When retention purged this conversation's content. Set means messages and
+   * steps were deleted wholesale; reporting presents the transcript as expired
+   * rather than privacy-redacted (`../../../specs/data-redaction-policy.md`).
+   */
+  transcriptPurgedAtMs?: number;
   /** Persisted destination visibility. Undefined means no destination row exists. */
   visibility?: ConversationPrivacy;
 }
@@ -62,6 +68,19 @@ export interface ConversationStore {
     title?: string;
     /** Source-confirmed visibility from the current event's signal only. */
     visibility?: ConversationPrivacy;
+  }): Promise<void>;
+  /**
+   * Establish a subagent child conversation row linked to its parent.
+   *
+   * Advisor and future subagent histories live under their own child
+   * `conversation_id` with `parent_conversation_id` set; the child carries no
+   * destination and is excluded from top-level listings. Idempotent: it links a
+   * bare row a step append may have created first without clobbering it.
+   */
+  ensureChildConversation(args: {
+    conversationId: string;
+    parentConversationId: string;
+    nowMs?: number;
   }): Promise<void>;
   /** Store task-execution metadata for long-term conversation history. */
   recordExecution(args: {

@@ -6,7 +6,6 @@
  * queued messages, compaction, status updates, and Slack posting meet; agent
  * internals stay behind the runner seam.
  */
-import { THREAD_STATE_TTL_MS } from "chat";
 import type { Message, SentMessage, Thread } from "chat";
 import type { SlackAdapter } from "@chat-adapter/slack";
 import { createSlackSource, type Destination } from "@sentry/junior-plugin-api";
@@ -43,7 +42,10 @@ import {
   getRunId,
   stripLeadingBotMention,
 } from "@/chat/runtime/thread-context";
-import { persistThreadState } from "@/chat/runtime/thread-state";
+import {
+  persistThreadRuntimeState,
+  persistThreadState,
+} from "@/chat/runtime/thread-state";
 import { buildDeliveredTurnStatePatch } from "@/chat/runtime/delivered-turn-state";
 import { getTurnRequestDeadline } from "@/chat/runtime/request-deadline";
 import { completeAuthPauseTurn } from "@/chat/runtime/auth-pause-state";
@@ -83,14 +85,7 @@ import {
 import { appendSlackLegacyAttachmentText } from "@/chat/slack/legacy-attachments";
 import { type ThreadArtifactsState } from "@/chat/state/artifacts";
 import { lookupSlackUser } from "@/chat/slack/user";
-import {
-  createActor,
-  toStoredSlackActor,
-  parseActorUserId,
-  type Actor,
-  type SlackActor,
-  type StoredSlackActor,
-} from "@/chat/actor";
+import { createActor, parseActorUserId, type Actor } from "@/chat/actor";
 import {
   ensureSlackMessageActorIdentity,
   getMessageActorIdentity,
@@ -117,18 +112,17 @@ import {
   recordAgentTurnSessionSummary,
 } from "@/chat/state/turn-session";
 import { completeDeliveredTurn } from "@/chat/services/turn-session-record";
+import { getConversationStore } from "@/chat/db";
 import {
-  initConversationContext,
-  setConversationTitle,
-} from "@/chat/state/conversation-details";
-import {
-  commitMessages,
   contextProvenance,
   instructionProvenanceFor,
-  loadProjection,
-  loadProjectionWithProvenance,
   type PiMessageProvenance,
 } from "@/chat/state/session-log";
+import {
+  commitMessages,
+  loadProjection,
+  loadProjectionWithProvenance,
+} from "@/chat/conversations/projection";
 import { getStateAdapter } from "@/chat/state/adapter";
 import { acquireActiveLock } from "@/chat/state/locks";
 import { persistWithRetry } from "@/chat/services/persist-retry";
@@ -138,16 +132,17 @@ import {
 } from "@/chat/pi/transcript";
 import { requireSlackDestination } from "@/chat/destination";
 import { escapeXml } from "@/chat/xml";
+import { persistConversationMessages } from "@/chat/conversations/visible-messages";
 
 /**
- * Persist post-delivery thread state with a short retry so a transient state
- * write does not lose the delivered outcome of an already-accepted reply.
+ * Persist post-delivery Redis scratch with a short retry after durable SQL
+ * completion has succeeded.
  */
-async function persistThreadStateWithRetry(
+async function persistThreadRuntimeStateWithRetry(
   thread: Thread,
   patch: Parameters<typeof persistThreadState>[1],
 ): Promise<void> {
-  await persistWithRetry(() => persistThreadState(thread, patch));
+  await persistWithRetry(() => persistThreadRuntimeState(thread, patch));
 }
 
 function collectCanvasUrls(artifacts: Partial<ThreadArtifactsState>) {
@@ -157,10 +152,6 @@ function collectCanvasUrls(artifacts: Partial<ThreadArtifactsState>) {
       ...(artifacts.recentCanvases?.map((canvas) => canvas.url) ?? []),
     ].filter((url): url is string => typeof url === "string" && url !== ""),
   );
-}
-
-function turnActor(actor: SlackActor): StoredSlackActor {
-  return toStoredSlackActor(actor);
 }
 
 /**
@@ -342,17 +333,15 @@ interface LoadedPiMessagesForTurn {
 
 /**
  * Resolve the Pi history for this Slack turn from the most precise durable
- * boundary available: active turn record first, then compactable projection,
- * then caller fallback.
+ * boundary available: active turn record first, then compactable projection.
+ * Both are SQL-backed; there is no thread-state fallback.
  */
 async function loadPiMessagesForTurn(args: {
   conversationId?: string;
   activeTurnId?: string;
-  fallback: PiMessage[];
 }): Promise<LoadedPiMessagesForTurn> {
-  const fallback = args.fallback.length > 0 ? [...args.fallback] : undefined;
   if (!args.conversationId) {
-    return { piMessages: fallback };
+    return {};
   }
 
   if (args.activeTurnId) {
@@ -379,7 +368,7 @@ async function loadPiMessagesForTurn(args: {
     };
   }
 
-  return { piMessages: fallback };
+  return {};
 }
 
 export interface ReplyExecutorServices {
@@ -533,7 +522,6 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
             : undefined;
         const executionActor: Actor | undefined =
           "type" in credentialContext.actor ? actor : credentialContext.actor;
-        const storedActor = actor ? turnActor(actor) : undefined;
         const slackActorId = actor?.userId;
 
         const preparedState =
@@ -705,7 +693,6 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
                 ...projection.provenance,
                 ...missing.map((pair) => pair.provenance),
               ],
-              ttlMs: THREAD_STATE_TTL_MS,
             });
             return true;
           } finally {
@@ -916,41 +903,6 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
               "Failed to record running turn summary",
             );
           });
-          void initConversationContext(conversationId, {
-            channelName,
-            originSurface: "slack",
-            originActor: storedActor,
-            startedAtMs: turnStartedAtMs,
-          }).catch((error) => {
-            logException(
-              error,
-              "conversation_details_context_init_failed",
-              turnTraceContext,
-              { "app.agent.turn.state": "running" },
-              "Failed to init conversation context at turn start",
-            );
-          });
-          const existingAssistantTitle =
-            preparedState.artifacts.assistantTitle?.trim();
-          if (existingAssistantTitle) {
-            void setConversationTitle(conversationId, {
-              displayTitle: existingAssistantTitle,
-              ...(preparedState.artifacts.assistantTitleSourceMessageId
-                ? {
-                    titleSourceMessageId:
-                      preparedState.artifacts.assistantTitleSourceMessageId,
-                  }
-                : {}),
-            }).catch((error) => {
-              logException(
-                error,
-                "conversation_details_title_refresh_failed",
-                turnTraceContext,
-                { "app.agent.turn.state": "running" },
-                "Failed to refresh conversation title from artifacts",
-              );
-            });
-          }
         }
         setTags({
           conversationId,
@@ -1046,7 +998,6 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
           const loadedPiMessages = await loadPiMessagesForTurn({
             conversationId,
             activeTurnId,
-            fallback: preparedState.conversation.piMessages,
           });
           let piMessages = loadedPiMessages.piMessages;
           if (
@@ -1156,17 +1107,19 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
 
               if (conversationId && titleUpdateResult.title) {
                 try {
-                  await setConversationTitle(conversationId, {
-                    displayTitle: titleUpdateResult.title,
-                    titleSourceMessageId: titleUpdateResult.sourceMessageId,
+                  await getConversationStore().recordActivity({
+                    activityAtMs: message.metadata.dateSent.getTime(),
+                    conversationId,
+                    nowMs: Date.now(),
+                    title: titleUpdateResult.title,
                   });
                 } catch (error) {
                   logException(
                     error,
-                    "conversation_details_title_set_failed",
+                    "conversation_title_persist_failed",
                     turnTraceContext,
                     {},
-                    "Failed to set conversation title in details record",
+                    "Failed to persist generated conversation title",
                   );
                 }
               }
@@ -1518,10 +1471,9 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
             latestArtifacts = completedState.artifacts;
           }
           try {
-            // Commit the terminal completed session record first: it is the
-            // delivered marker that keeps stranded-running recovery from
-            // regenerating an already-delivered reply if the thread-state
-            // write below fails.
+            // Commit the durable delivery record first so recovery cannot
+            // regenerate an accepted reply. Persist the SQL-visible transcript
+            // next, then update Redis runtime scratch independently.
             if (conversationId && reply.piMessages?.length) {
               await completeDeliveredTurn({
                 channelName,
@@ -1562,9 +1514,13 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
                 traceId: getActiveTraceId(),
               });
             }
-            await persistThreadStateWithRetry(thread, {
-              ...completedState,
-            });
+            await persistWithRetry(() =>
+              persistConversationMessages({
+                conversation: completedState.conversation,
+                conversationId,
+              }),
+            );
+            await persistThreadRuntimeStateWithRetry(thread, completedState);
             if (
               completedState.artifacts &&
               (assistantTitleArtifacts.assistantTitle !== undefined ||
@@ -1575,7 +1531,7 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
                 completedState.artifacts.assistantTitleSourceMessageId !==
                   assistantTitleArtifacts.assistantTitleSourceMessageId)
             ) {
-              await persistThreadStateWithRetry(thread, {
+              await persistThreadRuntimeStateWithRetry(thread, {
                 artifacts: latestArtifacts,
               });
             }

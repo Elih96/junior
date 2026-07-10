@@ -1,8 +1,12 @@
 import { getChatConfig, type SqlDriver } from "@/chat/config";
 import { createSqlStore } from "@/chat/conversations/sql/store";
 import type { ConversationStore } from "@/chat/conversations/store";
-import type { JuniorDatabase, JuniorSqlExecutor } from "@/chat/sql/db";
-import { createJuniorSqlExecutor } from "@/chat/sql/executor";
+import { createSqlAgentStepStore } from "@/chat/conversations/sql/history";
+import type { AgentStepStore } from "@/chat/conversations/history";
+import { createSqlConversationMessageStore } from "@/chat/conversations/sql/messages";
+import type { ConversationMessageStore } from "@/chat/conversations/messages";
+import type { JuniorDatabase, JuniorSqlExecutor } from "@/db/db";
+import { createJuniorSqlExecutor } from "@/db/executor";
 
 let current:
   | {
@@ -10,6 +14,8 @@ let current:
       db: JuniorSqlExecutor;
       driver: SqlDriver;
       store: ConversationStore;
+      stepStore: AgentStepStore;
+      messageStore: ConversationMessageStore;
     }
   | undefined;
 
@@ -23,7 +29,11 @@ function createDb(args: {
   });
 }
 
-function getSqlExecutor(): JuniorSqlExecutor {
+/**
+ * Return the process SQL executor. Exposed for the one-time legacy import
+ * writer, which needs explicit-`seq`/epoch inserts the step-store port omits.
+ */
+export function getSqlExecutor(): JuniorSqlExecutor {
   const { sql } = getChatConfig();
   if (
     current?.databaseUrl !== sql.databaseUrl ||
@@ -43,6 +53,8 @@ function getSqlExecutor(): JuniorSqlExecutor {
       driver: sql.driver,
       db,
       store: createSqlStore(db),
+      stepStore: createSqlAgentStepStore(db),
+      messageStore: createSqlConversationMessageStore(db),
     };
   }
   return current.db;
@@ -57,6 +69,18 @@ export function getDb(): JuniorDatabase {
 export function getConversationStore(): ConversationStore {
   getSqlExecutor();
   return current!.store;
+}
+
+/** Return the SQL-backed durable agent step store. */
+export function getAgentStepStore(): AgentStepStore {
+  getSqlExecutor();
+  return current!.stepStore;
+}
+
+/** Return the SQL-backed visible conversation message store. */
+export function getConversationMessageStore(): ConversationMessageStore {
+  getSqlExecutor();
+  return current!.messageStore;
 }
 
 /** Close the process SQL database when it has been opened. */

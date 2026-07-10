@@ -64,6 +64,7 @@ function failingMetadataStore(): ConversationStore {
   return {
     get: vi.fn(async () => undefined),
     getDestinationVisibility: vi.fn(async () => undefined),
+    ensureChildConversation: vi.fn(async () => undefined),
     recordActivity: vi.fn(),
     recordExecution: vi.fn(async () => {
       throw new Error("metadata unavailable");
@@ -76,6 +77,7 @@ function metadataEventsStore(events: string[]): ConversationStore {
   return {
     get: vi.fn(async () => undefined),
     getDestinationVisibility: vi.fn(async () => undefined),
+    ensureChildConversation: vi.fn(async () => undefined),
     recordActivity: vi.fn(),
     recordExecution: vi.fn(async () => {
       events.push("metadata");
@@ -131,7 +133,7 @@ describe("conversation work execution", () => {
     expect(queue.sentRecords()).toHaveLength(1);
   });
 
-  it("keeps queue wake-up when conversation metadata update fails", async () => {
+  it("surfaces SQL metadata failure after preserving the queue wake-up", async () => {
     const queue = createConversationWorkQueueTestAdapter();
 
     await expect(
@@ -141,7 +143,7 @@ describe("conversation work execution", () => {
         nowMs: 2_000,
         queue,
       }),
-    ).resolves.toMatchObject({ status: "appended", queueMessageId: "queue-1" });
+    ).rejects.toThrow("metadata unavailable");
 
     const work = await getConversationWorkState({
       conversationId: CONVERSATION_ID,

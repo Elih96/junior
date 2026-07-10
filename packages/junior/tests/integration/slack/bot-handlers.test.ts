@@ -6,11 +6,19 @@ import { getSlackInterruptionMarker } from "@/chat/slack/output";
 import { completedAgentRun } from "@/chat/runtime/agent-run-outcome";
 import { disconnectStateAdapter, getStateAdapter } from "@/chat/state/adapter";
 import { acquireActiveLock } from "@/chat/state/locks";
+import { instructionActors } from "@/chat/state/session-log";
 import {
-  instructionActors,
   loadProjection,
   loadProjectionWithProvenance,
-} from "@/chat/state/session-log";
+} from "@/chat/conversations/projection";
+import {
+  hydrateConversationMessages,
+  persistConversationMessages,
+} from "@/chat/conversations/visible-messages";
+import {
+  coerceThreadConversationState,
+  type ConversationMessage,
+} from "@/chat/state/conversation";
 import {
   getAgentTurnSessionRecord,
   upsertAgentTurnSessionRecord,
@@ -44,6 +52,32 @@ function postIncludes(thread: { posts: unknown[] }, text: string): boolean {
     }
     return false;
   });
+}
+
+/**
+ * Load a conversation's runtime scratch from thread-state and its visible
+ * transcript from SQL, matching how the runtime hydrates the working set.
+ */
+async function loadVisibleConversation(thread: {
+  id: string;
+  getState: () => unknown;
+}) {
+  const conversation = coerceThreadConversationState(thread.getState());
+  await hydrateConversationMessages({
+    conversation,
+    conversationId: thread.id,
+  });
+  return conversation;
+}
+
+/** Seed a prior visible transcript into SQL (the durable transcript authority). */
+async function seedVisibleConversation(
+  conversationId: string,
+  messages: ConversationMessage[],
+): Promise<void> {
+  const conversation = coerceThreadConversationState({});
+  conversation.messages.push(...messages);
+  await persistConversationMessages({ conversation, conversationId });
 }
 
 function expectBlocksIncludeConversationId(
@@ -300,6 +334,25 @@ describe("bot handlers (integration)", () => {
       },
     });
 
+    await seedVisibleConversation(conversationId, [
+      {
+        id: "msg-replayed",
+        role: "user",
+        text: "please answer once",
+        createdAtMs: 1,
+        author: { userId: "U-test" },
+        meta: { replied: true, slackTs: "1700000000.000" },
+      },
+      {
+        id: "assistant-reply",
+        role: "assistant",
+        text: "Already answered.",
+        createdAtMs: 2,
+        author: { isBot: true, userName: "Junior" },
+        meta: { replied: true },
+      },
+    ]);
+
     await expect(
       slackRuntime.handleNewMention(
         thread,
@@ -416,12 +469,7 @@ describe("bot handlers (integration)", () => {
     expect(hasReply).toBe(false);
 
     // Verify state was persisted with replied: false
-    const state = thread.getState();
-    const conversation = (
-      state as {
-        conversation?: { messages?: Array<{ meta?: { replied?: boolean } }> };
-      }
-    ).conversation;
+    const conversation = await loadVisibleConversation(thread);
     const lastMsg = conversation?.messages?.[conversation.messages.length - 1];
     expect(lastMsg?.meta?.replied).toBe(false);
   });
@@ -569,19 +617,7 @@ describe("bot handlers (integration)", () => {
       ),
     ).rejects.toThrow("Slack unavailable");
 
-    const conversation = (
-      thread.getState() as {
-        conversation?: {
-          messages?: Array<{
-            id?: string;
-            meta?: { replied?: boolean; skippedReason?: string };
-            role?: string;
-            text?: string;
-          }>;
-          processing?: { activeTurnId?: string };
-        };
-      }
-    ).conversation;
+    const conversation = await loadVisibleConversation(thread);
     expect(conversation?.processing?.activeTurnId).toBeUndefined();
     expect(conversation?.messages).not.toEqual(
       expect.arrayContaining([
@@ -615,14 +651,49 @@ describe("bot handlers (integration)", () => {
 
   it("keeps the turn successful when persistence fails after Slack accepted the reply", async () => {
     const conversationId = "slack:C0POSTDELIVERY:1700000000.000";
+    const sessionId = "turn_msg-post-delivery";
     const finalText = "Delivered before the state store failed.";
+    const promptMessages = turnPiMessages("please answer");
     const { slackRuntime } = createTestChatRuntime({
       services: {
         replyExecutor: {
           agentRunner: {
-            run: async () =>
-              completedAgentRun({
+            run: async () => {
+              await upsertAgentTurnSessionRecord({
+                conversationId,
+                sessionId,
+                sliceId: 1,
+                state: "running",
+                piMessages: promptMessages,
+              });
+              return completedAgentRun({
                 text: finalText,
+                piMessages: [
+                  ...promptMessages,
+                  {
+                    role: "assistant" as const,
+                    content: [{ type: "text" as const, text: finalText }],
+                    api: "responses" as const,
+                    provider: "openai",
+                    model: "gpt-5.3",
+                    usage: {
+                      input: 1,
+                      output: 1,
+                      cacheRead: 0,
+                      cacheWrite: 0,
+                      totalTokens: 2,
+                      cost: {
+                        input: 0,
+                        output: 0,
+                        cacheRead: 0,
+                        cacheWrite: 0,
+                        total: 0,
+                      },
+                    },
+                    stopReason: "stop" as const,
+                    timestamp: 2,
+                  },
+                ],
                 diagnostics: {
                   assistantMessageCount: 1,
                   modelId: "fake-agent-model",
@@ -632,7 +703,8 @@ describe("bot handlers (integration)", () => {
                   toolResultCount: 0,
                   usedPrimaryText: true,
                 },
-              }),
+              });
+            },
           },
         },
         visionContext: {
@@ -644,6 +716,7 @@ describe("bot handlers (integration)", () => {
     const originalPost = thread.post.bind(thread);
     const originalSetState = thread.setState.bind(thread);
     let replyPosted = false;
+    let postDeliveryStateAttempted = false;
     thread.post = (async (message: unknown) => {
       const sent = await originalPost(
         message as Parameters<typeof originalPost>[0],
@@ -656,6 +729,7 @@ describe("bot handlers (integration)", () => {
       options?: Parameters<typeof originalSetState>[1],
     ) => {
       if (replyPosted) {
+        postDeliveryStateAttempted = true;
         throw new Error("state store unavailable");
       }
       return originalSetState(next, options);
@@ -677,12 +751,33 @@ describe("bot handlers (integration)", () => {
     ).resolves.toBeUndefined();
 
     expect(postIncludes(thread, finalText)).toBe(true);
+    expect(postDeliveryStateAttempted).toBe(true);
     expect(
       postIncludes(
         thread,
         "I ran into an internal error while processing that.",
       ),
     ).toBe(false);
+
+    const conversation = await loadVisibleConversation(thread);
+    expect(conversation.messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: "assistant",
+          text: finalText,
+        }),
+        expect.objectContaining({
+          id: "msg-post-delivery",
+          meta: expect.objectContaining({ replied: true }),
+        }),
+      ]),
+    );
+    await expect(
+      getAgentTurnSessionRecord(conversationId, sessionId),
+    ).resolves.toMatchObject({ state: "completed" });
+    await expect(loadProjection({ conversationId })).resolves.toEqual(
+      expect.arrayContaining([expect.objectContaining({ role: "assistant" })]),
+    );
   });
 
   it("passes conversation and turn correlation IDs into assistant reply context", async () => {
@@ -797,20 +892,7 @@ describe("bot handlers (integration)", () => {
       getCapturedSlackApiCalls("chat.postMessage")[0]!.params,
       "slack:C0AUTH:1700000000.000",
     );
-    const state = thread.getState();
-    const conversation = (
-      state as {
-        conversation?: {
-          processing?: { activeTurnId?: string };
-          messages?: Array<{
-            id?: string;
-            meta?: { replied?: boolean; skippedReason?: string };
-            role?: string;
-            text?: string;
-          }>;
-        };
-      }
-    ).conversation;
+    const conversation = await loadVisibleConversation(thread);
     expect(conversation?.processing?.activeTurnId).toBeUndefined();
     expect(conversation?.messages).not.toEqual(
       expect.arrayContaining([
@@ -827,9 +909,12 @@ describe("bot handlers (integration)", () => {
     ).toMatchObject({
       meta: {
         replied: true,
-        skippedReason: undefined,
       },
     });
+    expect(
+      conversation?.messages?.find((message) => message.id === "msg-auth-pause")
+        ?.meta?.skippedReason,
+    ).toBeUndefined();
   });
 
   it("parks plugin auth resume turns without rethrowing to the queue", async () => {
@@ -878,20 +963,7 @@ describe("bot handlers (integration)", () => {
       getCapturedSlackApiCalls("chat.postMessage")[0]!.params,
       "slack:C0PLUGINAUTH:1700000000.000",
     );
-    const state = thread.getState();
-    const conversation = (
-      state as {
-        conversation?: {
-          processing?: { activeTurnId?: string };
-          messages?: Array<{
-            id?: string;
-            meta?: { replied?: boolean; skippedReason?: string };
-            role?: string;
-            text?: string;
-          }>;
-        };
-      }
-    ).conversation;
+    const conversation = await loadVisibleConversation(thread);
     expect(conversation?.processing?.activeTurnId).toBeUndefined();
     expect(conversation?.messages).not.toEqual(
       expect.arrayContaining([
@@ -908,9 +980,13 @@ describe("bot handlers (integration)", () => {
     ).toMatchObject({
       meta: {
         replied: true,
-        skippedReason: undefined,
       },
     });
+    expect(
+      conversation?.messages?.find(
+        (message) => message.id === "msg-plugin-auth-pause",
+      )?.meta?.skippedReason,
+    ).toBeUndefined();
   });
 
   it("schedules durable continuation without posting a notice", async () => {
@@ -1116,18 +1192,7 @@ describe("bot handlers (integration)", () => {
     expect(ack).toHaveBeenCalledOnce();
     expect(thread.posts).toEqual([]);
 
-    const state = thread.getState();
-    const conversation = (
-      state as {
-        conversation?: {
-          messages?: Array<{
-            id?: string;
-            meta?: { replied?: boolean; skippedReason?: string };
-          }>;
-          processing?: { activeTurnId?: string };
-        };
-      }
-    ).conversation;
+    const conversation = await loadVisibleConversation(thread);
     expect(conversation?.processing?.activeTurnId).toBe(activeSessionId);
     const followUp = conversation?.messages?.find(
       (message) => message.id === "msg-retry",
@@ -1899,6 +1964,16 @@ describe("bot handlers (integration)", () => {
         userMessageId: "msg-replied-duplicate",
       }),
     });
+    await seedVisibleConversation(conversationId, [
+      {
+        id: "msg-replied-duplicate",
+        role: "user",
+        text: "please keep working",
+        createdAtMs: 1,
+        author: { userId: "U-test" },
+        meta: { replied: true },
+      },
+    ]);
 
     await slackRuntime.handleNewMention(
       thread,
@@ -3069,10 +3144,7 @@ describe("bot handlers (integration)", () => {
       { destination: createTestDestination(thread) },
     );
 
-    const stateAfterFirstTurn = thread.getState();
-    const conv1 = (
-      stateAfterFirstTurn as { conversation?: { messages?: unknown[] } }
-    ).conversation;
+    const conv1 = await loadVisibleConversation(thread);
     expect(conv1).toBeDefined();
     const messageCountAfterFirst = conv1?.messages?.length ?? 0;
 
@@ -3087,10 +3159,7 @@ describe("bot handlers (integration)", () => {
       { destination: createTestDestination(thread) },
     );
 
-    const stateAfterSecondTurn = thread.getState();
-    const conv2 = (
-      stateAfterSecondTurn as { conversation?: { messages?: unknown[] } }
-    ).conversation;
+    const conv2 = await loadVisibleConversation(thread);
     expect(conv2).toBeDefined();
     expect(conv2?.messages?.length ?? 0).toBeGreaterThan(
       messageCountAfterFirst,

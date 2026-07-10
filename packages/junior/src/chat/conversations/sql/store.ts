@@ -1,16 +1,13 @@
 import { randomUUID } from "node:crypto";
 import type { Destination } from "@sentry/junior-plugin-api";
-import { and, asc, desc, eq, sql } from "drizzle-orm";
+import { and, asc, desc, eq, isNull, sql } from "drizzle-orm";
 import type { ConversationPrivacy } from "@/chat/conversation-privacy";
 import { parseDestination, sameDestination } from "@/chat/destination";
 import { upsertIdentity } from "@/chat/identities/sql";
 import type { IdentityUpsert } from "@/chat/identities/identity";
-import { parseStoredSlackActor, type StoredSlackActor } from "@/chat/actor";
+import type { StoredSlackActor } from "@/chat/actor";
 import { migrateSchema } from "./migrations";
-import type {
-  JuniorSqlDatabase,
-  JuniorSqlMigrationExecutor,
-} from "@/chat/sql/db";
+import type { JuniorSqlDatabase, JuniorSqlMigrationExecutor } from "@/db/db";
 import type {
   Conversation,
   ConversationExecution,
@@ -22,18 +19,19 @@ import {
   juniorConversations,
   juniorDestinations,
   juniorIdentities,
-} from "./schema";
+} from "@/db/schema";
 import type {
   JuniorDestinationKind,
   JuniorDestinationVisibility,
-} from "./schema/destinations";
+} from "@/db/schema/destinations";
 
 type ConversationRow = typeof juniorConversations.$inferSelect;
+type DestinationRow = typeof juniorDestinations.$inferSelect;
 type IdentityRow = typeof juniorIdentities.$inferSelect;
 
 interface ConversationReadRow {
   conversation: ConversationRow;
-  destinationVisibility: JuniorDestinationVisibility | null;
+  destination: DestinationRow | null;
   actorIdentity: IdentityRow | null;
 }
 
@@ -223,21 +221,22 @@ function executionStatusFromValue(value: unknown): ConversationStatus {
 function privacyFromRow(
   row: ConversationReadRow,
 ): ConversationPrivacy | undefined {
-  if (row.destinationVisibility === null) {
+  if (row.destination === null) {
     return undefined;
   }
-  return row.destinationVisibility === "public" ? "public" : "private";
+  return row.destination.visibility === "public" ? "public" : "private";
 }
 
 function actorFromIdentityRow(
   identity: IdentityRow | null,
-  fallback: StoredSlackActor | undefined,
 ): StoredSlackActor | undefined {
-  if (!identity || identity.provider !== "slack") {
-    return fallback;
+  if (!identity) {
+    return undefined;
+  }
+  if (identity.provider !== "slack") {
+    return undefined;
   }
   return {
-    ...(fallback ?? {}),
     ...(identity.emailNormalized
       ? { email: identity.emailNormalized }
       : identity.email
@@ -247,10 +246,27 @@ function actorFromIdentityRow(
     platform: "slack",
     slackUserId: identity.providerSubjectId,
     ...(identity.handle ? { slackUserName: identity.handle } : {}),
-    ...(identity.providerTenantId || fallback?.teamId
-      ? { teamId: identity.providerTenantId || fallback?.teamId }
-      : {}),
+    ...(identity.providerTenantId ? { teamId: identity.providerTenantId } : {}),
   };
+}
+
+function destinationFromRow(
+  destination: DestinationRow | null,
+): Destination | undefined {
+  const value =
+    destination?.provider === "slack"
+      ? {
+          platform: "slack",
+          teamId: destination.providerTenantId,
+          channelId: destination.providerDestinationId,
+        }
+      : destination?.provider === "local"
+        ? {
+            platform: "local",
+            conversationId: destination.providerDestinationId,
+          }
+        : undefined;
+  return parseDestination(value);
 }
 
 /** Decode one SQL row and reject invalid durable conversation records. */
@@ -260,23 +276,16 @@ function conversationFromRow(readRow: ConversationReadRow): Conversation {
   if (row.schemaVersion !== 1) {
     throw new Error("Conversation record schema version is invalid");
   }
-  const destination =
-    row.destination === undefined || row.destination === null
-      ? undefined
-      : parseDestination(row.destination);
-  const actor = actorFromIdentityRow(
-    readRow.actorIdentity,
-    parseStoredSlackActor(row.actor),
-  );
-  if (
-    row.destination !== undefined &&
-    row.destination !== null &&
-    !destination
-  ) {
-    throw new Error("Conversation record destination is invalid");
+  if (row.destination !== null && readRow.destination === null) {
+    throw new Error("Conversation legacy destination is not migrated");
   }
-  if (row.actor !== undefined && row.actor !== null && !actor) {
-    throw new Error("Conversation record actor is invalid");
+  if (row.actor !== null && readRow.actorIdentity === null) {
+    throw new Error("Conversation legacy actor is not migrated");
+  }
+  const destination = destinationFromRow(readRow.destination);
+  const actor = actorFromIdentityRow(readRow.actorIdentity);
+  if (readRow.destination !== null && !destination) {
+    throw new Error("Conversation record destination is invalid");
   }
   const source =
     row.source === undefined || row.source === null
@@ -306,6 +315,9 @@ function conversationFromRow(readRow: ConversationReadRow): Conversation {
     ...(row.channelName ? { channelName: row.channelName } : {}),
     ...(source ? { source } : {}),
     ...(row.title ? { title: row.title } : {}),
+    ...(msFromDate(row.transcriptPurgedAt) !== undefined
+      ? { transcriptPurgedAtMs: msFromDate(row.transcriptPurgedAt) }
+      : {}),
     ...(visibility ? { visibility } : {}),
   };
 }
@@ -506,6 +518,46 @@ export class SqlStore implements ConversationStore {
     });
   }
 
+  async ensureChildConversation(args: {
+    conversationId: string;
+    parentConversationId: string;
+    nowMs?: number;
+  }): Promise<void> {
+    const at = dateFromMs(args.nowMs ?? now());
+    // The child FKs to its parent, so establish a bare parent row first for the
+    // rare case a step append has not created it yet (a no-op once it exists).
+    await this.executor
+      .db()
+      .insert(juniorConversations)
+      .values({
+        conversationId: args.parentConversationId,
+        schemaVersion: 1,
+        createdAt: at,
+        lastActivityAt: at,
+        updatedAt: at,
+        executionStatus: "idle",
+      })
+      .onConflictDoNothing({ target: juniorConversations.conversationId });
+    await this.executor
+      .db()
+      .insert(juniorConversations)
+      .values({
+        conversationId: args.conversationId,
+        schemaVersion: 1,
+        parentConversationId: args.parentConversationId,
+        createdAt: at,
+        lastActivityAt: at,
+        updatedAt: at,
+        executionStatus: "idle",
+      })
+      .onConflictDoUpdate({
+        target: juniorConversations.conversationId,
+        set: {
+          parentConversationId: sql`coalesce(${juniorConversations.parentConversationId}, excluded.parent_conversation_id)`,
+        },
+      });
+  }
+
   /** Copy one conversation record into SQL during backfill. */
   async backfillConversation(sourceConversation: Conversation): Promise<void> {
     // Backfilled records are not live source signals: never let them confirm
@@ -566,7 +618,7 @@ export class SqlStore implements ConversationStore {
       .db()
       .select({
         conversation: juniorConversations,
-        destinationVisibility: juniorDestinations.visibility,
+        destination: juniorDestinations,
         actorIdentity: juniorIdentities,
       })
       .from(juniorConversations)
@@ -578,6 +630,9 @@ export class SqlStore implements ConversationStore {
         juniorIdentities,
         eq(juniorIdentities.id, juniorConversations.actorIdentityId),
       )
+      // Subagent (advisor) child conversations are excluded from top-level
+      // listings; they purge with their root on the root's visibility window.
+      .where(isNull(juniorConversations.parentConversationId))
       .orderBy(
         desc(juniorConversations.lastActivityAt),
         asc(juniorConversations.conversationId),
@@ -640,7 +695,7 @@ export class SqlStore implements ConversationStore {
       .db()
       .select({
         conversation: juniorConversations,
-        destinationVisibility: juniorDestinations.visibility,
+        destination: juniorDestinations,
         actorIdentity: juniorIdentities,
       })
       .from(juniorConversations)
@@ -694,11 +749,11 @@ export class SqlStore implements ConversationStore {
         originId: null,
         originRunId: null,
         destinationId: destinationId ?? null,
-        destination: conversation.destination ?? null,
+        destination: null,
         actorIdentityId: actorIdentity?.id ?? null,
         creatorIdentityId: null,
         credentialSubjectIdentityId: null,
-        actor: conversation.actor ?? null,
+        actor: null,
         channelName: conversation.channelName ?? null,
         title: conversation.title ?? null,
         createdAt: dateFromMs(conversation.createdAtMs),
@@ -727,11 +782,9 @@ export class SqlStore implements ConversationStore {
           originId: sql`coalesce(excluded.origin_id, ${juniorConversations.originId})`,
           originRunId: sql`coalesce(excluded.origin_run_id, ${juniorConversations.originRunId})`,
           destinationId: sql`coalesce(excluded.destination_id, ${juniorConversations.destinationId})`,
-          destination: sql`coalesce(excluded.destination_json, ${juniorConversations.destination})`,
           actorIdentityId: sql`coalesce(excluded.actor_identity_id, ${juniorConversations.actorIdentityId})`,
           creatorIdentityId: sql`coalesce(excluded.creator_identity_id, ${juniorConversations.creatorIdentityId})`,
           credentialSubjectIdentityId: sql`coalesce(excluded.credential_subject_identity_id, ${juniorConversations.credentialSubjectIdentityId})`,
-          actor: sql`coalesce(excluded.actor_json, ${juniorConversations.actor})`,
           channelName: sql`coalesce(excluded.channel_name, ${juniorConversations.channelName})`,
           title: sql`coalesce(excluded.title, ${juniorConversations.title})`,
           createdAt: sql`least(${juniorConversations.createdAt}, excluded.created_at)`,

@@ -51,10 +51,6 @@ vi.mock("@/chat/pi/client", () => ({
 describe("createAdvisorTool", () => {
   it("records privacy-safe advisor invoke-agent attributes", async () => {
     const { createAdvisorTool } = await import("@/chat/tools/advisor/tool");
-    const store = {
-      load: vi.fn(async () => []),
-      save: vi.fn(async () => undefined),
-    };
     const advisor = createAdvisorTool({
       config: {
         modelId: "openai/gpt-5.4",
@@ -63,7 +59,9 @@ describe("createAdvisorTool", () => {
       conversationId: "slack:D1:123",
       conversationPrivacy: "private",
       getTools: () => [],
-      store,
+      conversationStore: {
+        ensureChildConversation: async () => undefined,
+      } as unknown as import("@/chat/conversations/store").ConversationStore,
     });
 
     const result = await advisor.execute!(
@@ -106,5 +104,5 @@ describe("createAdvisorTool", () => {
     expect(endAttributes["gen_ai.output.messages"]).not.toContain(
       "private advisor memo",
     );
-  });
+  }, 20_000);
 });

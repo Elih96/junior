@@ -1,7 +1,7 @@
-import { THREAD_STATE_TTL_MS } from "chat";
 import { createUserTokenStore } from "@/chat/capabilities/factory";
 import { hasRequiredOAuthScope } from "@/chat/credentials/oauth-scope";
 import { coerceThreadConversationState } from "@/chat/state/conversation";
+import { hydrateConversationMessages } from "@/chat/conversations/visible-messages";
 import {
   formatProviderLabel,
   parseOAuthStatePayload,
@@ -52,7 +52,10 @@ import {
   getAgentTurnSessionRecord,
   abandonAgentTurnSessionRecord,
 } from "@/chat/state/turn-session";
-import { recordAuthorizationCompleted } from "@/chat/state/session-log";
+import {
+  loadProjection,
+  recordAuthorizationCompleted,
+} from "@/chat/conversations/projection";
 import {
   applyPendingAuthUpdate,
   clearPendingAuth,
@@ -92,6 +95,10 @@ async function persistCompletedOAuthReplyState(args: {
 }): Promise<void> {
   const currentState = await getPersistedThreadState(args.conversationId);
   const conversation = coerceThreadConversationState(currentState);
+  await hydrateConversationMessages({
+    conversation,
+    conversationId: args.conversationId,
+  });
   const artifacts = coerceThreadArtifactsState(currentState);
   const userMessage = getTurnUserMessage(conversation, args.sessionId);
   const statePatch = buildDeliveredTurnStatePatch({
@@ -148,6 +155,10 @@ async function persistFailedOAuthReplyState(args: {
 }): Promise<void> {
   const currentState = await getPersistedThreadState(args.conversationId);
   const conversation = coerceThreadConversationState(currentState);
+  await hydrateConversationMessages({
+    conversation,
+    conversationId: args.conversationId,
+  });
   clearPendingAuth(conversation, args.sessionId);
 
   markTurnFailed({
@@ -193,6 +204,10 @@ async function resumeOAuthSessionRecordTurn(
     stored.resumeConversationId,
   );
   const conversation = coerceThreadConversationState(currentState);
+  await hydrateConversationMessages({
+    conversation,
+    conversationId: stored.resumeConversationId,
+  });
   const pendingAuth = getConversationPendingAuth({
     conversation,
     kind: "plugin",
@@ -268,6 +283,10 @@ async function resumeOAuthSessionRecordTurn(
         stored.resumeConversationId!,
       );
       const lockedConversation = coerceThreadConversationState(lockedState);
+      await hydrateConversationMessages({
+        conversation: lockedConversation,
+        conversationId: stored.resumeConversationId!,
+      });
       const lockedArtifacts = coerceThreadArtifactsState(lockedState);
       const lockedPendingAuth = getConversationPendingAuth({
         conversation: lockedConversation,
@@ -368,7 +387,6 @@ async function resumeOAuthSessionRecordTurn(
           provider: stored.provider,
           sessionId: lockedSessionId,
         }),
-        ttlMs: THREAD_STATE_TTL_MS,
       });
 
       const lockedMessageTs = getTurnUserSlackMessageTs(lockedUserMessage);
@@ -380,7 +398,11 @@ async function resumeOAuthSessionRecordTurn(
         replyContext: {
           input: {
             conversationContext: lockedConversationContext,
-            piMessages: lockedConversation.piMessages,
+            // Pi history is SQL-authoritative: the resumed run reads its
+            // session record first and falls back to the step projection.
+            piMessages: await loadProjection({
+              conversationId: stored.resumeConversationId!,
+            }),
             ...getTurnUserReplyAttachmentContext(lockedUserMessage),
           },
           routing: {
@@ -497,6 +519,7 @@ async function resumePendingOAuthMessage(
   const conversation = coerceThreadConversationState(
     await getPersistedThreadState(threadId),
   );
+  await hydrateConversationMessages({ conversation, conversationId: threadId });
   const latestUserMessage = [...conversation.messages]
     .reverse()
     .find((message) => message.role === "user");
@@ -519,7 +542,8 @@ async function resumePendingOAuthMessage(
     replyContext: {
       input: {
         conversationContext,
-        piMessages: conversation.piMessages,
+        // Pi history is SQL-authoritative via the step-store projection.
+        piMessages: await loadProjection({ conversationId: threadId }),
       },
       routing: {
         credentialContext: {

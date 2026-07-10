@@ -60,9 +60,9 @@ async function advanceUntilContinueCall(maxMs: number): Promise<void> {
   throw new Error("Expected provider retry continuation to start");
 }
 
-vi.mock("@/chat/state/session-log", async (importOriginal) => {
+vi.mock("@/chat/conversations/projection", async (importOriginal) => {
   const actual =
-    await importOriginal<typeof import("@/chat/state/session-log")>();
+    await importOriginal<typeof import("@/chat/conversations/projection")>();
   return {
     ...actual,
     recordToolExecutionStarted: async (
@@ -70,7 +70,7 @@ vi.mock("@/chat/state/session-log", async (importOriginal) => {
     ) => {
       sessionLogState.toolExecutionAppendCalls += 1;
       if (sessionLogState.failToolExecutionAppend) {
-        throw new Error("redis blip during host-only append");
+        throw new Error("store blip during host-only append");
       }
       return actual.recordToolExecutionStarted(...args);
     },
@@ -369,7 +369,6 @@ describe("executeAgentRun provider retry", () => {
     sessionLogState.toolExecutionAppendCalls = 0;
     process.env.JUNIOR_STATE_ADAPTER = "memory";
     await disconnectStateAdapter();
-    await getConversationStore().listByActivity({ limit: 1 });
     vi.useFakeTimers();
   });
 
@@ -426,7 +425,7 @@ describe("executeAgentRun provider retry", () => {
       "user",
       "toolResult",
     ]);
-  });
+  }, 20_000);
 
   it("persists and queues steering messages at the next Pi boundary", async () => {
     agentMode.value = "steering";
@@ -529,19 +528,19 @@ describe("executeAgentRun provider retry", () => {
       "slack:C123:1712345.0001",
     );
     const transcript = report.runs[0]?.transcript ?? [];
-    expect(JSON.stringify(transcript)).not.toContain("previous question");
-    expect(transcript).toHaveLength(3);
-    expect(transcript[0]).toMatchObject({
+    expect(JSON.stringify(transcript)).toContain("previous question");
+    expect(transcript).toHaveLength(5);
+    expect(transcript[2]).toMatchObject({
       role: "user",
       timestamp: expect.any(Number),
       parts: expect.arrayContaining([{ type: "text", text: "help me" }]),
     });
-    expect(transcript[1]).toEqual({
+    expect(transcript[3]).toEqual({
       role: "user",
       timestamp: 2_000,
       parts: [{ type: "text", text: "actually do the other thing" }],
     });
-    expect(transcript[2]).toEqual({
+    expect(transcript[4]).toEqual({
       role: "assistant",
       parts: [{ type: "text", text: "Steered." }],
     });

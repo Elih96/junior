@@ -63,9 +63,16 @@ The durable execution model uses the canonical terms from
   conversation: pending inbound mailbox, worker lease, nudge/checkpoint
   timestamps, and whether the conversation is idle or active.
 
-Avoid using **turn** for agent runs in new specs and storage names. If a test,
-module, or existing key still says "turn session", read it as the historical
-name for an agent-run read model, not as a single model/tool action.
+**Turn** is now the canonical name for one agent run
+([`terminology.md`](./terminology.md)). This spec predates that flip and keeps
+"agent run" in its contract prose; read the two as the same concept. A turn is
+never a single model/tool action, and "turn session" keys remain the historical
+name for a turn's session read model. One nuance: where this spec says a run
+"may consume multiple inbound messages at safe boundaries", that describes the
+execution machinery — the worker, lease, and model loop continue across a
+steering handoff. Turn attribution rolls over instead: steering input ends the
+active turn prematurely (it gets no final response) and starts a new turn;
+steering messages that arrive together may batch into one new turn.
 
 This spec follows the domain naming policy in
 [`policies/interface-design.md`](../policies/interface-design.md). Its core

@@ -14,12 +14,13 @@ Co-Authored-By: (agent model name) <email>
 
 ## File-Scoped Commands
 
-| Task                  | Command                                                                        |
-| --------------------- | ------------------------------------------------------------------------------ |
-| Unit test file        | `pnpm --filter @sentry/junior exec vitest run path/to/file.test.ts`            |
-| Integration test file | `pnpm --filter @sentry/junior exec vitest run path/to/file.test.ts`            |
-| Eval file             | `pnpm --filter @sentry/junior-evals evals path/to/eval.eval.ts`                |
-| Eval case filter      | `pnpm --filter @sentry/junior-evals evals path/to/eval.eval.ts -t "case name"` |
+| Task                  | Command                                                                               |
+| --------------------- | ------------------------------------------------------------------------------------- |
+| Unit test file        | `pnpm --filter @sentry/junior exec vitest run path/to/file.test.ts`                   |
+| Integration test file | `pnpm --filter @sentry/junior exec vitest run path/to/file.test.ts`                   |
+| Eval file             | `pnpm --filter @sentry/junior-evals evals path/to/eval.eval.ts`                       |
+| Eval case filter      | `pnpm --filter @sentry/junior-evals evals path/to/eval.eval.ts -t "case name"`        |
+| Generate SQL schema   | `pnpm --filter @sentry/junior db:generate` (drizzle-kit; no-diff = schema/DDL parity) |
 
 ## Key Conventions
 
@@ -138,9 +139,9 @@ Co-Authored-By: (agent model name) <email>
 - `specs/security-policy.md` (global runtime/container/token security policy)
 - `specs/data-redaction-policy.md` (conversation privacy classification and raw payload redaction policy)
 - `specs/chat-architecture.md` (chat composition, service, and test-seam architecture contract)
-- `specs/terminology.md` (canonical execution vocabulary and historical turn naming rules)
+- `specs/terminology.md` (canonical execution vocabulary)
 - `specs/task-execution.md` (durable conversation mailbox, queue wake-up, lease, and heartbeat execution contract)
-- `specs/conversation-storage.md` (shared SQL-backed durable conversation records, transcript exclusions, and deploy-safe migration/backfill contract)
+- `specs/conversation-storage.md` (SQL-backed conversation records, visible messages, agent step history, visibility-tiered retention, and deploy-safe migration contract)
 - `specs/local-agent.md` (local CLI/local adapter user flows, identity, state, and delivery contract)
 - `specs/agent-turn-handling.md` (agent user-message response policy: reply/silence, tool use, Slack side effects, resumed runs, and completion)
 - `specs/slack-agent-delivery.md` (Slack entry surfaces, reply delivery, continuation, files, images, and resume behavior contract)

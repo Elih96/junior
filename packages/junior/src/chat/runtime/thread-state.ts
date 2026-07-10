@@ -4,6 +4,7 @@ import { createChannelConfigurationService } from "@/chat/configuration/service"
 import type { ChannelConfigurationService } from "@/chat/configuration/types";
 import { buildConversationStatePatch } from "@/chat/state/conversation";
 import type { ThreadConversationState } from "@/chat/state/conversation";
+import { persistConversationMessages } from "@/chat/conversations/visible-messages";
 import {
   buildArtifactStatePatch,
   type ThreadArtifactsState,
@@ -86,6 +87,28 @@ export async function persistThreadState(
   thread: Thread,
   patch: ThreadStatePatch,
 ): Promise<void> {
+  // The visible transcript is durable in SQL, keyed by the conversation id —
+  // which is the thread's own id here (its thread-state key), the same way
+  // persistThreadStateById treats its thread id. Sync it at this Chat-SDK
+  // persist boundary so scratch and transcript stay symmetric with the
+  // id-based boundary and never diverge.
+  if (patch.conversation) {
+    await persistConversationMessages({
+      conversation: patch.conversation,
+      conversationId:
+        toOptionalString(thread.id) ??
+        toOptionalString((thread as { runId?: unknown }).runId),
+    });
+  }
+
+  await persistThreadRuntimeState(thread, patch);
+}
+
+/** Persist only the Redis-backed runtime scratch in a thread-state patch. */
+export async function persistThreadRuntimeState(
+  thread: Thread,
+  patch: ThreadStatePatch,
+): Promise<void> {
   const payload = buildThreadStatePayload(patch);
   if (Object.keys(payload).length === 0) {
     return;
@@ -124,6 +147,16 @@ export async function persistThreadStateById(
   threadId: string,
   patch: ThreadStatePatch,
 ): Promise<void> {
+  // The visible transcript is durable in SQL, keyed by the conversation id
+  // (which is the thread id here); keep it in sync at this id-based persist
+  // boundary so scratch and transcript never diverge.
+  if (patch.conversation) {
+    await persistConversationMessages({
+      conversation: patch.conversation,
+      conversationId: threadId,
+    });
+  }
+
   const payload = buildThreadStatePayload(patch);
   if (Object.keys(payload).length === 0) {
     return;

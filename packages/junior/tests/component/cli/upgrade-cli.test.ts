@@ -10,9 +10,9 @@ import {
   requestConversationWork,
 } from "@/chat/task-execution/store";
 import { createSqlStore } from "@/chat/conversations/sql/store";
-import type { PiMessage } from "@/chat/pi/messages";
+import type { ConversationStore } from "@/chat/conversations/store";
 import { persistThreadStateById } from "@/chat/runtime/thread-state";
-import { upsertAgentTurnSessionRecord } from "@/chat/state/turn-session";
+import { recordAgentTurnSessionSummary } from "@/chat/state/turn-session";
 import { resolveUpgradePluginSet } from "@/cli/upgrade";
 import { migrateConversationsToSql } from "@/cli/upgrade/migrations/conversations-sql";
 import { redisConversationStateMigration } from "@/cli/upgrade/migrations/redis-conversation-state";
@@ -38,6 +38,15 @@ const OTHER_SLACK_DESTINATION = {
   channelId: "C999",
 } as const;
 
+const stateOnlyConversationStore: ConversationStore = {
+  get: async () => undefined,
+  getDestinationVisibility: async () => undefined,
+  recordActivity: async () => {},
+  ensureChildConversation: async () => {},
+  recordExecution: async () => {},
+  listByActivity: async () => [],
+};
+
 function restoreEnv(name: string, value: string | undefined): void {
   if (value === undefined) {
     delete process.env[name];
@@ -56,7 +65,6 @@ async function persistActiveTurn(
       backfill: {},
       compactions: [],
       messages: [],
-      piMessages: [],
       processing: {
         activeTurnId,
       },
@@ -194,6 +202,7 @@ export const plugins = {
         await appendInboundMessage({
           message: inboundMessage(`page-${index}`, { conversationId }),
           nowMs: 1_000 + index,
+          conversationStore: stateOnlyConversationStore,
           state: stateAdapter,
         });
       }
@@ -224,20 +233,14 @@ export const plugins = {
   it("seeds active awaiting continuations into conversation work", async () => {
     const stateAdapter = getStateAdapter();
     await stateAdapter.connect();
-    await upsertAgentTurnSessionRecord({
+    await recordAgentTurnSessionSummary({
       conversationId: CONVERSATION_ID,
       destination: SLACK_DESTINATION,
-      piMessages: [
-        {
-          role: "user",
-          content: [{ type: "text", text: "finish this" }],
-          timestamp: 1_000,
-        } as PiMessage,
-      ],
       resumeReason: "timeout",
       sessionId: "turn-timeout",
       sliceId: 2,
       state: "awaiting_resume",
+      conversationStore: stateOnlyConversationStore,
     });
     await persistActiveTurn(CONVERSATION_ID, "turn-timeout");
 
@@ -278,6 +281,7 @@ export const plugins = {
     await stateAdapter.connect();
     await requestConversationWork({
       conversationId: CONVERSATION_ID,
+      conversationStore: stateOnlyConversationStore,
       destination: SLACK_DESTINATION,
       nowMs: 2_000,
       state: stateAdapter,
@@ -351,6 +355,7 @@ export const plugins = {
     await stateAdapter.connect();
     await requestConversationWork({
       conversationId: CONVERSATION_ID,
+      conversationStore: stateOnlyConversationStore,
       destination: SLACK_DESTINATION,
       nowMs: 2_000,
       state: stateAdapter,
@@ -445,6 +450,7 @@ export const plugins = {
     await stateAdapter.connect();
     await requestConversationWork({
       conversationId: CONVERSATION_ID,
+      conversationStore: stateOnlyConversationStore,
       destination: SLACK_DESTINATION,
       nowMs: 2_000,
       state: stateAdapter,

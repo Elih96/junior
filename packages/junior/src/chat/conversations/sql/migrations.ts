@@ -5,9 +5,11 @@
  * `junior upgrade`; request handlers must not apply them.
  */
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { z } from "zod";
-import { schema } from "./schema";
-import type { JuniorSqlMigrationExecutor } from "@/chat/sql/db";
+import type { JuniorSqlMigrationExecutor } from "@/db/db";
+import { juniorSqlSchema as schema } from "@/db/schema";
 
 const MIGRATION_LOCK_NAME = "junior_conversation_schema";
 
@@ -44,6 +46,35 @@ function defineMigration(id: string, statements: readonly string[]): Migration {
     checksum: checksumStatements(statements),
     statements,
   };
+}
+
+/** Absolute path to a drizzle-kit-generated `.sql` file in the `migrations/` out dir. */
+function kitMigrationPath(fileName: string): string {
+  return fileURLToPath(
+    new URL(`../../../../migrations/${fileName}`, import.meta.url),
+  );
+}
+
+/**
+ * Register a drizzle-kit-generated `.sql` file as a checksum-pinned migration.
+ *
+ * Migrations 0006 onward are authored by editing the Drizzle schema and running
+ * `pnpm --filter @sentry/junior db:generate`; each generated file becomes one
+ * line here. Statements are split on drizzle-kit's `--> statement-breakpoint`
+ * markers and applied by the custom `junior upgrade` runner (never
+ * `drizzle-kit migrate`). Migrations 0001–0005 predate kit and stay inline so
+ * their recorded checksums remain byte-stable.
+ */
+export function defineMigrationFromFile(
+  id: string,
+  fileName: string,
+): Migration {
+  const contents = readFileSync(kitMigrationPath(fileName), "utf8");
+  const statements = contents
+    .split(/-->\s*statement-breakpoint/)
+    .map((statement) => statement.trim())
+    .filter((statement) => statement.length > 0);
+  return defineMigration(id, statements);
 }
 
 const createMigrationTable = `
@@ -312,6 +343,54 @@ ALTER TABLE junior_conversations
 `,
 ] as const;
 
+const conversationTranscriptStatements = [
+  `
+CREATE TABLE IF NOT EXISTS junior_agent_steps (
+  conversation_id TEXT NOT NULL REFERENCES junior_conversations (conversation_id),
+  seq INTEGER NOT NULL,
+  context_epoch INTEGER NOT NULL,
+  type TEXT NOT NULL,
+  role TEXT,
+  payload JSONB NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (conversation_id, seq)
+)
+`,
+  `
+CREATE INDEX IF NOT EXISTS junior_agent_steps_epoch_idx
+  ON junior_agent_steps (conversation_id, context_epoch, seq)
+`,
+  `
+CREATE TABLE IF NOT EXISTS junior_conversation_messages (
+  conversation_id TEXT NOT NULL REFERENCES junior_conversations (conversation_id),
+  message_id TEXT NOT NULL,
+  role TEXT NOT NULL,
+  author_identity_id TEXT REFERENCES junior_identities (id),
+  text TEXT NOT NULL,
+  meta JSONB,
+  replied_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (conversation_id, message_id)
+)
+`,
+  `
+CREATE INDEX IF NOT EXISTS junior_conversation_messages_activity_idx
+  ON junior_conversation_messages (conversation_id, created_at)
+`,
+  `
+ALTER TABLE junior_conversations
+  ADD COLUMN IF NOT EXISTS parent_conversation_id TEXT REFERENCES junior_conversations (conversation_id)
+`,
+  `
+ALTER TABLE junior_conversations
+  ADD COLUMN IF NOT EXISTS transcript_purged_at TIMESTAMPTZ
+`,
+  `
+CREATE INDEX IF NOT EXISTS junior_conversations_parent_idx
+  ON junior_conversations (parent_conversation_id)
+`,
+] as const;
+
 export const migrations = [
   defineMigration("0001_conversation_core", coreMetadataStatements),
   defineMigration(
@@ -320,6 +399,10 @@ export const migrations = [
   ),
   defineMigration("0003_user_identities", userIdentityStatements),
   defineMigration("0004_actor_cutover", actorCutoverStatements),
+  defineMigration(
+    "0005_conversation_transcripts",
+    conversationTranscriptStatements,
+  ),
 ] as const;
 
 export { schema };

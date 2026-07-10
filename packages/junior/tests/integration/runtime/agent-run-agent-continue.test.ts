@@ -262,7 +262,6 @@ vi.mock("@/chat/skills", async (importOriginal) => ({
 import { executeAgentRun } from "@/chat/agent";
 import { isTurnInputCommitLostError } from "@/chat/runtime/turn";
 import { AGENT_CONTINUE_MAX_SLICES } from "@/chat/services/turn-session-record";
-import { getConversationStore } from "@/chat/db";
 import { disconnectStateAdapter } from "@/chat/state/adapter";
 import {
   getAgentTurnSessionRecord,
@@ -296,7 +295,6 @@ describe("executeAgentRun agent continuation", () => {
     promptSettled.value = false;
     process.env.JUNIOR_STATE_ADAPTER = "memory";
     await disconnectStateAdapter();
-    await getConversationStore().listByActivity({ limit: 1 });
     vi.useFakeTimers();
   });
 

@@ -12,13 +12,13 @@ import {
 import { processConversationWork } from "@/chat/task-execution/worker";
 import { disconnectStateAdapter, getStateAdapter } from "@/chat/state/adapter";
 import { upsertAgentTurnSessionRecord } from "@/chat/state/turn-session";
-import type { JuniorSqlMigrationExecutor } from "@/chat/sql/db";
+import type { JuniorSqlMigrationExecutor } from "@/db/db";
 import {
   juniorConversations,
   juniorDestinations,
   juniorIdentities,
   juniorUsers,
-} from "@/chat/sql/schema";
+} from "@/db/schema";
 import { eq } from "drizzle-orm";
 import {
   listRecentConversationSummaries,
@@ -233,6 +233,16 @@ VALUES ($1, 'user', 'manual', '', 'manual-user', 'Manual User', NULL, 'Manual@Ex
         {
           conversationId: CONVERSATION_ID,
           channelName: "eng-runtime",
+          destination: {
+            platform: "slack",
+            teamId: "T123",
+            channelId: "C123",
+          },
+          actor: {
+            platform: "slack",
+            teamId: "T123",
+            slackUserId: "U123",
+          },
           title: "SQL conversation store",
           execution: {
             status: "idle",
@@ -246,7 +256,9 @@ VALUES ($1, 'user', 'manual', '', 'manual-user', 'Manual User', NULL, 'Manual@Ex
         .db()
         .select({
           actorIdentityId: juniorConversations.actorIdentityId,
+          actorJson: juniorConversations.actor,
           destinationId: juniorConversations.destinationId,
+          destinationJson: juniorConversations.destination,
           destinationKind: juniorDestinations.kind,
           destinationProvider: juniorDestinations.provider,
           destinationProviderSubject: juniorDestinations.providerDestinationId,
@@ -271,7 +283,9 @@ VALUES ($1, 'user', 'manual', '', 'manual-user', 'Manual User', NULL, 'Manual@Ex
       expect(linkedRows).toEqual([
         {
           actorIdentityId: linkedRows[0]?.actorIdentityId,
+          actorJson: null,
           destinationId: linkedRows[0]?.destinationId,
+          destinationJson: null,
           destinationKind: "channel",
           destinationProvider: "slack",
           destinationProviderSubject: "C123",
@@ -284,6 +298,38 @@ VALUES ($1, 'user', 'manual', '', 'manual-user', 'Manual User', NULL, 'Manual@Ex
           actorTenant: "T123",
         },
       ]);
+
+      await fixture.sql
+        .db()
+        .update(juniorConversations)
+        .set({
+          destination: {
+            platform: "slack",
+            teamId: "T-stale",
+            channelId: "C-stale",
+          },
+          actor: {
+            platform: "slack",
+            teamId: "T-stale",
+            slackUserId: "U-stale",
+          },
+        })
+        .where(eq(juniorConversations.conversationId, CONVERSATION_ID));
+
+      await expect(
+        store.get({ conversationId: CONVERSATION_ID }),
+      ).resolves.toMatchObject({
+        destination: {
+          platform: "slack",
+          teamId: "T123",
+          channelId: "C123",
+        },
+        actor: {
+          platform: "slack",
+          teamId: "T123",
+          slackUserId: "U123",
+        },
+      });
     } finally {
       await fixture.close();
     }
@@ -642,7 +688,7 @@ INSERT INTO junior_destinations (
     }
   });
 
-  it("rejects invalid serialized provider fields", async () => {
+  it("rejects legacy JSON metadata that was not migrated to foreign keys", async () => {
     const fixture = await createLocalJuniorSqlFixture();
 
     try {
@@ -670,10 +716,33 @@ INSERT INTO junior_conversations (
           "idle",
         ],
       );
+      await fixture.sql.execute(
+        `
+INSERT INTO junior_conversations (
+  conversation_id,
+  actor_json,
+  created_at,
+  last_activity_at,
+  updated_at,
+  execution_status
+) VALUES ($1, $2::jsonb, $3, $4, $5, $6)
+`,
+        [
+          "slack:C123:legacy-actor",
+          JSON.stringify({ platform: "slack", slackUserId: "U123" }),
+          new Date(1_000).toISOString(),
+          new Date(1_000).toISOString(),
+          new Date(1_000).toISOString(),
+          "idle",
+        ],
+      );
 
       await expect(
         store.get({ conversationId: "slack:C123:invalid-json" }),
-      ).rejects.toThrow("Conversation record destination is invalid");
+      ).rejects.toThrow("Conversation legacy destination is not migrated");
+      await expect(
+        store.get({ conversationId: "slack:C123:legacy-actor" }),
+      ).rejects.toThrow("Conversation legacy actor is not migrated");
     } finally {
       await fixture.close();
     }
@@ -858,28 +927,20 @@ INSERT INTO junior_conversations (
     }
   });
 
-  it("uses turn-session status for plugin conversation summaries", async () => {
+  it("uses SQL execution status for plugin conversation summaries", async () => {
     const fixture = await createLocalJuniorSqlFixture();
 
     try {
       await disconnectStateAdapter();
       const store = createSqlStore(fixture.sql);
       await store.migrate();
-      await store.recordActivity({
+      await store.recordExecution({
         conversationId: CONVERSATION_ID,
+        createdAtMs: 1_000,
         destination: inboundMessage("summary-target").destination,
-        nowMs: 1_000,
-      });
-      await upsertAgentTurnSessionRecord({
-        conversationStore: store,
-        conversationId: CONVERSATION_ID,
-        destination: inboundMessage("summary-target").destination,
-        lastProgressAtMs: 1_200,
-        piMessages: [],
-        sessionId: "turn-failed",
-        sliceId: 1,
-        state: "failed",
-        surface: "slack",
+        execution: { status: "failed", updatedAtMs: 1_200 },
+        lastActivityAtMs: 1_200,
+        updatedAtMs: 1_200,
       });
 
       await expect(
@@ -899,7 +960,7 @@ INSERT INTO junior_conversations (
     }
   });
 
-  it("keeps active turn-session status over idle SQL execution", async () => {
+  it("reports active SQL execution status", async () => {
     const fixture = await createLocalJuniorSqlFixture();
 
     try {
@@ -907,21 +968,13 @@ INSERT INTO junior_conversations (
       await disconnectStateAdapter();
       const store = createSqlStore(fixture.sql);
       await store.migrate();
-      await store.recordActivity({
+      await store.recordExecution({
         conversationId: CONVERSATION_ID,
+        createdAtMs: 1_000,
         destination: inboundMessage("active-target").destination,
-        nowMs: 1_000,
-      });
-      await upsertAgentTurnSessionRecord({
-        conversationStore: store,
-        conversationId: CONVERSATION_ID,
-        destination: inboundMessage("active-target").destination,
-        lastProgressAtMs: 1_500,
-        piMessages: [],
-        sessionId: "turn-active",
-        sliceId: 1,
-        state: "running",
-        surface: "slack",
+        execution: { status: "running", updatedAtMs: 1_500 },
+        lastActivityAtMs: 1_500,
+        updatedAtMs: 1_500,
       });
 
       await expect(
@@ -942,7 +995,7 @@ INSERT INTO junior_conversations (
     }
   });
 
-  it("keeps completed turn-session status over running SQL execution", async () => {
+  it("maps idle SQL execution status to completed", async () => {
     const fixture = await createLocalJuniorSqlFixture();
 
     try {
@@ -956,24 +1009,12 @@ INSERT INTO junior_conversations (
         destination: inboundMessage("completed-target").destination,
         execution: {
           runId: "run-completed",
-          status: "running",
+          status: "idle",
           updatedAtMs: 2_000,
         },
         lastActivityAtMs: 2_000,
         updatedAtMs: 2_000,
       });
-      await upsertAgentTurnSessionRecord({
-        conversationStore: store,
-        conversationId: CONVERSATION_ID,
-        destination: inboundMessage("completed-target").destination,
-        lastProgressAtMs: 1_500,
-        piMessages: [],
-        sessionId: "turn-completed",
-        sliceId: 1,
-        state: "completed",
-        surface: "slack",
-      });
-
       await expect(
         listRecentConversationSummaries({
           limit: 1,
@@ -992,7 +1033,7 @@ INSERT INTO junior_conversations (
     }
   });
 
-  it("keeps hung turn-session progress over fresh SQL check-ins", async () => {
+  it("keeps fresh SQL progress over stale turn-session state", async () => {
     const fixture = await createLocalJuniorSqlFixture();
 
     try {
@@ -1030,9 +1071,9 @@ INSERT INTO junior_conversations (
         conversations: [
           {
             conversationId: CONVERSATION_ID,
-            lastProgressAt: new Date(1_000).toISOString(),
+            lastProgressAt: new Date(600_000).toISOString(),
             lastSeenAt: new Date(600_000).toISOString(),
-            status: "hung",
+            status: "active",
           },
         ],
       });

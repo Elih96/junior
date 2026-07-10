@@ -171,8 +171,8 @@ describe("context compaction projection reset", () => {
       await import("@/chat/services/context-compaction");
     const { coerceThreadConversationState } =
       await import("@/chat/state/conversation");
-    const { commitMessages, loadProjection, loadProjectionWithActor } =
-      await import("@/chat/state/session-log");
+    const { commitMessages, loadProjection, loadProjectionWithProvenance } =
+      await import("@/chat/conversations/projection");
 
     const priorMessages = [
       user("Please remember the deploy blocker.", 1),
@@ -181,7 +181,6 @@ describe("context compaction projection reset", () => {
     await commitMessages({
       conversationId: "conversation-1",
       messages: priorMessages,
-      ttlMs: 60_000,
       newMessageProvenance: {
         authority: "instruction",
         actor: {
@@ -222,16 +221,20 @@ describe("context compaction projection reset", () => {
     await expect(
       loadProjection({ conversationId: "conversation-1" }),
     ).resolves.toEqual(compactedMessages);
-    await expect(
-      loadProjectionWithActor({ conversationId: "conversation-1" }),
-    ).resolves.toMatchObject({
-      messages: compactedMessages,
-      actor: {
-        slackUserId: "U123",
-        slackUserName: "alice",
-        fullName: "Alice Example",
-        email: "alice@sentry.io",
-      },
+    const projection = await loadProjectionWithProvenance({
+      conversationId: "conversation-1",
+    });
+    expect(projection.messages).toEqual(compactedMessages);
+    const instructionActor = projection.provenance
+      .filter((entry) => entry.authority === "instruction" && entry.actor)
+      .at(-1)?.actor;
+    expect(instructionActor).toMatchObject({
+      platform: "slack",
+      teamId: "T123",
+      userId: "U123",
+      userName: "alice",
+      fullName: "Alice Example",
+      email: "alice@sentry.io",
     });
   });
 
@@ -241,7 +244,7 @@ describe("context compaction projection reset", () => {
     const { coerceThreadConversationState } =
       await import("@/chat/state/conversation");
     const { commitMessages, loadProjectionWithProvenance } =
-      await import("@/chat/state/session-log");
+      await import("@/chat/conversations/projection");
 
     const alice = {
       platform: "slack" as const,
@@ -260,7 +263,6 @@ describe("context compaction projection reset", () => {
     await commitMessages({
       conversationId: "conversation-identical-retained-text",
       messages: priorMessages,
-      ttlMs: 60_000,
       provenance: [
         { authority: "instruction", actor: alice },
         { authority: "instruction", actor: bob },
@@ -298,7 +300,7 @@ describe("context compaction projection reset", () => {
       await import("@/chat/services/context-compaction");
     const { coerceThreadConversationState } =
       await import("@/chat/state/conversation");
-    const { commitMessages } = await import("@/chat/state/session-log");
+    const { commitMessages } = await import("@/chat/conversations/projection");
 
     const priorMessages = [
       {
@@ -320,7 +322,6 @@ describe("context compaction projection reset", () => {
     await commitMessages({
       conversationId: "conversation-large",
       messages: priorMessages,
-      ttlMs: 60_000,
     });
     const conversation = coerceThreadConversationState({});
     let capturedPrompt = "";
@@ -353,7 +354,7 @@ describe("context compaction projection reset", () => {
       await import("@/chat/services/context-compaction");
     const { coerceThreadConversationState } =
       await import("@/chat/state/conversation");
-    const { commitMessages } = await import("@/chat/state/session-log");
+    const { commitMessages } = await import("@/chat/conversations/projection");
 
     const priorMessages = [
       {
@@ -390,7 +391,6 @@ describe("context compaction projection reset", () => {
     await commitMessages({
       conversationId: "conversation-tool-context",
       messages: priorMessages,
-      ttlMs: 60_000,
     });
     const conversation = coerceThreadConversationState({});
     let summarized = false;
