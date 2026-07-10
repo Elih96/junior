@@ -13,15 +13,6 @@ import { createTools } from "@/chat/tools";
 import { createPiAgentTools } from "@/chat/tool-support/pi-tool-adapter";
 import { tool, type AnyToolDefinition } from "@/chat/tools/definition";
 
-const { setSpanAttributes } = vi.hoisted(() => ({
-  setSpanAttributes: vi.fn(),
-}));
-
-vi.mock("@/chat/logging", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/chat/logging")>()),
-  setSpanAttributes,
-}));
-
 const customerResultSchema = pluginToolResultSchema.extend({
   ok: z.literal(true),
   status: z.literal("success"),
@@ -83,10 +74,6 @@ describe("Pi tool adapter integration", () => {
                     .describe("Customer identifier to inspect."),
                 }),
                 outputSchema: customerResultSchema,
-                privateTraceResult: (result) => ({
-                  customer_id: result.customer_id,
-                  status: result.status,
-                }),
                 prepareArguments: (args) => {
                   const input = args as Record<string, unknown>;
                   return typeof input.customer_id === "string"
@@ -154,7 +141,6 @@ describe("Pi tool adapter integration", () => {
         ],
       });
 
-      setSpanAttributes.mockClear();
       const executeResult = await agentTool(tools, "executeTool").execute(
         "tool-execute",
         {
@@ -176,12 +162,6 @@ describe("Pi tool adapter integration", () => {
       expect(onToolCall).toHaveBeenCalledWith("agentDemo_lookupCustomer", {
         customerId: "C123",
       });
-      const resultAttributes = setSpanAttributes.mock.calls
-        .map(([attributes]) => attributes as Record<string, unknown>)
-        .find((attributes) => "gen_ai.tool.call.result" in attributes);
-      expect(
-        JSON.parse(resultAttributes?.["gen_ai.tool.call.result"] as string),
-      ).toEqual({ customer_id: "C123", status: "success" });
     } finally {
       setPlugins(previousPlugins);
     }

@@ -1515,6 +1515,8 @@ export function setSentryScopeContext(
 type SpanAttributePrimitive = string | number | boolean;
 type SpanAttributeValue = SpanAttributePrimitive | string[];
 
+export type SetSpanAttributes = (attributes: Record<string, unknown>) => void;
+
 function toSpanAttributeValue(value: unknown): SpanAttributeValue | undefined {
   if (
     typeof value === "string" ||
@@ -1550,6 +1552,17 @@ function normalizeSpanAttributes(
     }
   }
   return normalized;
+}
+
+function setAttributesOnSpan(
+  span: Sentry.Span,
+  attributes: Record<string, unknown>,
+): void {
+  for (const [key, value] of Object.entries(
+    normalizeSpanAttributes(attributes),
+  )) {
+    span.setAttribute(key, value);
+  }
 }
 
 /** Capture an error to Sentry and emit an error log record. */
@@ -1645,7 +1658,7 @@ export async function withSpan<T>(
   name: string,
   op: string,
   context: LogContext,
-  callback: () => Promise<T>,
+  callback: (setSpanAttributes: SetSpanAttributes) => Promise<T>,
   attributes: Record<string, unknown> = {},
 ): Promise<T> {
   const normalizedAttributes = normalizeSpanAttributes(attributes);
@@ -1664,7 +1677,7 @@ export async function withSpan<T>(
           ...normalizedAttributes,
         },
       },
-      callback,
+      (span) => callback((attributes) => setAttributesOnSpan(span, attributes)),
     );
   });
 }
@@ -1693,40 +1706,22 @@ export function getTracePropagationHeaders(): TracePropagationHeaders {
 
 /** Set attributes on the currently active Sentry span. */
 export function setSpanAttributes(attributes: Record<string, unknown>): void {
-  const sentry = Sentry as unknown as { getActiveSpan?: () => unknown };
-  const span = sentry.getActiveSpan?.();
+  const span = Sentry.getActiveSpan();
   if (!span) {
     return;
   }
-
-  const setAttribute = (
-    span as { setAttribute?: (key: string, value: SpanAttributeValue) => void }
-  ).setAttribute;
-  if (typeof setAttribute !== "function") {
-    return;
-  }
-
-  for (const [key, value] of Object.entries(
-    normalizeSpanAttributes(attributes),
-  )) {
-    setAttribute.call(span, key, value);
-  }
+  setAttributesOnSpan(span, attributes);
 }
 
 /** Set the status of the currently active Sentry span. */
 export function setSpanStatus(status: "ok" | "error"): void {
-  const sentry = Sentry as unknown as { getActiveSpan?: () => unknown };
-  const span = sentry.getActiveSpan?.();
+  const span = Sentry.getActiveSpan();
   if (!span) {
     return;
   }
-
-  const setStatus = (span as { setStatus?: (value: string) => void }).setStatus;
-  if (typeof setStatus !== "function") {
-    return;
-  }
-
-  setStatus.call(span, status === "ok" ? "ok" : "internal_error");
+  span.setStatus(
+    status === "ok" ? { code: 1 } : { code: 2, message: "internal_error" },
+  );
 }
 
 /** Capture an exception within an isolated Sentry scope. */
