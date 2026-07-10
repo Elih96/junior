@@ -4,7 +4,8 @@ import {
   resolveSlackConversationContextFromThreadId,
 } from "@/chat/slack/conversation-context";
 import { parseSlackThreadId } from "@/chat/slack/context";
-import type { StoredSlackActor } from "@/chat/actor";
+import type { Actor, StoredSlackActor } from "@/chat/actor";
+import type { AgentTurnSessionSummary } from "@/chat/state/turn-session";
 import type {
   Conversation as StoredConversation,
   ConversationSource,
@@ -61,9 +62,23 @@ function surfaceFromSource(
 }
 
 function actorIdentityReport(
-  actor: StoredSlackActor | undefined,
+  actor: Actor | StoredSlackActor | undefined,
 ): ActorIdentity | undefined {
   if (!actor) return undefined;
+  if ("name" in actor) {
+    return { fullName: actor.name };
+  }
+  if ("userId" in actor) {
+    const identity: ActorIdentity = {
+      ...(actor.email !== undefined ? { email: actor.email } : {}),
+      ...(actor.fullName !== undefined ? { fullName: actor.fullName } : {}),
+      ...(actor.platform === "slack" ? { slackUserId: actor.userId } : {}),
+      ...(actor.platform === "slack" && actor.userName !== undefined
+        ? { slackUserName: actor.userName }
+        : {}),
+    };
+    return Object.keys(identity).length > 0 ? identity : undefined;
+  }
   const identity: ActorIdentity = {
     ...(actor.email !== undefined ? { email: actor.email } : {}),
     ...(actor.fullName !== undefined ? { fullName: actor.fullName } : {}),
@@ -199,6 +214,59 @@ export function sessionReportFromConversation(
     ...(slackThread ? { channel: slackThread.channelId } : {}),
     ...(channelName ? { channelName } : {}),
     ...(channelNameRedacted ? { channelNameRedacted: true } : {}),
+  };
+}
+
+function statusFromTurnSummary(
+  summary: AgentTurnSessionSummary,
+  nowMs: number,
+): ConversationReportStatus {
+  if (
+    summary.state === "running" &&
+    nowMs - summary.lastProgressAtMs > HUNG_TURN_PROGRESS_MS
+  ) {
+    return "hung";
+  }
+  if (summary.state === "running" || summary.state === "awaiting_resume") {
+    return "active";
+  }
+  if (summary.state === "abandoned") {
+    return "superseded";
+  }
+  return summary.state;
+}
+
+/** Enrich a durable conversation projection with one complete turn summary. */
+export function sessionReportFromTurnSummary(
+  conversation: StoredConversation,
+  summary: AgentTurnSessionSummary,
+  nowMs: number,
+): ConversationSummaryReport {
+  const base = sessionReportFromConversation(conversation, nowMs);
+  if (summary.actor !== undefined) {
+    const actorIdentity = actorIdentityReport(summary.actor);
+    if (actorIdentity) {
+      base.actorIdentity = actorIdentity;
+    } else {
+      delete base.actorIdentity;
+    }
+  }
+  return {
+    ...base,
+    cumulativeDurationMs: summary.cumulativeDurationMs,
+    ...(summary.cumulativeUsage
+      ? { cumulativeUsage: summary.cumulativeUsage }
+      : {}),
+    id: summary.sessionId,
+    lastProgressAt: new Date(summary.lastProgressAtMs).toISOString(),
+    lastSeenAt: new Date(summary.updatedAtMs).toISOString(),
+    startedAt: new Date(summary.startedAtMs).toISOString(),
+    status: statusFromTurnSummary(summary, nowMs),
+    surface: summary.surface ?? base.surface,
+    ...(summary.state === "completed"
+      ? { completedAt: new Date(summary.updatedAtMs).toISOString() }
+      : {}),
+    ...(summary.traceId ? { traceId: summary.traceId } : {}),
   };
 }
 
