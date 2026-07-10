@@ -110,8 +110,9 @@ Pass eval file paths and `-t` filters directly after the `evals` script. Do not 
   - `packages/junior-evals/evals/**`
   - `packages/junior-evals/vitest.evals.config.ts`
   - `packages/junior/src/**`
-- The simplest CI setup is `VERCEL_OIDC_TOKEN` alone. It covers both AI Gateway auth and Vercel Sandbox auth.
+- The simplest Gateway and Sandbox setup is `VERCEL_OIDC_TOKEN` alone.
 - The fallback CI setup is `AI_GATEWAY_API_KEY` plus `VERCEL_TOKEN` + `VERCEL_TEAM_ID` + `VERCEL_PROJECT_ID`.
+- Provider HTTP and generic OAuth evals also require `JUNIOR_BASE_URL` plus `CLOUDFLARE_TUNNEL_TOKEN` so Vercel Sandbox can reach the eval egress proxy.
 - This repo is not intended to configure those GitHub Actions secrets right now. The workflow support and setup doc are future-facing.
 - Setup details for GitHub Actions live in `evals/github-actions.md`.
 
@@ -196,7 +197,7 @@ import { mention, rubric, slackEvals } from "../../src/helpers";
 describeEval("Routing", slackEvals, (it) => {
   it("when explicitly mentioned, post one direct reply", async ({ run }) => {
     await run({
-      events: [mention("<@U_APP> summarize this")],
+      events: [mention("Summarize this")],
       criteria: rubric({
         pass: ["The assistant posts exactly one reply to the mention."],
       }),
