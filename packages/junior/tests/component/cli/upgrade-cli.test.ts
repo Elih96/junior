@@ -10,6 +10,7 @@ import {
   requestConversationWork,
 } from "@/chat/task-execution/store";
 import { createSqlStore } from "@/chat/conversations/sql/store";
+import { migrateSchema } from "@/chat/conversations/sql/migrations";
 import type { ConversationStore } from "@/chat/conversations/store";
 import { persistThreadStateById } from "@/chat/runtime/thread-state";
 import { recordAgentTurnSessionSummary } from "@/chat/state/turn-session";
@@ -141,6 +142,7 @@ export const plugins = {
     const sqlStore = createSqlStore(fixture.sql);
 
     try {
+      await migrateSchema(fixture.sql);
       const context = {
         io: { info: () => {} },
         stateAdapter,
@@ -197,6 +199,7 @@ export const plugins = {
     const sqlStore = createSqlStore(fixture.sql);
 
     try {
+      await migrateSchema(fixture.sql);
       for (let index = 0; index < 3; index++) {
         const conversationId = `slack:C123:page-${index}`;
         await appendInboundMessage({
@@ -225,6 +228,150 @@ export const plugins = {
         expect.objectContaining({ conversationId: "slack:C123:page-2" }),
         expect.objectContaining({ conversationId: "slack:C123:page-1" }),
       ]);
+    } finally {
+      await fixture.close();
+    }
+  }, 15_000);
+
+  it("backfills retained conversation metrics without replacing SQL totals", async () => {
+    const stateAdapter = getStateAdapter();
+    await stateAdapter.connect();
+    const fixture = await createLocalJuniorSqlFixture();
+    const sqlStore = createSqlStore(fixture.sql);
+
+    try {
+      await migrateSchema(fixture.sql);
+      const seedMs = Date.now() - 1_000;
+      await sqlStore.recordExecution({
+        conversationId: CONVERSATION_ID,
+        createdAtMs: seedMs,
+        destination: SLACK_DESTINATION,
+        execution: {
+          runId: "run-two",
+          status: "idle",
+          updatedAtMs: seedMs,
+        },
+        lastActivityAtMs: seedMs,
+        metrics: null,
+        updatedAtMs: seedMs,
+      });
+      await recordAgentTurnSessionSummary({
+        conversationId: CONVERSATION_ID,
+        cumulativeDurationMs: 1_000,
+        cumulativeUsage: {
+          inputTokens: 40,
+          outputTokens: 10,
+          reasoningTokens: 3,
+          cost: { total: 0.001 },
+        },
+        destination: SLACK_DESTINATION,
+        conversationStore: stateOnlyConversationStore,
+        sessionId: "run-one",
+        sliceId: 1,
+        state: "completed",
+        surface: "slack",
+      });
+      await recordAgentTurnSessionSummary({
+        conversationId: CONVERSATION_ID,
+        cumulativeDurationMs: 2_000,
+        cumulativeUsage: {
+          inputTokens: 80,
+          outputTokens: 20,
+          reasoningTokens: 7,
+          cost: { total: 0.002 },
+        },
+        destination: SLACK_DESTINATION,
+        conversationStore: stateOnlyConversationStore,
+        sessionId: "run-two",
+        sliceId: 1,
+        state: "completed",
+        surface: "slack",
+      });
+
+      await migrateConversationsToSql(
+        { io: { info: () => {} }, stateAdapter },
+        { target: sqlStore },
+      );
+
+      const readMetrics = async () => {
+        const [row] = await fixture.sql.query<{
+          durationMs: number;
+          executionDurationMs: number;
+          executionUsage: {
+            inputTokens?: number;
+            outputTokens?: number;
+          } | null;
+          usage: {
+            cost?: { total?: number };
+            inputTokens?: number;
+            outputTokens?: number;
+            reasoningTokens?: number;
+            totalTokens?: number;
+          } | null;
+        }>(
+          `
+SELECT
+  duration_ms AS "durationMs",
+  usage_json AS usage,
+  execution_duration_ms AS "executionDurationMs",
+  execution_usage_json AS "executionUsage"
+FROM junior_conversations
+WHERE conversation_id = $1
+`,
+          [CONVERSATION_ID],
+        );
+        return row;
+      };
+      await expect(readMetrics()).resolves.toMatchObject({
+        durationMs: 3_000,
+        executionDurationMs: 2_000,
+        executionUsage: {
+          inputTokens: 80,
+          outputTokens: 20,
+        },
+        usage: {
+          inputTokens: 120,
+          outputTokens: 30,
+          reasoningTokens: 10,
+          cost: { total: 0.003 },
+        },
+      });
+
+      const futureMs = Date.now() + 60_000;
+      await sqlStore.recordExecution({
+        conversationId: CONVERSATION_ID,
+        createdAtMs: futureMs,
+        execution: {
+          runId: "run-three",
+          status: "idle",
+          updatedAtMs: futureMs,
+        },
+        lastActivityAtMs: futureMs,
+        metrics: {
+          durationMs: 500,
+          usage: {
+            inputTokens: 5,
+            outputTokens: 5,
+            reasoningTokens: 1,
+            cost: { total: 0.0005 },
+          },
+        },
+        updatedAtMs: futureMs,
+      });
+      await migrateConversationsToSql(
+        { io: { info: () => {} }, stateAdapter },
+        { target: sqlStore },
+      );
+
+      await expect(readMetrics()).resolves.toMatchObject({
+        durationMs: 3_500,
+        executionDurationMs: 500,
+        usage: {
+          reasoningTokens: 11,
+          totalTokens: 160,
+          cost: { total: 0.0035 },
+        },
+      });
     } finally {
       await fixture.close();
     }
@@ -459,6 +606,7 @@ export const plugins = {
     const sqlStore = createSqlStore(fixture.sql);
 
     try {
+      await migrateSchema(fixture.sql);
       const context = {
         io: { info: () => {} },
         stateAdapter,

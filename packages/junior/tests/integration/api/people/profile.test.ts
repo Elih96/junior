@@ -1,20 +1,18 @@
 import { describe, expect, test, vi } from "vitest";
 import { readPeopleProfileFromSql } from "@/api/people/profile.query";
-import { createLocalJuniorSqlFixture } from "../../../fixtures/sql";
+import { createConfiguredJuniorSqlFixture } from "../../../fixtures/sql";
 import { seedDisplayNameBackfill, seedPeople } from "./fixture";
 
 describe("people profile API", () => {
   test("reads profiles case-insensitively from shared verified identity", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-06-15T12:00:00.000Z"));
-    const fixture = await createLocalJuniorSqlFixture();
+    const fixture = createConfiguredJuniorSqlFixture();
 
     try {
       await seedPeople(fixture);
 
-      const report = await readPeopleProfileFromSql("ALICE@example.com", {
-        db: fixture.sql.db(),
-      });
+      const report = await readPeopleProfileFromSql("ALICE@example.com");
 
       expect(report).toMatchObject({
         actor: {
@@ -25,18 +23,23 @@ describe("people profile API", () => {
           active: 0,
           activeDays: 2,
           conversations: 2,
+          durationMs: 1_500,
           failed: 1,
-          runs: 2,
+          tokens: 150,
         },
         locations: [
           expect.objectContaining({
             conversations: 1,
+            durationMs: 1_000,
             label: "#proj-alpha",
+            tokens: 100,
           }),
           expect.objectContaining({
             conversations: 1,
+            durationMs: 500,
             failed: 1,
             label: "Private Conversation",
+            tokens: 50,
           }),
         ],
       });
@@ -45,7 +48,9 @@ describe("people profile API", () => {
         report.activityDays.find((day) => day.date === "2026-06-12"),
       ).toMatchObject({
         conversations: 1,
+        durationMs: 500,
         failed: 1,
+        tokens: 50,
       });
       expect(
         report.recentConversations.map((item) => item.conversationId),
@@ -55,12 +60,7 @@ describe("people profile API", () => {
         "completed",
       ]);
 
-      const untrusted = await readPeopleProfileFromSql(
-        "untrusted@example.com",
-        {
-          db: fixture.sql.db(),
-        },
-      );
+      const untrusted = await readPeopleProfileFromSql("untrusted@example.com");
       expect(untrusted).toMatchObject({
         actor: {
           email: "untrusted@example.com",
@@ -70,9 +70,7 @@ describe("people profile API", () => {
         },
       });
 
-      const blank = await readPeopleProfileFromSql("  ", {
-        db: fixture.sql.db(),
-      });
+      const blank = await readPeopleProfileFromSql("  ");
       expect(blank).toMatchObject({
         actor: {
           email: "",
@@ -84,12 +82,7 @@ describe("people profile API", () => {
       });
 
       await seedDisplayNameBackfill(fixture);
-      const backfilled = await readPeopleProfileFromSql(
-        "nameless@example.com",
-        {
-          db: fixture.sql.db(),
-        },
-      );
+      const backfilled = await readPeopleProfileFromSql("nameless@example.com");
       expect(backfilled).toMatchObject({
         actor: {
           email: "nameless@example.com",

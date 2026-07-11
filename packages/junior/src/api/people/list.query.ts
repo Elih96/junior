@@ -3,7 +3,7 @@ import type {
   ActorIdentity,
   ActorSummaryReport,
   ActorTotalsReport,
-} from "./types";
+} from "./schema";
 import {
   addSignals,
   emptyTotals,
@@ -15,7 +15,7 @@ import {
   SAMPLE_LIMIT,
   signals,
   summaryFromRow,
-  type PeopleApiQueryOptions,
+  usageTokens,
 } from "./shared";
 
 type DirectoryAccumulator = ActorTotalsReport & {
@@ -36,16 +36,14 @@ function directoryItem(accumulator: DirectoryAccumulator): ActorSummaryReport {
     hung: accumulator.hung,
     lastSeenAt: new Date(accumulator.lastSeenMs).toISOString(),
     actor: accumulator.actor,
-    runs: accumulator.runs,
+    ...(accumulator.tokens !== undefined ? { tokens: accumulator.tokens } : {}),
   };
 }
 
-/** Load the people list from the configured or injected SQL database. */
-export async function readPeopleListFromSql(
-  options: PeopleApiQueryOptions = {},
-): Promise<ActorDirectoryReport> {
+/** Load the people list from the configured SQL database. */
+export async function readPeopleListFromSql(): Promise<ActorDirectoryReport> {
   const nowMs = Date.now();
-  const { rows, truncated } = await actorRows(options);
+  const { rows, truncated } = await actorRows();
   const people = new Map<string, DirectoryAccumulator>();
 
   for (const row of rows) {
@@ -70,7 +68,11 @@ export async function readPeopleListFromSql(
 
     accumulator.actor = mergeIdentity(accumulator.actor, actor);
     accumulator.conversations += 1;
-    accumulator.runs += 1;
+    accumulator.durationMs += summary.cumulativeDurationMs;
+    const tokens = usageTokens(row);
+    if (tokens !== undefined) {
+      accumulator.tokens = (accumulator.tokens ?? 0) + tokens;
+    }
     addSignals(accumulator, signals(summary));
     accumulator.firstSeenMs = Math.min(accumulator.firstSeenMs, firstSeenMs);
     accumulator.lastSeenMs = Math.max(accumulator.lastSeenMs, lastSeenMs);

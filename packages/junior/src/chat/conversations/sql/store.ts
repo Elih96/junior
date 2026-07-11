@@ -6,8 +6,7 @@ import { parseDestination, sameDestination } from "@/chat/destination";
 import { upsertIdentity } from "@/chat/identities/sql";
 import type { IdentityUpsert } from "@/chat/identities/identity";
 import type { StoredSlackActor } from "@/chat/actor";
-import { migrateSchema } from "./migrations";
-import type { JuniorSqlDatabase, JuniorSqlMigrationExecutor } from "@/db/db";
+import type { JuniorSqlDatabase } from "@/db/db";
 import type {
   Conversation,
   ConversationExecution,
@@ -20,6 +19,7 @@ import {
   juniorDestinations,
   juniorIdentities,
 } from "@/db/schema";
+import type { AgentTurnCost, AgentTurnUsage } from "@/chat/usage";
 import type {
   JuniorDestinationKind,
   JuniorDestinationVisibility,
@@ -396,29 +396,68 @@ function mergeActor(
   };
 }
 
-export class SqlStore implements ConversationStore {
-  private schemaReady: Promise<void> | undefined;
+function tokenTotal(usage: AgentTurnUsage | undefined): number {
+  if (!usage) return 0;
+  if (usage.totalTokens !== undefined) return usage.totalTokens;
+  return (
+    (usage.inputTokens ?? 0) +
+    (usage.outputTokens ?? 0) +
+    (usage.cachedInputTokens ?? 0) +
+    (usage.cacheCreationTokens ?? 0)
+  );
+}
 
-  constructor(
-    private readonly executor: JuniorSqlDatabase,
-    private readonly migrationExecutor: JuniorSqlMigrationExecutor,
-  ) {}
-
-  /** Apply SQL schema migrations before runtime uses this store. */
-  async migrate(): Promise<void> {
-    if (!this.schemaReady) {
-      this.schemaReady = migrateSchema(this.migrationExecutor);
-    }
-    const schemaReady = this.schemaReady;
-    try {
-      await schemaReady;
-    } catch (error) {
-      if (this.schemaReady === schemaReady) {
-        this.schemaReady = undefined;
-      }
-      throw error;
-    }
+function updateConversationUsage(args: {
+  current: AgentTurnUsage | undefined;
+  previousExecution: AgentTurnUsage | undefined;
+  nextExecution: AgentTurnUsage;
+}): AgentTurnUsage {
+  const usage: AgentTurnUsage = {
+    totalTokens:
+      tokenTotal(args.current) -
+      tokenTotal(args.previousExecution) +
+      tokenTotal(args.nextExecution),
+  };
+  if (
+    args.current?.reasoningTokens !== undefined ||
+    args.previousExecution?.reasoningTokens !== undefined ||
+    args.nextExecution.reasoningTokens !== undefined
+  ) {
+    usage.reasoningTokens =
+      (args.current?.reasoningTokens ?? 0) -
+      (args.previousExecution?.reasoningTokens ?? 0) +
+      (args.nextExecution.reasoningTokens ?? 0);
   }
+  const costFields = [
+    "input",
+    "output",
+    "cacheRead",
+    "cacheWrite",
+    "total",
+  ] as const satisfies ReadonlyArray<keyof AgentTurnCost>;
+  const cost: AgentTurnCost = {};
+  for (const field of costFields) {
+    if (
+      args.current?.cost?.[field] === undefined &&
+      args.previousExecution?.cost?.[field] === undefined &&
+      args.nextExecution.cost?.[field] === undefined
+    ) {
+      continue;
+    }
+    cost[field] =
+      Math.round(
+        ((args.current?.cost?.[field] ?? 0) -
+          (args.previousExecution?.cost?.[field] ?? 0) +
+          (args.nextExecution.cost?.[field] ?? 0)) *
+          1e12,
+      ) / 1e12;
+  }
+  if (Object.keys(cost).length > 0) usage.cost = cost;
+  return usage;
+}
+
+export class SqlStore implements ConversationStore {
+  constructor(private readonly executor: JuniorSqlDatabase) {}
 
   async get(args: {
     conversationId: string;
@@ -492,6 +531,10 @@ export class SqlStore implements ConversationStore {
     destination?: Destination;
     execution: ConversationExecution;
     lastActivityAtMs: number;
+    metrics: {
+      durationMs: number;
+      usage?: AgentTurnUsage;
+    } | null;
     actor?: StoredSlackActor;
     source?: ConversationSource;
     title?: string;
@@ -499,6 +542,21 @@ export class SqlStore implements ConversationStore {
     visibility?: ConversationPrivacy;
   }): Promise<void> {
     await this.withConversationMutation(args.conversationId, async () => {
+      const existingRow = await this.readConversationRow(args.conversationId);
+      const existing = existingRow
+        ? conversationFromRow(existingRow)
+        : undefined;
+      const incomingExecutionAt =
+        args.execution.updatedAtMs ?? args.updatedAtMs;
+      const existingExecutionAt =
+        existing?.execution.updatedAtMs ?? existing?.updatedAtMs ?? 0;
+      const incomingIsFresh = incomingExecutionAt >= existingExecutionAt;
+      const sameRun =
+        Boolean(existing?.execution.runId) &&
+        existing?.execution.runId === args.execution.runId;
+      const execution = incomingIsFresh
+        ? args.execution
+        : (existing?.execution ?? args.execution);
       await this.upsertConversation({
         conversation: {
           schemaVersion: 1,
@@ -512,9 +570,45 @@ export class SqlStore implements ConversationStore {
           ...(args.source ? { source: args.source } : {}),
           ...(args.title ? { title: args.title } : {}),
           ...(args.visibility ? { visibility: args.visibility } : {}),
-          execution: args.execution,
+          execution,
         },
       });
+      if (incomingIsFresh && args.metrics) {
+        const row = existingRow?.conversation;
+        const usage = args.metrics.usage
+          ? updateConversationUsage({
+              current: row?.usage ?? undefined,
+              previousExecution: sameRun
+                ? (row?.executionUsage ?? undefined)
+                : undefined,
+              nextExecution: args.metrics.usage,
+            })
+          : (row?.usage ?? undefined);
+        await this.executor
+          .db()
+          .update(juniorConversations)
+          .set({
+            durationMs:
+              (row?.durationMs ?? 0) -
+              (sameRun ? (row?.executionDurationMs ?? 0) : 0) +
+              args.metrics.durationMs,
+            usage: usage ?? null,
+            executionDurationMs: args.metrics.durationMs,
+            executionUsage:
+              args.metrics.usage ??
+              (sameRun ? (row?.executionUsage ?? null) : null),
+          })
+          .where(eq(juniorConversations.conversationId, args.conversationId));
+      } else if (incomingIsFresh && !sameRun) {
+        await this.executor
+          .db()
+          .update(juniorConversations)
+          .set({
+            executionDurationMs: 0,
+            executionUsage: null,
+          })
+          .where(eq(juniorConversations.conversationId, args.conversationId));
+      }
     });
   }
 
@@ -558,8 +652,16 @@ export class SqlStore implements ConversationStore {
       });
   }
 
-  /** Copy one conversation record into SQL during backfill. */
-  async backfillConversation(sourceConversation: Conversation): Promise<void> {
+  /** Copy one conversation record and retained metrics into SQL during backfill. */
+  async backfillConversation(
+    sourceConversation: Conversation,
+    metrics?: {
+      durationMs: number;
+      executionDurationMs: number;
+      executionUsage?: AgentTurnUsage;
+      usage?: AgentTurnUsage;
+    },
+  ): Promise<void> {
     // Backfilled records are not live source signals: never let them confirm
     // destination visibility.
     const { visibility: _visibility, ...conversation } = sourceConversation;
@@ -604,6 +706,31 @@ export class SqlStore implements ConversationStore {
             }
           : conversation;
         await this.upsertConversation({ conversation: mergedConversation });
+        if (metrics) {
+          await this.executor
+            .db()
+            .update(juniorConversations)
+            .set({
+              durationMs: metrics.durationMs,
+              usage: metrics.usage ?? null,
+              ...(refreshExecutionFromSource
+                ? {
+                    executionDurationMs: metrics.executionDurationMs,
+                    executionUsage: metrics.executionUsage ?? null,
+                  }
+                : {}),
+            })
+            .where(
+              and(
+                eq(
+                  juniorConversations.conversationId,
+                  conversation.conversationId,
+                ),
+                eq(juniorConversations.durationMs, 0),
+                isNull(juniorConversations.usage),
+              ),
+            );
+        }
       },
     );
   }
@@ -848,6 +975,6 @@ export class SqlStore implements ConversationStore {
 }
 
 /** Create a SQL-backed conversation store. */
-export function createSqlStore(executor: JuniorSqlMigrationExecutor): SqlStore {
-  return new SqlStore(executor, executor);
+export function createSqlStore(executor: JuniorSqlDatabase): SqlStore {
+  return new SqlStore(executor);
 }

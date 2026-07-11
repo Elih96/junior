@@ -7,7 +7,7 @@
  * `junior_agent_steps` so resumes can materialize the exact continuable
  * boundary without duplicating the step history.
  */
-import { THREAD_STATE_TTL_MS } from "chat";
+import { THREAD_STATE_TTL_MS, type StateAdapter } from "chat";
 import {
   actorSchema,
   destinationSchema,
@@ -262,6 +262,12 @@ async function recordConversationActivityMetadata(args: {
     destination: args.summary.destination,
     execution: conversationExecutionFromSummary(args.summary),
     lastActivityAtMs: args.summary.updatedAtMs,
+    metrics: {
+      durationMs: args.summary.cumulativeDurationMs,
+      ...(args.summary.cumulativeUsage
+        ? { usage: args.summary.cumulativeUsage }
+        : {}),
+    },
     actor: sessionLogActor(args.summary.actor),
     source,
     updatedAtMs: args.nowMs,
@@ -749,8 +755,8 @@ export async function recordAgentTurnSessionSummary(args: {
 
 async function readAgentTurnSessionSummariesFromIndex(
   key: string,
+  stateAdapter: StateAdapter,
 ): Promise<AgentTurnSessionSummary[]> {
-  const stateAdapter = getStateAdapter();
   await stateAdapter.connect();
   const values = await stateAdapter.getList(key);
   const summaries = new Map<string, AgentTurnSessionSummary>();
@@ -773,7 +779,10 @@ export async function listAgentTurnSessionSummaries(
   limit = 50,
 ): Promise<AgentTurnSessionSummary[]> {
   return (
-    await readAgentTurnSessionSummariesFromIndex(AGENT_TURN_SESSION_INDEX_KEY)
+    await readAgentTurnSessionSummariesFromIndex(
+      AGENT_TURN_SESSION_INDEX_KEY,
+      getStateAdapter(),
+    )
   ).slice(0, Math.max(0, Math.floor(limit)));
 }
 
@@ -781,25 +790,32 @@ export async function listAgentTurnSessionSummaries(
 export async function listAgentTurnSessionSummariesForConversation(
   conversationId: string,
 ): Promise<AgentTurnSessionSummary[]> {
+  const stateAdapter = getStateAdapter();
   const summaries = await readAgentTurnSessionSummariesFromIndex(
     agentTurnSessionConversationIndexKey(conversationId),
+    stateAdapter,
   );
   if (summaries.length > 0) {
     return summaries;
   }
 
   return (
-    await readAgentTurnSessionSummariesFromIndex(AGENT_TURN_SESSION_INDEX_KEY)
+    await readAgentTurnSessionSummariesFromIndex(
+      AGENT_TURN_SESSION_INDEX_KEY,
+      stateAdapter,
+    )
   ).filter((summary) => summary.conversationId === conversationId);
 }
 
 /** Read complete per-conversation summary indexes with bounded backend load. */
 export async function listAgentTurnSessionSummariesForConversations(
+  stateAdapter: StateAdapter,
   conversationIds: string[],
 ): Promise<Map<string, AgentTurnSessionSummary[]>> {
   const ids = [...new Set(conversationIds)];
   const globalSummaries = await readAgentTurnSessionSummariesFromIndex(
     AGENT_TURN_SESSION_INDEX_KEY,
+    stateAdapter,
   );
   const globalByConversation = new Map<string, AgentTurnSessionSummary[]>();
   for (const summary of globalSummaries) {
@@ -818,6 +834,7 @@ export async function listAgentTurnSessionSummariesForConversations(
       if (!conversationId) continue;
       const summaries = await readAgentTurnSessionSummariesFromIndex(
         agentTurnSessionConversationIndexKey(conversationId),
+        stateAdapter,
       );
       summariesByConversation.set(
         conversationId,

@@ -5,6 +5,6 @@ prev: false
 title: "TranscriptPartType"
 ---
 
-> **TranscriptPartType** = `"text"` \| `"thinking"` \| `"tool_call"` \| `"tool_result"` \| `"unknown"`
+> **TranscriptPartType** = `z.infer`\<_typeof_ `transcriptPartTypeSchema`\>
 
-Defined in: [junior/src/reporting/conversations.ts:143](https://github.com/getsentry/junior/blob/main/packages/junior/src/reporting/conversations.ts#L143)
+Defined in: junior/src/api/conversations/schema.ts:241

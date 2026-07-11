@@ -5,6 +5,6 @@ prev: false
 title: "ConversationActivityStatus"
 ---
 
-> **ConversationActivityStatus** = `"aborted"` \| `"completed"` \| `"error"` \| `"running"` \| `"success"`
+> **ConversationActivityStatus** = `z.infer`\<_typeof_ `conversationActivityStatusSchema`\>
 
-Defined in: [junior/src/reporting/conversations.ts:195](https://github.com/getsentry/junior/blob/main/packages/junior/src/reporting/conversations.ts#L195)
+Defined in: junior/src/api/conversations/schema.ts:245

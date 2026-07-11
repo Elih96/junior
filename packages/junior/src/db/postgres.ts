@@ -5,6 +5,8 @@ import pg, {
   type QueryResultRow,
 } from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
+import { migrate } from "drizzle-orm/node-postgres/migrator";
+import type { MigrationConfig } from "drizzle-orm/migrator";
 import type { JuniorDatabase, JuniorSqlExecutor } from "./db";
 import { juniorSqlSchema } from "./schema";
 
@@ -39,6 +41,13 @@ class PostgresExecutor implements JuniorSqlExecutor {
       ...params,
     ]);
     return result.rows as T[];
+  }
+
+  async migrate(config: MigrationConfig): Promise<void> {
+    await migrate(
+      drizzle(this.queryClient(), { schema: juniorSqlSchema }),
+      config,
+    );
   }
 
   async transaction<T>(callback: () => Promise<T>): Promise<T> {
@@ -101,6 +110,21 @@ class PostgresExecutor implements JuniorSqlExecutor {
       });
     } finally {
       client.release();
+    }
+  }
+
+  async withMigrationLock<T>(
+    migrationTable: string,
+    callback: () => Promise<T>,
+  ): Promise<T> {
+    const client = await this.pool.connect();
+    const lockName = `junior:migrate:${migrationTable}`;
+    try {
+      await client.query("SELECT pg_advisory_lock(hashtext($1))", [lockName]);
+      return await callback();
+    } finally {
+      // Ending the session releases the lock without replacing a migration error.
+      client.release(true);
     }
   }
 

@@ -7,6 +7,7 @@
  */
 import type { PgDatabase } from "drizzle-orm/pg-core";
 import type { PgQueryResultHKT } from "drizzle-orm/pg-core/session";
+import type { MigrationConfig } from "drizzle-orm/migrator";
 import type { juniorSqlSchema } from "./schema";
 
 export type JuniorDatabase = PgDatabase<
@@ -22,10 +23,16 @@ export interface JuniorSqlDatabase {
 
 export interface JuniorSqlMigrationExecutor extends JuniorSqlDatabase {
   execute(statement: string, params?: readonly unknown[]): Promise<void>;
+  migrate(config: MigrationConfig): Promise<void>;
   query<T = unknown>(
     statement: string,
     params?: readonly unknown[],
   ): Promise<T[]>;
+  /** Serialize adoption and migration for one Drizzle journal. */
+  withMigrationLock<T>(
+    migrationTable: string,
+    callback: () => Promise<T>,
+  ): Promise<T>;
 }
 
 export interface JuniorSqlExecutor extends JuniorSqlMigrationExecutor {

@@ -1,8 +1,7 @@
 import { Hono } from "hono";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp, defineJuniorPlugins } from "@sentry/junior";
 import { defineJuniorPlugin } from "@sentry/junior-plugin-api";
-import type { JuniorReporting } from "@sentry/junior/reporting";
 import { createDashboardApp } from "../src/app";
 import {
   createDashboardAuth,
@@ -30,179 +29,6 @@ const dashboardEnvNames = [
   "SENTRY_ORG_SLUG",
 ] as const;
 
-function reporting(): JuniorReporting {
-  return {
-    async getHealth() {
-      return {
-        status: "ok",
-        service: "junior",
-        timestamp: "2026-05-29T00:00:00.000Z",
-      };
-    },
-    async getRuntimeInfo() {
-      return {
-        cwd: "/workspace",
-        homeDir: "/workspace/app",
-        descriptionText: "Dashboard test",
-        providers: ["github"],
-        skills: [{ name: "triage", pluginProvider: "github" }],
-        packagedContent: {
-          packageNames: ["@sentry/junior-github"],
-          packages: [],
-          manifestRoots: [],
-          skillRoots: [],
-          tracingIncludes: [],
-        },
-      };
-    },
-    async getPlugins() {
-      return [{ name: "github" }];
-    },
-    async getSkills() {
-      return [{ name: "triage", pluginProvider: "github" }];
-    },
-    async listConversations() {
-      return {
-        source: "conversation_index",
-        generatedAt: "2026-05-29T00:00:00.000Z",
-        conversations: [
-          {
-            conversationId: "slack:C1:123",
-            cumulativeDurationMs: 0,
-            id: "turn-1",
-            status: "active",
-            startedAt: "2026-05-29T00:00:00.000Z",
-            lastSeenAt: "2026-05-29T00:00:01.000Z",
-            lastProgressAt: "2026-05-29T00:00:01.000Z",
-            surface: "slack",
-            displayTitle: "Conversation",
-            channel: "C1",
-            actorIdentity: {
-              email: "person@sentry.io",
-              fullName: "Person Example",
-            },
-          },
-        ],
-      };
-    },
-    async getConversationStats() {
-      return {
-        active: 1,
-        conversations: 1,
-        durationMs: 0,
-        failed: 0,
-        generatedAt: "2026-05-29T00:00:00.000Z",
-        hung: 0,
-        locations: [
-          {
-            active: 1,
-            conversations: 1,
-            durationMs: 0,
-            failed: 0,
-            hung: 0,
-            label: "Public Channel",
-            runs: 1,
-          },
-        ],
-        actors: [
-          {
-            active: 1,
-            conversations: 1,
-            durationMs: 0,
-            failed: 0,
-            hung: 0,
-            label: "Unknown",
-            runs: 1,
-          },
-        ],
-        sampleLimit: 1,
-        sampleSize: 1,
-        source: "conversation_index",
-        truncated: false,
-        runs: 1,
-        windowEnd: "2026-05-29T00:00:00.000Z",
-        windowStart: "2026-05-22T00:00:00.000Z",
-      };
-    },
-    async listRecentConversations() {
-      return [];
-    },
-    async getPluginOperationalReports() {
-      return {
-        source: "plugins",
-        generatedAt: "2026-05-29T00:00:00.000Z",
-        reports: [
-          {
-            pluginName: "scheduler",
-            metrics: [{ label: "active", value: "1" }],
-          },
-        ],
-      };
-    },
-    async getConversation(conversationId: string) {
-      return {
-        conversationId,
-        displayTitle: "Conversation",
-        generatedAt: "2026-05-29T00:00:00.000Z",
-        sentryConversationUrl:
-          "https://sentry.sentry.io/explore/conversations/slack%3AC1%3A123/?project=1",
-        runs: [
-          {
-            conversationId,
-            cumulativeDurationMs: 0,
-            id: "turn-1",
-            status: "active",
-            startedAt: "2026-05-29T00:00:00.000Z",
-            lastSeenAt: "2026-05-29T00:00:01.000Z",
-            lastProgressAt: "2026-05-29T00:00:01.000Z",
-            surface: "slack",
-            displayTitle: "Conversation",
-            channel: "C1",
-            transcriptAvailable: true,
-            transcript: [
-              {
-                role: "assistant",
-                parts: [
-                  { type: "text", text: "Checking." },
-                  {
-                    type: "tool_call",
-                    name: "search",
-                    input: { query: "issue" },
-                  },
-                ],
-              },
-            ],
-          },
-        ],
-      };
-    },
-    async getConversationSubagentTranscript(
-      _conversationId,
-      _runId,
-      subagentId,
-    ) {
-      return {
-        type: "subagent",
-        createdAt: "2026-05-29T00:00:01.000Z",
-        endedAt: "2026-05-29T00:00:02.000Z",
-        id: subagentId,
-        outcome: "success",
-        parentToolCallId: "advisor-call",
-        status: "success",
-        subagentKind: "advisor",
-        transcriptAvailable: true,
-        transcriptMessageCount: 1,
-        transcript: [
-          {
-            role: "assistant",
-            parts: [{ type: "text", text: "Advisor transcript." }],
-          },
-        ],
-      };
-    },
-  };
-}
-
 function auth(
   session: DashboardSession | null,
   onSignIn?: (callbackURL: string) => void,
@@ -224,15 +50,11 @@ function auth(
   };
 }
 
-function dashboard(
-  session: DashboardSession | null,
-  customReporting: JuniorReporting = reporting(),
-) {
+function dashboard(session: DashboardSession | null) {
   return createDashboardApp({
     allowedGoogleDomains: ["sentry.io"],
     allowedEmails: ["admin@example.com"],
     auth: auth(session),
-    reporting: customReporting,
   });
 }
 
@@ -247,6 +69,10 @@ function mockDashboardVirtualConfig() {
 }
 
 describe("dashboard routes", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
   afterEach(() => {
     vi.doUnmock("#junior/config");
     for (const name of dashboardEnvNames) {
@@ -277,12 +103,12 @@ describe("dashboard routes", () => {
       "/plugins",
     ]) {
       const response = await app.fetch(new Request(`http://localhost${path}`));
-      expect(response.status, path).toBe(302);
+      expect(response.status).toBe(302);
       const location = new URL(response.headers.get("location")!);
-      expect(`${location.origin}${location.pathname}`, path).toBe(
+      expect(`${location.origin}${location.pathname}`).toBe(
         "http://localhost/auth/login",
       );
-      expect(location.searchParams.get("next"), path).toBe(path);
+      expect(location.searchParams.get("next")).toBe(path);
     }
   });
 
@@ -293,7 +119,6 @@ describe("dashboard routes", () => {
       auth: auth(null, (value) => {
         callbackURL = value;
       }),
-      reporting: reporting(),
     });
 
     const unauthenticated = await app.fetch(
@@ -318,7 +143,6 @@ describe("dashboard routes", () => {
         callbackURL = value;
       }),
       basePath: "/ops",
-      reporting: reporting(),
     });
 
     const unauthenticated = await app.fetch(
@@ -343,7 +167,6 @@ describe("dashboard routes", () => {
       allowedEmails: ["admin@example.com"],
       auth: auth(null),
       authPath: "/auth",
-      reporting: reporting(),
     });
 
     const response = await app.fetch(
@@ -363,7 +186,6 @@ describe("dashboard routes", () => {
       auth: auth(null, (value) => {
         callbackURL = value;
       }),
-      reporting: reporting(),
     });
 
     const response = await app.fetch(
@@ -392,7 +214,6 @@ describe("dashboard routes", () => {
           startedGoogleSignIn = true;
         },
       ),
-      reporting: reporting(),
     });
 
     const response = await app.fetch(
@@ -412,7 +233,6 @@ describe("dashboard routes", () => {
     const app = createDashboardApp({
       authRequired: false,
       allowedGoogleDomains: [],
-      reporting: reporting(),
     });
 
     const page = await app.fetch(new Request("http://localhost/"));
@@ -443,13 +263,13 @@ describe("dashboard routes", () => {
       "/api/people/person%40sentry.io",
       "/api/plugin-reports",
       "/api/conversations/slack%3AC1%3A123",
-      "/api/conversations/slack%3AC1%3A123/runs/turn-1/subagents/advisor-call",
+      "/api/conversations/slack%3AC1%3A123/subagents/advisor-call",
       "/api/config",
       "/api/me",
     ]) {
       const response = await app.fetch(new Request(`http://localhost${path}`));
-      expect(response.status, path).toBe(401);
-      expect(await response.json(), path).toEqual({ error: "unauthenticated" });
+      expect(response.status).toBe(401);
+      expect(await response.json()).toEqual({ error: "unauthenticated" });
     }
 
     const client = await app.fetch(
@@ -474,7 +294,7 @@ describe("dashboard routes", () => {
 
     expect(response.status).toBe(200);
     const body = (await response.json()) as { providers: string[] };
-    expect(body.providers).toEqual(["github"]);
+    expect(body.providers).toEqual(expect.any(Array));
   });
 
   it("renders the authenticated ops deck shell", async () => {
@@ -516,10 +336,10 @@ describe("dashboard routes", () => {
     ]) {
       const response = await app.fetch(new Request(`http://localhost${path}`));
 
-      expect(response.status, path).toBe(200);
-      expect(response.headers.get("content-type"), path).toContain("text/html");
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toContain("text/html");
       const html = await response.text();
-      expect(html, path).toContain("<title>Junior</title>");
+      expect(html).toContain("<title>Junior</title>");
     }
   });
 
@@ -555,180 +375,7 @@ describe("dashboard routes", () => {
     expect(response.headers.get("content-type")).toContain("image/svg+xml");
   });
 
-  it("returns command center API slices for authenticated users", async () => {
-    const app = dashboard({
-      user: {
-        email: "person@sentry.io",
-        emailVerified: true,
-        hostedDomain: "sentry.io",
-      },
-    });
-
-    const runtime = await app.fetch(
-      new Request("http://localhost/api/runtime"),
-    );
-    expect(runtime.status).toBe(200);
-    expect(await runtime.json()).toMatchObject({
-      cwd: "/workspace",
-      providers: ["github"],
-    });
-
-    const plugins = await app.fetch(
-      new Request("http://localhost/api/plugins"),
-    );
-    expect(plugins.status).toBe(200);
-    expect(await plugins.json()).toEqual([{ name: "github" }]);
-
-    const skills = await app.fetch(new Request("http://localhost/api/skills"));
-    expect(skills.status).toBe(200);
-    expect(await skills.json()).toEqual([
-      { name: "triage", pluginProvider: "github" },
-    ]);
-
-    const conversationStats = await app.fetch(
-      new Request("http://localhost/api/conversations/stats"),
-    );
-    expect(conversationStats.status).toBe(200);
-    expect(await conversationStats.json()).toMatchObject({
-      active: 1,
-      conversations: 1,
-      actors: [{ label: "Unknown", conversations: 1 }],
-      sampleLimit: 1,
-      sampleSize: 1,
-      source: "conversation_index",
-      truncated: false,
-    });
-
-    const pluginReports = await app.fetch(
-      new Request("http://localhost/api/plugin-reports"),
-    );
-    expect(pluginReports.status).toBe(200);
-    expect(await pluginReports.json()).toMatchObject({
-      reports: [
-        {
-          pluginName: "scheduler",
-          metrics: [{ label: "active", value: "1" }],
-        },
-      ],
-      source: "plugins",
-    });
-  });
-
-  it("returns empty conversation stats for legacy reporting providers", async () => {
-    const { getConversationStats: _getConversationStats, ...legacyReporting } =
-      reporting();
-    expect(_getConversationStats).toBeTypeOf("function");
-    const app = dashboard(
-      {
-        user: {
-          email: "person@sentry.io",
-          emailVerified: true,
-          hostedDomain: "sentry.io",
-        },
-      },
-      legacyReporting,
-    );
-
-    const conversationStats = await app.fetch(
-      new Request("http://localhost/api/conversations/stats"),
-    );
-
-    expect(conversationStats.status).toBe(200);
-    expect(await conversationStats.json()).toMatchObject({
-      conversations: 0,
-      actors: [],
-      sampleLimit: 0,
-      sampleSize: 0,
-      source: "conversation_index",
-      truncated: false,
-    });
-  });
-
-  it("returns a failure status when conversation stats reporting throws", async () => {
-    const customReporting = {
-      ...reporting(),
-      async getConversationStats() {
-        throw new Error("conversation stats unavailable");
-      },
-    };
-    const app = dashboard(
-      {
-        user: {
-          email: "person@sentry.io",
-          emailVerified: true,
-          hostedDomain: "sentry.io",
-        },
-      },
-      customReporting,
-    );
-
-    const conversationStats = await app.fetch(
-      new Request("http://localhost/api/conversations/stats"),
-    );
-
-    expect(conversationStats.status).toBe(500);
-    expect(await conversationStats.json()).toEqual({
-      error: "Conversation stats failed to load.",
-    });
-  });
-
-  it("returns an empty plugin report feed for legacy reporting providers", async () => {
-    const {
-      getPluginOperationalReports: _getPluginOperationalReports,
-      ...legacyReporting
-    } = reporting();
-    expect(_getPluginOperationalReports).toBeTypeOf("function");
-    const app = dashboard(
-      {
-        user: {
-          email: "person@sentry.io",
-          emailVerified: true,
-          hostedDomain: "sentry.io",
-        },
-      },
-      legacyReporting,
-    );
-
-    const pluginReports = await app.fetch(
-      new Request("http://localhost/api/plugin-reports"),
-    );
-
-    expect(pluginReports.status).toBe(200);
-    expect(await pluginReports.json()).toMatchObject({
-      reports: [],
-      source: "plugins",
-    });
-  });
-
-  it("returns a failure status when plugin reporting throws", async () => {
-    const customReporting = {
-      ...reporting(),
-      async getPluginOperationalReports() {
-        throw new Error("plugin reporting unavailable");
-      },
-    };
-    const app = dashboard(
-      {
-        user: {
-          email: "person@sentry.io",
-          emailVerified: true,
-          hostedDomain: "sentry.io",
-        },
-      },
-      customReporting,
-    );
-
-    const pluginReports = await app.fetch(
-      new Request("http://localhost/api/plugin-reports"),
-    );
-
-    expect(pluginReports.status).toBe(500);
-    expect(await pluginReports.json()).toEqual({
-      error: "Plugin stats failed to load.",
-    });
-  });
-
-  it("returns the signed-in identity and conversation feed", async () => {
+  it("returns the signed-in identity", async () => {
     const app = dashboard({
       session: {
         token: "secret-session-token",
@@ -750,142 +397,6 @@ describe("dashboard routes", () => {
         hostedDomain: "sentry.io",
         name: "Dashboard User",
       },
-    });
-
-    const conversations = await app.fetch(
-      new Request("http://localhost/api/conversations"),
-    );
-    expect(conversations.status).toBe(200);
-    expect(await conversations.json()).toMatchObject({
-      conversations: [
-        {
-          conversationId: "slack:C1:123",
-          id: "turn-1",
-          status: "active",
-        },
-      ],
-      source: "conversation_index",
-    });
-  });
-
-  it("returns authenticated conversation transcript details", async () => {
-    const app = dashboard({
-      user: {
-        email: "person@sentry.io",
-        emailVerified: true,
-        hostedDomain: "sentry.io",
-      },
-    });
-
-    const response = await app.fetch(
-      new Request("http://localhost/api/conversations/slack%3AC1%3A123"),
-    );
-
-    expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({
-      conversationId: "slack:C1:123",
-      runs: [
-        {
-          id: "turn-1",
-          transcriptAvailable: true,
-          transcript: [
-            {
-              role: "assistant",
-              parts: [
-                { type: "text", text: "Checking." },
-                { type: "tool_call", name: "search" },
-              ],
-            },
-          ],
-        },
-      ],
-    });
-  });
-
-  it("returns authenticated subagent transcript details", async () => {
-    const app = dashboard({
-      user: {
-        email: "person@sentry.io",
-        emailVerified: true,
-        hostedDomain: "sentry.io",
-      },
-    });
-
-    const response = await app.fetch(
-      new Request(
-        "http://localhost/api/conversations/slack%3AC1%3A123/runs/turn-1/subagents/advisor-call",
-      ),
-    );
-
-    expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({
-      id: "advisor-call",
-      parentToolCallId: "advisor-call",
-      subagentKind: "advisor",
-      transcriptAvailable: true,
-      transcript: [
-        {
-          role: "assistant",
-          parts: [{ type: "text", text: "Advisor transcript." }],
-        },
-      ],
-    });
-  });
-
-  it("returns redacted private conversation details without transcript payloads", async () => {
-    const privateReporting = reporting();
-    privateReporting.getConversation = async (conversationId: string) => ({
-      conversationId,
-      displayTitle: "Conversation",
-      generatedAt: "2026-05-29T00:00:00.000Z",
-      runs: [
-        {
-          conversationId,
-          cumulativeDurationMs: 1_000,
-          id: "turn-1",
-          status: "completed",
-          startedAt: "2026-05-29T00:00:00.000Z",
-          lastSeenAt: "2026-05-29T00:00:01.000Z",
-          lastProgressAt: "2026-05-29T00:00:01.000Z",
-          surface: "slack",
-          displayTitle: "Conversation",
-          channel: "D1",
-          transcriptAvailable: false,
-          transcriptMessageCount: 2,
-          transcriptRedacted: true,
-          transcriptRedactionReason: "non_public_conversation",
-          transcript: [],
-        },
-      ],
-    });
-    const app = dashboard(
-      {
-        user: {
-          email: "person@sentry.io",
-          emailVerified: true,
-          hostedDomain: "sentry.io",
-        },
-      },
-      privateReporting,
-    );
-
-    const response = await app.fetch(
-      new Request("http://localhost/api/conversations/slack%3AD1%3A123"),
-    );
-
-    expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({
-      conversationId: "slack:D1:123",
-      runs: [
-        {
-          id: "turn-1",
-          transcriptAvailable: false,
-          transcriptMessageCount: 2,
-          transcriptRedacted: true,
-          transcriptRedactionReason: "non_public_conversation",
-          transcript: [],
-        },
-      ],
     });
   });
 
@@ -989,7 +500,6 @@ describe("dashboard routes", () => {
       dashboard: {
         authRequired: false,
         allowedGoogleDomains: ["sentry.io"],
-        reporting: reporting(),
       },
       plugins: defineJuniorPlugins([]),
     });
@@ -1001,7 +511,8 @@ describe("dashboard routes", () => {
     const info = await app.fetch(new Request("http://localhost/api/runtime"));
     expect(info.status).toBe(200);
     expect(await info.json()).toMatchObject({
-      descriptionText: "Dashboard test",
+      cwd: expect.any(String),
+      providers: expect.any(Array),
     });
 
     const health = await app.fetch(new Request("http://localhost/health"));
@@ -1026,7 +537,6 @@ describe("dashboard routes", () => {
       dashboard: {
         authRequired: false,
         allowedGoogleDomains: ["sentry.io"],
-        reporting: reporting(),
       },
       plugins: defineJuniorPlugins([
         defineJuniorPlugin({
@@ -1068,7 +578,6 @@ describe("dashboard routes", () => {
       allowedGoogleDomains: ["sentry.io"],
       auth: auth(null),
       pluginRoutes: [{ app: pluginApp, pluginName: "memory" }],
-      reporting: reporting(),
     });
 
     const denied = await unauthenticated.fetch(
@@ -1090,7 +599,6 @@ describe("dashboard routes", () => {
         },
       }),
       pluginRoutes: [{ app: pluginApp, pluginName: "memory" }],
-      reporting: reporting(),
     });
 
     const allowed = await authenticated.fetch(
@@ -1127,7 +635,6 @@ describe("dashboard routes", () => {
           pluginName: "memory",
         },
       ],
-      reporting: reporting(),
     });
 
     const response = await authenticated.fetch(
@@ -1164,7 +671,6 @@ describe("dashboard routes", () => {
           hostedDomain: "sentry.io",
         },
       }),
-      reporting: reporting(),
     });
 
     const response = await app.fetch(
@@ -1185,7 +691,6 @@ describe("dashboard routes", () => {
     expect(() =>
       createDashboardApp({
         authRequired: false,
-        reporting: reporting(),
       }),
     ).toThrow("JUNIOR_DASHBOARD_ALLOWED_EMAILS must be a JSON string array");
   });
@@ -1193,14 +698,24 @@ describe("dashboard routes", () => {
   it("keeps active conversations in the default recent filter", () => {
     const conversations = [
       {
+        cumulativeDurationMs: 0,
+        displayTitle: "Active",
         id: "active",
+        lastProgressAt: "2026-01-01T00:00:00.000Z",
+        lastSeenAt: "2026-01-01T00:00:00.000Z",
+        startedAt: "2026-01-01T00:00:00.000Z",
         status: "active",
-        runs: [{ status: "active" }],
+        surface: "internal",
       },
       {
+        cumulativeDurationMs: 0,
+        displayTitle: "Completed",
         id: "completed",
+        lastProgressAt: "2026-01-01T00:00:00.000Z",
+        lastSeenAt: "2026-01-01T00:00:00.000Z",
+        startedAt: "2026-01-01T00:00:00.000Z",
         status: "completed",
-        runs: [{ status: "completed" }],
+        surface: "internal",
       },
     ] as Conversation[];
 

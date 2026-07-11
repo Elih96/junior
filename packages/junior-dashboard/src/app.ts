@@ -1,18 +1,22 @@
 import { Hono, type Context, type Next } from "hono";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
-import type {
-  ConversationStatsReport,
-  PluginOperationalReportFeed,
-  JuniorReporting,
-} from "@sentry/junior/reporting";
-import { createJuniorReporting } from "@sentry/junior/reporting";
+import { createJuniorApi } from "@sentry/junior/api";
+import {
+  conversationDetailReportSchema,
+  conversationFeedSchema,
+  conversationParamsSchema,
+  conversationStatsReportSchema,
+  conversationSubagentTranscriptReportSchema,
+  subagentParamsSchema,
+} from "@sentry/junior/api/schema";
 import { initSentry } from "@sentry/junior/instrumentation";
 import type {
   PluginApiRouteRequestContext,
   PluginRouteApp,
 } from "@sentry/junior-plugin-api";
 import { pluginApiRouteRequestContextSchema } from "@sentry/junior-plugin-api";
+import { dashboardConfigSchema, dashboardIdentitySchema } from "./api/schema";
 import { dashboardClientAsset, dashboardTailwindAsset } from "./assets";
 import {
   createDashboardAuth,
@@ -22,9 +26,12 @@ import {
   type DashboardSession,
 } from "./auth";
 import { dashboardRainbowProgressClass } from "./dashboardLoader";
-import { createMockConversationReporting } from "./mock-conversations";
-import { peopleListResponse } from "./api/people/list";
-import { peopleProfileResponse } from "./api/people/profile";
+import {
+  readMockConversationDetail,
+  readMockConversationFeed,
+  readMockConversationStats,
+  readMockConversationSubagent,
+} from "./mock-conversations";
 
 const DEFAULT_BASE_PATH = "/";
 const DEFAULT_AUTH_PATH = "/api/auth";
@@ -42,7 +49,6 @@ export interface JuniorDashboardOptions {
   sessionMaxAgeSeconds?: number;
   trustedOrigins?: string[];
   auth?: DashboardAuth;
-  reporting?: JuniorReporting;
   mockConversations?: boolean;
 }
 
@@ -204,53 +210,6 @@ function dashboardLoginUrl(request: Request, basePath: string): string {
 
 function dashboardLoginPath(basePath: string): string {
   return basePath === "/" ? "/auth/login" : `${basePath}/auth/login`;
-}
-
-function emptyPluginReportFeed(): PluginOperationalReportFeed {
-  return {
-    generatedAt: new Date().toISOString(),
-    reports: [],
-    source: "plugins",
-  };
-}
-
-function emptyConversationStatsReport(): ConversationStatsReport {
-  const nowMs = Date.now();
-  return {
-    active: 0,
-    conversations: 0,
-    durationMs: 0,
-    failed: 0,
-    generatedAt: new Date(nowMs).toISOString(),
-    hung: 0,
-    locations: [],
-    actors: [],
-    sampleLimit: 0,
-    sampleSize: 0,
-    source: "conversation_index",
-    truncated: false,
-    runs: 0,
-    windowEnd: new Date(nowMs).toISOString(),
-    windowStart: new Date(nowMs - 7 * 24 * 60 * 60 * 1000).toISOString(),
-  };
-}
-
-async function readConversationStats(
-  reporting: JuniorReporting,
-): Promise<ConversationStatsReport> {
-  if (!reporting.getConversationStats) {
-    return emptyConversationStatsReport();
-  }
-  return await reporting.getConversationStats();
-}
-
-async function readPluginReports(
-  reporting: JuniorReporting,
-): Promise<PluginOperationalReportFeed> {
-  if (!reporting.getPluginOperationalReports) {
-    return emptyPluginReportFeed();
-  }
-  return await reporting.getPluginOperationalReports();
 }
 
 function callbackUrl(request: Request, basePath: string): string {
@@ -554,10 +513,6 @@ export function createDashboardApp(
         sessionMaxAgeSeconds: options.sessionMaxAgeSeconds,
       }))
     : undefined;
-  const baseReporting = options.reporting ?? createJuniorReporting();
-  const reporting = options.mockConversations
-    ? createMockConversationReporting(baseReporting)
-    : baseReporting;
   const app = new Hono<{ Variables: Variables }>();
 
   app.get(dashboardLoginPath(basePath), async (c) => {
@@ -614,21 +569,6 @@ export function createDashboardApp(
       app.get(`${path}/*`, () => renderDashboard(basePath));
     }
   }
-  app.get("/api/health", async () => {
-    return Response.json(await reporting.getHealth());
-  });
-  app.get("/api/runtime", async () => {
-    return Response.json(await reporting.getRuntimeInfo());
-  });
-  app.get("/api/plugins", async () => {
-    return Response.json(await reporting.getPlugins());
-  });
-  app.get("/api/skills", async () => {
-    return Response.json(await reporting.getSkills());
-  });
-  app.get("/api/conversations", async () => {
-    return Response.json(await reporting.listConversations());
-  });
   for (const route of options.pluginRoutes ?? []) {
     const prefix = pluginRoutePrefix(route.pluginName);
     const handler = (c: Context<{ Variables: Variables }>) =>
@@ -641,62 +581,52 @@ export function createDashboardApp(
     app.all(prefix, handler);
     app.all(`${prefix}/*`, handler);
   }
-  app.get("/api/conversations/stats", async () => {
-    try {
-      return Response.json(await readConversationStats(reporting));
-    } catch {
+  if (options.mockConversations) {
+    app.get("/api/conversations", () => {
       return Response.json(
-        { error: "Conversation stats failed to load." },
-        { status: 500 },
+        conversationFeedSchema.parse(readMockConversationFeed()),
       );
-    }
-  });
-  app.get("/api/people", () => peopleListResponse());
-  app.get("/api/people/:email", async (c) => {
-    return peopleProfileResponse(decodeURIComponent(c.req.param("email")));
-  });
-  app.get("/api/plugin-reports", async () => {
-    try {
-      return Response.json(await readPluginReports(reporting));
-    } catch {
+    });
+    app.get("/api/conversations/stats", () => {
       return Response.json(
-        { error: "Plugin stats failed to load." },
-        { status: 500 },
+        conversationStatsReportSchema.parse(readMockConversationStats()),
       );
-    }
-  });
-  app.get("/api/conversations/:conversationId", async (c) => {
+    });
+    app.get("/api/conversations/:conversationId", (c) => {
+      const { conversationId } = conversationParamsSchema.parse(c.req.param());
+      const report = readMockConversationDetail(conversationId);
+      return report
+        ? Response.json(conversationDetailReportSchema.parse(report))
+        : Response.json({ error: "Conversation not found." }, { status: 404 });
+    });
+    app.get("/api/conversations/:conversationId/subagents/:subagentId", (c) => {
+      const { conversationId, subagentId } = subagentParamsSchema.parse(
+        c.req.param(),
+      );
+      const report = conversationSubagentTranscriptReportSchema.parse(
+        readMockConversationSubagent(conversationId, subagentId),
+      );
+      return report.unavailableReason === "not_found"
+        ? Response.json(report, { status: 404 })
+        : Response.json(report);
+    });
+  }
+  app.route("/", createJuniorApi());
+  app.get("/api/config", () => {
     return Response.json(
-      await reporting.getConversation(
-        decodeURIComponent(c.req.param("conversationId")),
-      ),
+      dashboardConfigSchema.parse({
+        allowedEmailCount: allowedEmails.length,
+        allowedGoogleDomainCount: allowedDomains.length,
+        authRequired,
+        authPath,
+        basePath,
+        sentryConversationLinks: hasSentryConversationLinks(),
+        timeZone: dashboardTimeZone(),
+      }),
     );
   });
-  app.get(
-    "/api/conversations/:conversationId/runs/:runId/subagents/:subagentId",
-    async (c) => {
-      return Response.json(
-        await reporting.getConversationSubagentTranscript(
-          decodeURIComponent(c.req.param("conversationId")),
-          decodeURIComponent(c.req.param("runId")),
-          decodeURIComponent(c.req.param("subagentId")),
-        ),
-      );
-    },
-  );
-  app.get("/api/config", () => {
-    return Response.json({
-      allowedEmailCount: allowedEmails.length,
-      allowedGoogleDomainCount: allowedDomains.length,
-      authRequired,
-      authPath,
-      basePath,
-      sentryConversationLinks: hasSentryConversationLinks(),
-      timeZone: dashboardTimeZone(),
-    });
-  });
   app.get("/api/me", (c) => {
-    return Response.json(c.get("authSession"));
+    return Response.json(dashboardIdentitySchema.parse(c.get("authSession")));
   });
   app.get(DASHBOARD_CLIENT_PATH, () => {
     return new Response(readDashboardClient(), {

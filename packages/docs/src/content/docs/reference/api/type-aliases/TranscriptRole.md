@@ -5,6 +5,6 @@ prev: false
 title: "TranscriptRole"
 ---
 
-> **TranscriptRole** = `"assistant"` \| `"system"` \| `"tool"` \| `"toolResult"` \| `"unknown"` \| `"user"`
+> **TranscriptRole** = `z.infer`\<_typeof_ `transcriptRoleSchema`\>
 
-Defined in: [junior/src/reporting/conversations.ts:171](https://github.com/getsentry/junior/blob/main/packages/junior/src/reporting/conversations.ts#L171)
+Defined in: junior/src/api/conversations/schema.ts:243

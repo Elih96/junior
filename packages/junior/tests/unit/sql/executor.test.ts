@@ -13,9 +13,11 @@ function executor(name: string): JuniorSqlExecutor {
       throw new Error(`${name} test executor does not expose Drizzle`);
     }),
     execute: vi.fn(),
+    migrate: vi.fn(),
     query: vi.fn(),
     transaction: vi.fn(async (callback) => await callback()),
     withLock: vi.fn(async (_lockName, callback) => await callback()),
+    withMigrationLock: vi.fn(async (_migrationTable, callback) => callback()),
   };
 }
 

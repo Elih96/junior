@@ -79,10 +79,9 @@ export default defineConfig({
   esbuildPlugins: [dashboardAssetsPlugin()],
   external: [
     "@sentry/junior",
-    "@sentry/junior/api/people/list",
-    "@sentry/junior/api/people/profile",
+    "@sentry/junior/api",
+    "@sentry/junior/api/schema",
     "@sentry/junior/instrumentation",
-    "@sentry/junior/reporting",
     "better-auth",
     "hono",
   ],
