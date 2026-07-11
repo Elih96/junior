@@ -4,7 +4,7 @@ import {
   type DescribeEvalOptions,
   type JudgeContext,
 } from "vitest-evals";
-import { completeText, resolveGatewayModel } from "@/chat/pi/client";
+import { completeText, resolveAiModel } from "@/chat/pi/client";
 import {
   toJsonValue,
   type Harness,
@@ -353,7 +353,7 @@ const CHOICE_SCORES: Record<JudgeAnswer, number> = {
 
 const EVAL_SYSTEM =
   'You are assessing a submitted output based on a given criterion. Ignore differences in style, grammar, punctuation, or length. Focus only on whether the criterion is met. Return only raw JSON matching {"answer":"A","rationale":"..."}.';
-const EVAL_JUDGE_MODEL_ID = resolveGatewayModel("openai/gpt-5.4").id;
+const EVAL_JUDGE_MODEL_ID = resolveAiModel("openai/gpt-5.4").id;
 
 const judgeHarness = createJudgeHarness({
   name: "slack-rubric-judge-model",

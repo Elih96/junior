@@ -38,7 +38,7 @@ Every `junior chat` invocation creates a fresh local conversation. Interactive m
 
 ## State and environment
 
-`junior chat` does not require Slack request signing, Slack tokens, or a Slack channel. It still needs the model and tool environment required by the behavior you are testing, such as `AI_GATEWAY_API_KEY` or plugin provider credentials.
+`junior chat` does not require Slack request signing, Slack tokens, or a Slack channel. It still needs credentials for the selected AI provider: `OPENROUTER_API_KEY` for the default OpenRouter provider, or `AI_PROVIDER=vercel-ai-gateway` with `AI_GATEWAY_API_KEY` or Vercel OIDC. Plugin-specific behavior may require additional provider credentials.
 
 When neither `JUNIOR_STATE_ADAPTER` nor `REDIS_URL` is set, the command uses the in-memory state adapter so a new project can start a local session without Redis. Set `REDIS_URL` when you want local run state stored for diagnostics or to match your deployed app state behavior; the CLI still starts a new conversation on each invocation.
 

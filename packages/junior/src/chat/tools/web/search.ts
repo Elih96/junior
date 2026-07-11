@@ -1,65 +1,109 @@
 import { z } from "zod";
 import { juniorToolResultSchema } from "@/chat/tool-support/structured-result";
 import { zodTool } from "@/chat/tool-support/zod-tool";
-import { generateText } from "ai";
 import { createGatewayProvider } from "@ai-sdk/gateway";
 import { getModel } from "@earendil-works/pi-ai";
+import { generateText } from "ai";
 import { withTimeout } from "@/chat/tools/web/network";
 import { logException } from "@/chat/logging";
+import { toOptionalTrimmed } from "@/chat/optional-string";
 import type { WebSearchToolDeps } from "@/chat/tools/types";
+import {
+  AI_PROVIDER,
+  getAiProviderApiKey,
+  MISSING_AI_PROVIDER_CREDENTIALS_ERROR,
+} from "@/chat/pi/client";
 
 const SEARCH_TIMEOUT_MS = 60_000;
 const MAX_RESULTS = 5;
-const DEFAULT_SEARCH_MODEL = getModel("vercel-ai-gateway", "openai/gpt-5.4").id;
-const SEARCH_TOOL_NAME = "parallelSearch";
+const DEFAULT_SEARCH_MODEL =
+  AI_PROVIDER === "openrouter"
+    ? getModel("openrouter", "openai/gpt-5.4").id
+    : getModel("vercel-ai-gateway", "openai/gpt-5.4").id;
+const OPENROUTER_CHAT_COMPLETIONS_URL =
+  "https://openrouter.ai/api/v1/chat/completions";
+const GATEWAY_SEARCH_TOOL_NAME = "parallelSearch";
 
-function asString(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim().length > 0
-    ? value.trim()
-    : undefined;
+interface SearchResult {
+  title: string;
+  url: string;
+  snippet: string;
 }
 
-function parseSearchResults(
-  toolResults: unknown,
-  maxResults: number,
-): Array<{ title: string; url: string; snippet: string }> {
-  const typedResults = Array.isArray(toolResults)
-    ? (toolResults as Array<Record<string, unknown>>)
-    : [];
-  const parsedResults: Array<{ title: string; url: string; snippet: string }> =
-    [];
+const openRouterSearchResponseSchema = z.object({
+  choices: z
+    .array(
+      z.object({
+        message: z
+          .object({
+            annotations: z
+              .array(
+                z.object({
+                  type: z.string(),
+                  url_citation: z
+                    .object({
+                      content: z.string().trim().optional(),
+                      title: z.string().trim().min(1).optional(),
+                      url: z.string().trim().min(1),
+                    })
+                    .optional(),
+                }),
+              )
+              .optional(),
+          })
+          .optional(),
+      }),
+    )
+    .optional(),
+});
 
-  for (const toolResult of typedResults) {
-    if (
-      toolResult.type !== "tool-result" ||
-      toolResult.toolName !== SEARCH_TOOL_NAME
-    ) {
+const providerErrorResponseSchema = z.object({
+  error: z
+    .object({
+      message: z.string().trim().min(1),
+    })
+    .optional(),
+});
+
+function parseOpenRouterSearchResults(
+  payload: z.output<typeof openRouterSearchResponseSchema>,
+  maxResults: number,
+): SearchResult[] {
+  const annotations = payload.choices?.[0]?.message?.annotations ?? [];
+  const parsedResults: SearchResult[] = [];
+
+  for (const annotation of annotations) {
+    if (annotation.type !== "url_citation" || !annotation.url_citation) {
       continue;
     }
+    const citation = annotation.url_citation;
 
-    const output = (toolResult as { output?: unknown }).output as
-      | { results?: unknown }
-      | undefined;
-    const results = Array.isArray(output?.results)
-      ? (output.results as Array<Record<string, unknown>>)
-      : [];
+    parsedResults.push({
+      title: citation.title ?? citation.url,
+      url: citation.url,
+      snippet: citation.content ?? "",
+    });
 
-    for (const result of results) {
-      const url = asString(result.url);
-      if (!url) continue;
-      parsedResults.push({
-        title: asString(result.title) ?? url,
-        url,
-        snippet: asString(result.excerpt) ?? asString(result.snippet) ?? "",
-      });
-
-      if (parsedResults.length >= maxResults) {
-        return parsedResults;
-      }
+    if (parsedResults.length >= maxResults) {
+      return parsedResults;
     }
   }
 
   return parsedResults;
+}
+
+function formatSearchResponseError(status: number, body: string): string {
+  if (!body) return `OpenRouter web search failed: ${status}`;
+
+  try {
+    const parsed = providerErrorResponseSchema.safeParse(JSON.parse(body));
+    const message = parsed.success ? parsed.data.error?.message : undefined;
+    return message
+      ? `OpenRouter web search failed: ${status} ${message}`
+      : `OpenRouter web search failed: ${status} ${body}`;
+  } catch {
+    return `OpenRouter web search failed: ${status} ${body}`;
+  }
 }
 
 function formatSearchFailure(error: unknown): string {
@@ -71,8 +115,106 @@ function isAuthFailure(message: string): boolean {
   const normalized = message.toLowerCase();
   return (
     normalized.includes("missing ai gateway credentials") ||
+    normalized.includes("missing openrouter credentials") ||
     normalized.includes("authentication failed")
   );
+}
+
+interface ProviderSearchParams {
+  controller: AbortController;
+  maxResults: number;
+  model: string;
+  query: string;
+}
+
+async function searchOpenRouter({
+  controller,
+  maxResults,
+  model,
+  query,
+}: ProviderSearchParams) {
+  const apiKey = getAiProviderApiKey();
+  if (!apiKey) {
+    throw new Error(MISSING_AI_PROVIDER_CREDENTIALS_ERROR);
+  }
+  const response = await withTimeout(
+    fetch(OPENROUTER_CHAT_COMPLETIONS_URL, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model,
+        messages: [{ role: "user", content: query }],
+        plugins: [{ id: "web", engine: "parallel", max_results: maxResults }],
+      }),
+      signal: controller.signal,
+    }),
+    SEARCH_TIMEOUT_MS,
+    "webSearch",
+    { onTimeout: () => controller.abort() },
+  );
+  if (!response.ok) {
+    throw new Error(
+      formatSearchResponseError(response.status, await response.text()),
+    );
+  }
+  const payload = openRouterSearchResponseSchema.parse(await response.json());
+  return parseOpenRouterSearchResults(payload, maxResults);
+}
+
+async function searchGateway({
+  controller,
+  maxResults,
+  model,
+  query,
+}: ProviderSearchParams) {
+  const provider = createGatewayProvider();
+  const parallelSearch = provider.tools.parallelSearch({
+    mode: "agentic",
+    maxResults,
+  });
+  const response = await withTimeout(
+    generateText({
+      model: provider.chat(model),
+      prompt: query,
+      tools: {
+        [GATEWAY_SEARCH_TOOL_NAME]: parallelSearch,
+      },
+      toolChoice: {
+        type: "tool",
+        toolName: GATEWAY_SEARCH_TOOL_NAME,
+      },
+      abortSignal: controller.signal,
+    }),
+    SEARCH_TIMEOUT_MS,
+    "webSearch",
+    { onTimeout: () => controller.abort() },
+  );
+
+  for (const toolResult of response.toolResults) {
+    if (
+      toolResult.dynamic === true ||
+      toolResult.toolName !== GATEWAY_SEARCH_TOOL_NAME
+    ) {
+      continue;
+    }
+
+    if ("error" in toolResult.output) {
+      throw new Error(
+        `AI Gateway web search failed: ${toolResult.output.message}`,
+      );
+    }
+
+    return toolResult.output.results.slice(0, maxResults).map((result) => ({
+      title: result.title,
+      url: result.url,
+      snippet: result.excerpt,
+    }));
+  }
+
+  return [];
 }
 
 export function createWebSearchTool(override?: WebSearchToolDeps) {
@@ -103,32 +245,26 @@ export function createWebSearchTool(override?: WebSearchToolDeps) {
       const maxResults = max_results ?? 3;
       // Keep web search pinned to a provider-tool capable model instead of
       // inheriting the main turn model.
-      const model = process.env.AI_WEB_SEARCH_MODEL ?? DEFAULT_SEARCH_MODEL;
+      const model =
+        toOptionalTrimmed(process.env.AI_WEB_SEARCH_MODEL) ??
+        DEFAULT_SEARCH_MODEL;
       const controller = new AbortController();
 
       try {
-        // AI SDK Gateway reads AI_GATEWAY_API_KEY or ambient Vercel OIDC
-        // itself; no explicit auth needed here.
-        const provider = createGatewayProvider();
-        const response = await withTimeout(
-          generateText({
-            model: provider.chat(model),
-            prompt: query,
-            tools: {
-              [SEARCH_TOOL_NAME]: provider.tools.parallelSearch({
-                mode: "agentic",
+        const results =
+          AI_PROVIDER === "openrouter"
+            ? await searchOpenRouter({
+                controller,
                 maxResults,
-              }),
-            },
-            toolChoice: { type: "tool", toolName: SEARCH_TOOL_NAME },
-            abortSignal: controller.signal,
-          }),
-          SEARCH_TIMEOUT_MS,
-          "webSearch",
-          { onTimeout: () => controller.abort() },
-        );
-
-        const results = parseSearchResults(response.toolResults, maxResults);
+                model,
+                query,
+              })
+            : await searchGateway({
+                controller,
+                maxResults,
+                model,
+                query,
+              });
         return {
           ok: true,
           status: "success" as const,

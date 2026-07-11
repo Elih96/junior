@@ -8,9 +8,12 @@ Current repo state: this is not intended to be configured right now. Keep this a
 
 Recommended:
 
+- `OPENROUTER_API_KEY`
 - `VERCEL_OIDC_TOKEN`
 
-`VERCEL_OIDC_TOKEN` is enough for both model calls and Vercel Sandbox access in our eval workflow.
+This uses Junior's default OpenRouter provider for model calls and Vercel OIDC for Sandbox access.
+
+To use Vercel AI Gateway instead, set the repository variable `AI_PROVIDER` to `vercel-ai-gateway`. With that selection, `VERCEL_OIDC_TOKEN` covers both model calls and Sandbox access, so `OPENROUTER_API_KEY` is not required.
 
 Optional fallback if you do not want to use OIDC:
 
@@ -32,7 +35,11 @@ pnpm dlx vercel env pull
 
 Then copy `VERCEL_OIDC_TOKEN` from `.env.local` into the GitHub repository secret `VERCEL_OIDC_TOKEN`.
 
-This is the preferred path. It does not require `AI_GATEWAY_API_KEY`.
+This is the preferred Sandbox authentication path. It also authenticates model calls when `AI_PROVIDER=vercel-ai-gateway`.
+
+### `OPENROUTER_API_KEY`
+
+Create an API key in OpenRouter and add it to GitHub as `OPENROUTER_API_KEY`. This is required when `AI_PROVIDER` is unset or set to `openrouter`.
 
 ### Optional: token-based fallback
 
@@ -61,7 +68,7 @@ Current local link metadata lives in [.vercel/project.json](/home/dcramer/src/ju
 
 ### `AI_GATEWAY_API_KEY`
 
-Only needed for the token-based fallback above. Create an AI Gateway key in the Vercel dashboard and add it as `AI_GATEWAY_API_KEY`.
+Only needed when `AI_PROVIDER=vercel-ai-gateway` and Vercel OIDC is unavailable for model authentication. Create an AI Gateway key in the Vercel dashboard and add it as `AI_GATEWAY_API_KEY`.
 
 ## Triggering Evals On A PR
 
@@ -79,10 +86,10 @@ After adding secrets:
 1. Push a commit to the PR, or add the `trigger-evals` label.
 2. Open the `Evals` workflow summary.
 3. Confirm the gate reports:
-   - `gateway_ready: true`
+   - `provider_ready: true`
    - `sandbox_ready: true`
    - `will_run: true`
 
 If `sandbox_ready` is false, either `VERCEL_OIDC_TOKEN` is missing or the fallback token set is incomplete.
 
-If `gateway_ready` is false while using the fallback path, either `AI_GATEWAY_API_KEY` or `VERCEL_OIDC_TOKEN` is missing.
+If `provider_ready` is false, `OPENROUTER_API_KEY` is missing for OpenRouter, or both `AI_GATEWAY_API_KEY` and `VERCEL_OIDC_TOKEN` are missing for AI Gateway.

@@ -282,7 +282,7 @@ export interface EvalOverrides {
   reply_texts?: string[];
   skill_dirs?: string[];
   subscribed_decisions?: SubscribedDecisionFixture[];
-  unset_gateway_api_key?: boolean;
+  unset_ai_provider_credentials?: boolean;
 }
 
 export interface EvalScenario {
@@ -1658,8 +1658,9 @@ function buildRuntimeServices(
             });
           }
 
-          const gatewaySnapshot = snapshotEnv([
+          const providerSnapshot = snapshotEnv([
             "AI_GATEWAY_API_KEY",
+            "OPENROUTER_API_KEY",
             "VERCEL_OIDC_TOKEN",
           ]);
           const baseToolOverrides: ToolHooks["toolOverrides"] = {
@@ -1673,8 +1674,9 @@ function buildRuntimeServices(
               ? { imageGenerate: createMockImageGenerateDeps() }
               : {}),
           };
-          if (scenario.overrides?.unset_gateway_api_key) {
+          if (scenario.overrides?.unset_ai_provider_credentials) {
             delete process.env.AI_GATEWAY_API_KEY;
+            delete process.env.OPENROUTER_API_KEY;
             delete process.env.VERCEL_OIDC_TOKEN;
           }
           try {
@@ -1703,8 +1705,8 @@ function buildRuntimeServices(
             replyState.successfulCount += 1;
             return outcome;
           } finally {
-            if (scenario.overrides?.unset_gateway_api_key) {
-              gatewaySnapshot.restore();
+            if (scenario.overrides?.unset_ai_provider_credentials) {
+              providerSnapshot.restore();
             }
           }
         },

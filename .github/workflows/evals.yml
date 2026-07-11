@@ -18,7 +18,7 @@ jobs:
     outputs:
       evals_changed: ${{ steps.changes.outputs.evals_changed }}
       evals_requested: ${{ steps.request.outputs.evals_requested }}
-      gateway_ready: ${{ steps.secrets.outputs.gateway_ready }}
+      provider_ready: ${{ steps.secrets.outputs.provider_ready }}
       sandbox_ready: ${{ steps.secrets.outputs.sandbox_ready }}
       should_run: ${{ steps.decision.outputs.should_run }}
     steps:
@@ -60,7 +60,9 @@ jobs:
 
       - id: secrets
         env:
+          AI_PROVIDER: ${{ vars.AI_PROVIDER || 'openrouter' }}
           AI_GATEWAY_API_KEY: ${{ secrets.AI_GATEWAY_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           VERCEL_OIDC_TOKEN: ${{ secrets.VERCEL_OIDC_TOKEN }}
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
           VERCEL_TEAM_ID: ${{ secrets.VERCEL_TEAM_ID }}
@@ -68,10 +70,12 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [[ -n "${AI_GATEWAY_API_KEY:-}" || -n "${VERCEL_OIDC_TOKEN:-}" ]]; then
-            echo "gateway_ready=true" >> "$GITHUB_OUTPUT"
+          if [[ "$AI_PROVIDER" == "openrouter" && -n "${OPENROUTER_API_KEY:-}" ]]; then
+            echo "provider_ready=true" >> "$GITHUB_OUTPUT"
+          elif [[ "$AI_PROVIDER" == "vercel-ai-gateway" && ( -n "${AI_GATEWAY_API_KEY:-}" || -n "${VERCEL_OIDC_TOKEN:-}" ) ]]; then
+            echo "provider_ready=true" >> "$GITHUB_OUTPUT"
           else
-            echo "gateway_ready=false" >> "$GITHUB_OUTPUT"
+            echo "provider_ready=false" >> "$GITHUB_OUTPUT"
           fi
 
           if [[ -n "${VERCEL_OIDC_TOKEN:-}" || ( -n "${VERCEL_TOKEN:-}" && -n "${VERCEL_TEAM_ID:-}" && -n "${VERCEL_PROJECT_ID:-}" ) ]]; then
@@ -84,13 +88,13 @@ jobs:
         env:
           EVALS_CHANGED: ${{ steps.changes.outputs.evals_changed }}
           EVALS_REQUESTED: ${{ steps.request.outputs.evals_requested }}
-          GATEWAY_READY: ${{ steps.secrets.outputs.gateway_ready }}
+          PROVIDER_READY: ${{ steps.secrets.outputs.provider_ready }}
           SANDBOX_READY: ${{ steps.secrets.outputs.sandbox_ready }}
         run: |
           set -euo pipefail
 
           should_run=false
-          if [[ "$GATEWAY_READY" == "true" && "$SANDBOX_READY" == "true" && ( "$EVALS_CHANGED" == "true" || "$EVALS_REQUESTED" == "true" ) ]]; then
+          if [[ "$PROVIDER_READY" == "true" && "$SANDBOX_READY" == "true" && ( "$EVALS_CHANGED" == "true" || "$EVALS_REQUESTED" == "true" ) ]]; then
             should_run=true
           fi
 
@@ -100,7 +104,7 @@ jobs:
             echo
             echo "- evals_changed: $EVALS_CHANGED"
             echo "- evals_requested: $EVALS_REQUESTED"
-            echo "- gateway_ready: $GATEWAY_READY"
+            echo "- provider_ready: $PROVIDER_READY"
             echo "- sandbox_ready: $SANDBOX_READY"
             echo "- will_run: $should_run"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -135,7 +139,9 @@ jobs:
     env:
       REDIS_URL: redis://localhost:6379
       DATABASE_URL: postgres://junior:junior@localhost:5432/junior
+      AI_PROVIDER: ${{ vars.AI_PROVIDER || 'openrouter' }}
       AI_GATEWAY_API_KEY: ${{ secrets.AI_GATEWAY_API_KEY }}
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
       VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
       VERCEL_TEAM_ID: ${{ secrets.VERCEL_TEAM_ID }}
       VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}

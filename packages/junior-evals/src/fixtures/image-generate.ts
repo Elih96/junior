@@ -13,7 +13,10 @@ export function createMockImageGenerateDeps(): ImageGenerateToolDeps {
           : input instanceof URL
             ? input.toString()
             : input.url;
-      if (url === "https://ai-gateway.vercel.sh/v1/chat/completions") {
+      if (
+        url === "https://ai-gateway.vercel.sh/v1/chat/completions" ||
+        url === "https://openrouter.ai/api/v1/chat/completions"
+      ) {
         return new Response(
           JSON.stringify({
             choices: [

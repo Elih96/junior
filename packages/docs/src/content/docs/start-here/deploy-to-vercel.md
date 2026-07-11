@@ -104,7 +104,11 @@ Set the core runtime variables in Vercel:
 | `CRON_SECRET`                               | Yes         | Authenticates Vercel Cron requests to the internal heartbeat route.            |
 | `JUNIOR_BASE_URL`                           | Conditional | Canonical URL for OAuth and callback URLs when Vercel URL envs are not enough. |
 | `JUNIOR_STATE_KEY_PREFIX`                   | No          | Redis key namespace for this deployment when sharing one Redis database.       |
-| `AI_GATEWAY_API_KEY`                        | Optional    | AI Gateway auth when your setup requires it.                                   |
+| `AI_PROVIDER`                               | No          | `openrouter` or `vercel-ai-gateway`. Defaults to `openrouter`.                 |
+| `OPENROUTER_API_KEY`                        | Conditional | Required for the default OpenRouter provider.                                  |
+| `AI_GATEWAY_API_KEY`                        | Conditional | Required for AI Gateway unless Vercel OIDC supplies authentication.            |
+
+For the default provider, add `OPENROUTER_API_KEY` to every environment that runs Junior. To keep model traffic inside Vercel AI Gateway, set `AI_PROVIDER=vercel-ai-gateway`; AI Gateway can authenticate with `AI_GATEWAY_API_KEY` or the deployment's `VERCEL_OIDC_TOKEN`.
 
 Use one stable `JUNIOR_SECRET` per deployment:
 

@@ -1,6 +1,10 @@
 import { getModel } from "@earendil-works/pi-ai";
 import { toOptionalTrimmed } from "@/chat/optional-string";
-import { resolveGatewayModel } from "@/chat/pi/client";
+import {
+  resolveAiModel,
+  resolveAiProvider,
+  type AiProvider,
+} from "@/chat/pi/client";
 import { normalizeSlackEmojiName } from "@/chat/slack/emoji";
 
 const MIN_AGENT_TURN_TIMEOUT_MS = 10 * 1000;
@@ -183,21 +187,30 @@ function parseSlashCommand(rawValue: string | undefined): string {
 
 // Compile-time assertion: `getModel`'s second generic is constrained to
 // `keyof (typeof MODELS)[TProvider]`, so a stale default becomes a tsc error.
-const DEFAULT_MODEL_ID = getModel("vercel-ai-gateway", "openai/gpt-5.5").id;
-const DEFAULT_FAST_MODEL_ID = getModel(
-  "vercel-ai-gateway",
-  "openai/gpt-5.4-mini",
-).id;
-const DEFAULT_ADVISOR_MODEL_ID = getModel(
-  "vercel-ai-gateway",
-  "openai/gpt-5.5",
-).id;
 const DEFAULT_EMBEDDING_MODEL_ID = "openai/text-embedding-3-small";
 
-function validateGatewayModelId(raw: string | undefined): string | undefined {
+function defaultModelIds(provider: AiProvider) {
+  if (provider === "openrouter") {
+    return {
+      advisor: getModel("openrouter", "openai/gpt-5.5").id,
+      fast: getModel("openrouter", "openai/gpt-5.4-mini").id,
+      main: getModel("openrouter", "openai/gpt-5.5").id,
+    };
+  }
+  return {
+    advisor: getModel("vercel-ai-gateway", "openai/gpt-5.5").id,
+    fast: getModel("vercel-ai-gateway", "openai/gpt-5.4-mini").id,
+    main: getModel("vercel-ai-gateway", "openai/gpt-5.5").id,
+  };
+}
+
+function validateAiModelId(
+  raw: string | undefined,
+  provider: AiProvider,
+): string | undefined {
   const trimmed = toOptionalTrimmed(raw);
   if (trimmed === undefined) return undefined;
-  resolveGatewayModel(trimmed);
+  resolveAiModel(trimmed, provider);
   return trimmed;
 }
 
@@ -205,10 +218,14 @@ function validateEmbeddingModelId(raw: string | undefined): string | undefined {
   return toOptionalTrimmed(raw);
 }
 
-function readAdvisorConfig(env: NodeJS.ProcessEnv): AdvisorConfig {
+function readAdvisorConfig(
+  env: NodeJS.ProcessEnv,
+  provider: AiProvider,
+  defaultModelId: string,
+): AdvisorConfig {
   return {
     modelId:
-      validateGatewayModelId(env.AI_ADVISOR_MODEL) ?? DEFAULT_ADVISOR_MODEL_ID,
+      validateAiModelId(env.AI_ADVISOR_MODEL, provider) ?? defaultModelId,
     thinkingLevel: parseAdvisorThinkingLevel(env.AI_ADVISOR_THINKING_LEVEL),
   };
 }
@@ -232,12 +249,14 @@ function parseReactionEmoji(
 }
 
 function readBotConfig(env: NodeJS.ProcessEnv): BotConfig {
+  const provider = resolveAiProvider(env.AI_PROVIDER);
+  const defaults = defaultModelIds(provider);
   const functionMaxDurationSeconds = resolveFunctionMaxDurationSeconds(env);
   const maxTurnTimeoutMs = resolveMaxTurnTimeoutMs(functionMaxDurationSeconds);
-  const modelId = validateGatewayModelId(env.AI_MODEL) ?? DEFAULT_MODEL_ID;
+  const modelId = validateAiModelId(env.AI_MODEL, provider) ?? defaults.main;
   const fastModelId =
-    validateGatewayModelId(env.AI_FAST_MODEL ?? env.AI_MODEL) ??
-    DEFAULT_FAST_MODEL_ID;
+    validateAiModelId(env.AI_FAST_MODEL ?? env.AI_MODEL, provider) ??
+    defaults.fast;
 
   return {
     userName: toOptionalTrimmed(env.JUNIOR_BOT_NAME) ?? "junior",
@@ -251,12 +270,12 @@ function readBotConfig(env: NodeJS.ProcessEnv): BotConfig {
       validateEmbeddingModelId(env.AI_EMBEDDING_MODEL) ??
       DEFAULT_EMBEDDING_MODEL_ID,
     loadingMessages: parseLoadingMessages(env.JUNIOR_LOADING_MESSAGES),
-    visionModelId: validateGatewayModelId(env.AI_VISION_MODEL),
+    visionModelId: validateAiModelId(env.AI_VISION_MODEL, provider),
     turnTimeoutMs: parseAgentTurnTimeoutMs(
       env.AGENT_TURN_TIMEOUT_MS,
       maxTurnTimeoutMs,
     ),
-    advisor: readAdvisorConfig(env),
+    advisor: readAdvisorConfig(env, provider, defaults.advisor),
   };
 }
 

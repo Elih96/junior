@@ -110,8 +110,9 @@ Pass eval file paths and `-t` filters directly after the `evals` script. Do not 
   - `packages/junior-evals/evals/**`
   - `packages/junior-evals/vitest.evals.config.ts`
   - `packages/junior/src/**`
-- The simplest CI setup is `VERCEL_OIDC_TOKEN` alone. It covers both AI Gateway auth and Vercel Sandbox auth.
-- The fallback CI setup is `AI_GATEWAY_API_KEY` plus `VERCEL_TOKEN` + `VERCEL_TEAM_ID` + `VERCEL_PROJECT_ID`.
+- The default OpenRouter setup uses `OPENROUTER_API_KEY` for model calls and `VERCEL_OIDC_TOKEN` for Vercel Sandbox.
+- To run through Vercel AI Gateway, set the `AI_PROVIDER` repository variable to `vercel-ai-gateway`; `VERCEL_OIDC_TOKEN` then covers both model and Sandbox auth.
+- Sandbox auth can instead use `VERCEL_TOKEN` + `VERCEL_TEAM_ID` + `VERCEL_PROJECT_ID`.
 - This repo is not intended to configure those GitHub Actions secrets right now. The workflow support and setup doc are future-facing.
 - Setup details for GitHub Actions live in `evals/github-actions.md`.
 

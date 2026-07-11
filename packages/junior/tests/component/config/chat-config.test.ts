@@ -51,6 +51,23 @@ describe("chat config", () => {
     expect(botConfig.modelId).toBe("openai/gpt-5.5");
   });
 
+  it("uses the Gateway model registry when AI_PROVIDER selects Gateway", async () => {
+    process.env.AI_PROVIDER = "vercel-ai-gateway";
+    process.env.AI_MODEL = "openai/gpt-5.5";
+
+    const { botConfig } = await loadConfig();
+
+    expect(botConfig.modelId).toBe("openai/gpt-5.5");
+  });
+
+  it("rejects unknown AI providers", async () => {
+    process.env.AI_PROVIDER = "other";
+
+    await expect(loadConfig()).rejects.toThrow(
+      "AI_PROVIDER must be openrouter or vercel-ai-gateway",
+    );
+  });
+
   it("uses the default embedding model when AI_EMBEDDING_MODEL is unset", async () => {
     delete process.env.AI_EMBEDDING_MODEL;
 
@@ -200,7 +217,7 @@ describe("chat config", () => {
   it("throws at config load when AI_ADVISOR_MODEL is not registered", async () => {
     process.env.AI_ADVISOR_MODEL = "openai/gpt-definitely-not-real";
 
-    await expect(loadConfig()).rejects.toThrow(/Unknown AI Gateway model id/);
+    await expect(loadConfig()).rejects.toThrow(/Unknown openrouter model id/);
   });
 
   it("throws at config load when AI_ADVISOR_THINKING_LEVEL is invalid", async () => {
@@ -215,7 +232,7 @@ describe("chat config", () => {
   it("throws at config load when AI_MODEL is not a registered gateway model id", async () => {
     process.env.AI_MODEL = "openai/gpt-definitely-not-real";
 
-    await expect(loadConfig()).rejects.toThrow(/Unknown AI Gateway model id/);
+    await expect(loadConfig()).rejects.toThrow(/Unknown openrouter model id/);
   });
 
   it("uses the default assistant loading messages when unset", async () => {

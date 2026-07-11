@@ -123,7 +123,7 @@ vi.mock("@/chat/config", () => ({
 
 vi.mock("@/chat/pi/client", () => ({
   GEN_AI_PROVIDER_NAME: "test-provider",
-  GEN_AI_SERVER_ADDRESS: "ai-gateway.vercel.sh",
+  GEN_AI_SERVER_ADDRESS: "openrouter.ai",
   GEN_AI_SERVER_PORT: 443,
   completeObject: async ({ prompt }: { prompt: string }) => {
     const instructionMatch = prompt.match(
@@ -166,8 +166,8 @@ vi.mock("@/chat/pi/client", () => ({
       },
     };
   },
-  getPiGatewayApiKey: () => undefined,
-  resolveGatewayModel: (modelId: string) => modelId,
+  getPiApiKey: () => undefined,
+  resolveAiModel: (modelId: string) => modelId,
 }));
 
 vi.mock("@/chat/prompt", async (importOriginal) => ({

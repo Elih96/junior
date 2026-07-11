@@ -36,6 +36,7 @@ export default defineConfig({
     "@chat-adapter/state-redis",
     "@earendil-works/pi-agent-core",
     "@earendil-works/pi-ai",
+    "@openrouter/ai-sdk-provider",
     "@sinclair/typebox",
     "@slack/web-api",
     "@vercel/functions",

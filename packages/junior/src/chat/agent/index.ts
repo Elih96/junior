@@ -47,8 +47,8 @@ import {
   GEN_AI_SERVER_ADDRESS,
   GEN_AI_SERVER_PORT,
   completeObject,
-  getPiGatewayApiKey,
-  resolveGatewayModel,
+  getPiApiKey,
+  resolveAiModel,
 } from "@/chat/pi/client";
 import type { PiMessage } from "@/chat/pi/messages";
 import { isAssistantMessage } from "@/chat/pi/transcript";
@@ -580,7 +580,7 @@ async function executeAgentRunInPrivacyContext(
       }
     };
 
-    const apiKeyOverride = getPiGatewayApiKey();
+    const apiKeyOverride = getPiApiKey();
     agent = new Agent({
       ...(apiKeyOverride ? { getApiKey: () => apiKeyOverride } : {}),
       streamFn: createTracedStreamFn({ conversationPrivacy }),
@@ -592,7 +592,7 @@ async function executeAgentRunInPrivacyContext(
       },
       initialState: {
         systemPrompt: baseInstructions,
-        model: resolveGatewayModel(botConfig.modelId),
+        model: resolveAiModel(botConfig.modelId),
         thinkingLevel: toAgentThinkingLevel(thinkingSelection.thinkingLevel),
         tools: wiring.agentTools,
       },

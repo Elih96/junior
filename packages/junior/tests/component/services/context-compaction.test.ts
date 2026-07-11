@@ -60,12 +60,12 @@ describe("context compaction retained messages", () => {
         getAgentContextCompactionTriggerTokens,
         getConversationContextCompactionTriggerTokens,
       } = await import("@/chat/services/context-budget");
-      const { resolveGatewayModel } = await import("@/chat/pi/client");
+      const { resolveAiModel } = await import("@/chat/pi/client");
 
       expect(getAgentContextCompactionTriggerTokens()).toBe(112_500);
       expect(getConversationContextCompactionTriggerTokens()).toBe(
         calculateContextCompactionTriggerTokens(
-          resolveGatewayModel("openai/gpt-5.4-mini"),
+          resolveAiModel("openai/gpt-5.4-mini"),
         ),
       );
     } finally {

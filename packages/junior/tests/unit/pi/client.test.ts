@@ -1,10 +1,17 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
+const ORIGINAL_AI_PROVIDER = process.env.AI_PROVIDER;
+
 const mocks = vi.hoisted(() => ({
   completeSimple: vi.fn(),
   createGatewayProvider: vi.fn(() => ({
     chat: vi.fn((modelId: string) => ({ modelId })),
+    embeddingModel: vi.fn((modelId: string) => ({ modelId })),
+  })),
+  createOpenRouter: vi.fn(() => ({
+    chat: vi.fn((modelId: string) => ({ modelId })),
+    textEmbeddingModel: vi.fn((modelId: string) => ({ modelId })),
   })),
   generateObject: vi.fn(),
   getEnvApiKey: vi.fn(),
@@ -14,7 +21,9 @@ const mocks = vi.hoisted(() => ({
   registerApiProvider: vi.fn(),
   setSpanAttributes: vi.fn(),
   streamAnthropic: vi.fn(),
+  streamOpenAICompletions: vi.fn(),
   streamSimpleAnthropic: vi.fn(),
+  streamSimpleOpenAICompletions: vi.fn(),
   withSpan: vi.fn(
     async (
       _name: string,
@@ -38,6 +47,15 @@ vi.mock("@earendil-works/pi-ai/anthropic", () => ({
   streamSimpleAnthropic: mocks.streamSimpleAnthropic,
 }));
 
+vi.mock("@earendil-works/pi-ai/openai-completions", () => ({
+  streamOpenAICompletions: mocks.streamOpenAICompletions,
+  streamSimpleOpenAICompletions: mocks.streamSimpleOpenAICompletions,
+}));
+
+vi.mock("@openrouter/ai-sdk-provider", () => ({
+  createOpenRouter: mocks.createOpenRouter,
+}));
+
 vi.mock("@ai-sdk/gateway", () => ({
   createGatewayProvider: mocks.createGatewayProvider,
 }));
@@ -56,6 +74,11 @@ vi.mock("@/chat/logging", async (importOriginal) => ({
 
 describe("completeText", () => {
   afterEach(() => {
+    if (ORIGINAL_AI_PROVIDER === undefined) {
+      delete process.env.AI_PROVIDER;
+    } else {
+      process.env.AI_PROVIDER = ORIGINAL_AI_PROVIDER;
+    }
     vi.clearAllMocks();
     vi.resetModules();
   });
@@ -102,7 +125,7 @@ describe("completeText", () => {
         "gen_ai.operation.name": "chat",
         "gen_ai.request.model": "openai/gpt-4o-mini",
         "gen_ai.output.type": "text",
-        "server.address": "ai-gateway.vercel.sh",
+        "server.address": "openrouter.ai",
         "server.port": 443,
         "gen_ai.request.reasoning.level": "low",
       }),
@@ -116,7 +139,7 @@ describe("completeText", () => {
         "gen_ai.operation.name": "chat",
         "gen_ai.request.model": "openai/gpt-4o-mini",
         "gen_ai.output.type": "text",
-        "server.address": "ai-gateway.vercel.sh",
+        "server.address": "openrouter.ai",
         "server.port": 443,
         "gen_ai.output.messages": expect.any(String),
         "gen_ai.response.finish_reasons": ["stop"],
@@ -159,7 +182,7 @@ describe("completeText", () => {
       modelId: "openai/gpt-4o-mini",
     });
     expect(attributes["app.conversation.privacy"]).toBe("private");
-    expect(attributes["server.address"]).toBe("ai-gateway.vercel.sh");
+    expect(attributes["server.address"]).toBe("openrouter.ai");
     expect(attributes["server.port"]).toBe(443);
     expect(attributes["gen_ai.output.type"]).toBe("text");
     expect(attributes["app.ai.input.message_count"]).toBe(1);
@@ -268,6 +291,29 @@ describe("completeText", () => {
         "gen_ai.response.finish_reasons": ["stop"],
       }),
     );
+  });
+
+  it("uses the Gateway provider for structured output when selected", async () => {
+    process.env.AI_PROVIDER = "vercel-ai-gateway";
+    mocks.generateObject.mockResolvedValue({
+      object: { ok: true },
+      finishReason: "stop",
+      usage: { inputTokens: 10, outputTokens: 3, totalTokens: 13 },
+    });
+    vi.resetModules();
+
+    const { completeObject, GEN_AI_PROVIDER_NAME, GEN_AI_SERVER_ADDRESS } =
+      await import("@/chat/pi/client");
+    await completeObject({
+      modelId: "openai/gpt-4o-mini",
+      schema: z.object({ ok: z.boolean() }),
+      prompt: "return json",
+    });
+
+    expect(GEN_AI_PROVIDER_NAME).toBe("vercel-ai-gateway");
+    expect(GEN_AI_SERVER_ADDRESS).toBe("ai-gateway.vercel.sh");
+    expect(mocks.createGatewayProvider).toHaveBeenCalledTimes(1);
+    expect(mocks.createOpenRouter).not.toHaveBeenCalled();
   });
 
   it("rethrows retryable object provider failures without capturing", async () => {

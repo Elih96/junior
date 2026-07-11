@@ -59,7 +59,7 @@ vi.mock("@/chat/pi/client", () => ({
     provider: "test-provider",
     vectors: texts.map(() => [1]),
   })),
-  resolveGatewayModel: vi.fn((modelId: string) => modelId),
+  resolveAiModel: vi.fn((modelId: string) => modelId),
 }));
 
 afterAll(() => {

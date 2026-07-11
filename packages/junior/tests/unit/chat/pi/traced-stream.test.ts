@@ -33,7 +33,7 @@ function fakeMessage(): AssistantMessage {
     role: "assistant",
     content: [{ type: "text", text: "hi" }],
     api: "anthropic-messages",
-    provider: "vercel-ai-gateway",
+    provider: "openrouter",
     model: "openai/gpt-5.4",
     usage: {
       input: 100,
@@ -105,8 +105,8 @@ describe("createTracedStreamFn", () => {
     const opts = startInactiveSpan.mock.calls[0]?.[0] as unknown as {
       attributes: Record<string, unknown>;
     };
-    expect(opts.attributes["gen_ai.provider.name"]).toBe("vercel-ai-gateway");
-    expect(opts.attributes["server.address"]).toBe("ai-gateway.vercel.sh");
+    expect(opts.attributes["gen_ai.provider.name"]).toBe("openrouter");
+    expect(opts.attributes["server.address"]).toBe("openrouter.ai");
     expect(opts.attributes["server.port"]).toBe(443);
     expect(opts.attributes["gen_ai.request.stream"]).toBe(true);
     expect(opts.attributes["gen_ai.output.type"]).toBe("text");

@@ -86,8 +86,8 @@ vi.mock("@earendil-works/pi-agent-core", () => {
 });
 
 vi.mock("@/chat/pi/client", () => ({
-  GEN_AI_PROVIDER_NAME: "vercel-ai-gateway",
-  GEN_AI_SERVER_ADDRESS: "ai-gateway.vercel.sh",
+  GEN_AI_PROVIDER_NAME: "openrouter",
+  GEN_AI_SERVER_ADDRESS: "openrouter.ai",
   GEN_AI_SERVER_PORT: 443,
   completeObject: async () => ({
     object: {
@@ -96,8 +96,8 @@ vi.mock("@/chat/pi/client", () => ({
       reason: "test-router",
     },
   }),
-  getPiGatewayApiKey: () => "test-gateway-key",
-  resolveGatewayModel: (modelId: string) => modelId,
+  getPiApiKey: () => "test-gateway-key",
+  resolveAiModel: (modelId: string) => modelId,
 }));
 
 import { defineJuniorPlugin } from "@sentry/junior-plugin-api";

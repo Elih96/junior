@@ -8,11 +8,16 @@ import {
   type ThinkingLevel,
 } from "@earendil-works/pi-ai";
 import { createGatewayProvider } from "@ai-sdk/gateway";
+import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import { embedMany, generateObject } from "ai";
 import {
   streamAnthropic,
   streamSimpleAnthropic,
 } from "@earendil-works/pi-ai/anthropic";
+import {
+  streamOpenAICompletions,
+  streamSimpleOpenAICompletions,
+} from "@earendil-works/pi-ai/openai-completions";
 
 // Directly register the anthropic provider at import time. pi-ai's built-in
 // registration relies on opaque dynamic import() calls that break under
@@ -22,6 +27,11 @@ registerApiProvider({
   api: "anthropic-messages",
   stream: streamAnthropic,
   streamSimple: streamSimpleAnthropic,
+});
+registerApiProvider({
+  api: "openai-completions",
+  stream: streamOpenAICompletions,
+  streamSimple: streamSimpleOpenAICompletions,
 });
 import type { ZodTypeAny, z } from "zod";
 import {
@@ -50,29 +60,48 @@ import {
   isProviderRetryError,
 } from "@/chat/services/provider-retry";
 
-const GATEWAY_PROVIDER = "vercel-ai-gateway" as const;
-export const GEN_AI_PROVIDER_NAME = GATEWAY_PROVIDER;
-export const GEN_AI_SERVER_ADDRESS = "ai-gateway.vercel.sh";
+export type AiProvider = "openrouter" | "vercel-ai-gateway";
+
+/** Resolve the configured host AI provider. */
+export function resolveAiProvider(
+  rawValue: string | undefined = process.env.AI_PROVIDER,
+): AiProvider {
+  const value = toOptionalTrimmed(rawValue) ?? "openrouter";
+  if (value === "openrouter" || value === "vercel-ai-gateway") {
+    return value;
+  }
+  throw new Error("AI_PROVIDER must be openrouter or vercel-ai-gateway");
+}
+
+export const AI_PROVIDER = resolveAiProvider();
+export const GEN_AI_PROVIDER_NAME = AI_PROVIDER;
+export const GEN_AI_SERVER_ADDRESS =
+  AI_PROVIDER === "openrouter" ? "openrouter.ai" : "ai-gateway.vercel.sh";
 export const GEN_AI_SERVER_PORT = 443;
 const GEN_AI_OPERATION_CHAT = "chat" as const;
 const GEN_AI_OPERATION_EMBEDDINGS = "embeddings" as const;
-export const MISSING_GATEWAY_CREDENTIALS_ERROR =
-  "Missing AI gateway credentials (AI_GATEWAY_API_KEY or VERCEL_OIDC_TOKEN)";
+export const MISSING_AI_PROVIDER_CREDENTIALS_ERROR =
+  AI_PROVIDER === "openrouter"
+    ? "Missing OpenRouter credentials (OPENROUTER_API_KEY)"
+    : "Missing AI Gateway credentials (AI_GATEWAY_API_KEY or VERCEL_OIDC_TOKEN)";
 
 /**
- * Resolve the documented AI Gateway env credentials for the paths that need
- * the bearer token string directly.
+ * Resolve the selected AI provider credential for paths that need the bearer
+ * token string directly.
  */
-export function getGatewayApiKey(): string | undefined {
+export function getAiProviderApiKey(): string | undefined {
+  if (AI_PROVIDER === "openrouter") {
+    return toOptionalTrimmed(getEnvApiKey("openrouter"));
+  }
   return (
     toOptionalTrimmed(getEnvApiKey("vercel-ai-gateway")) ??
     toOptionalTrimmed(process.env.VERCEL_OIDC_TOKEN)
   );
 }
 
-/** Return the Gateway credential shape expected by Pi Agent getApiKey hooks. */
-export function getPiGatewayApiKey(): string | undefined {
-  return getGatewayApiKey();
+/** Return the selected provider credential expected by Pi Agent hooks. */
+export function getPiApiKey(): string | undefined {
+  return getAiProviderApiKey();
 }
 
 function extractText(message: {
@@ -86,18 +115,41 @@ function extractText(message: {
 }
 
 /**
- * Look up a gateway model by id. Throws `Unknown AI Gateway model id: …` if
- * the id is not in pi-ai's registry — callers at the config boundary can use
- * this to fail fast at startup instead of mid-turn.
+ * Look up a model for the selected provider so configuration fails at startup
+ * instead of during a turn.
  */
-export function resolveGatewayModel(modelId: string): Model<any> {
-  const matched = getModels(GATEWAY_PROVIDER).find(
+export function resolveAiModel(
+  modelId: string,
+  provider: AiProvider = AI_PROVIDER,
+): Model<any> {
+  const matched = getModels(provider).find(
     (model: Model<any>) => model.id === modelId,
   );
   if (!matched) {
-    throw new Error(`Unknown AI Gateway model id: ${modelId}`);
+    throw new Error(`Unknown ${provider} model id: ${modelId}`);
   }
   return matched;
+}
+
+function createAiSdkChatModel(modelId: string, apiKey: string | undefined) {
+  if (AI_PROVIDER === "openrouter") {
+    return createOpenRouter(apiKey ? { apiKey } : {}).chat(modelId);
+  }
+  return createGatewayProvider(apiKey ? { apiKey } : {}).chat(modelId);
+}
+
+function createAiSdkEmbeddingModel(
+  modelId: string,
+  apiKey: string | undefined,
+) {
+  if (AI_PROVIDER === "openrouter") {
+    return createOpenRouter(apiKey ? { apiKey } : {}).textEmbeddingModel(
+      modelId,
+    );
+  }
+  return createGatewayProvider(apiKey ? { apiKey } : {}).embeddingModel(
+    modelId,
+  );
 }
 
 /** Execute a direct chat completion inside a dedicated `gen_ai.chat` span. */
@@ -112,11 +164,12 @@ export async function completeText(params: {
   signal?: AbortSignal;
   metadata?: Record<string, unknown>;
 }) {
-  const model = resolveGatewayModel(params.modelId);
-  const apiKey = getPiGatewayApiKey();
-  const authMode = toOptionalTrimmed(process.env.AI_GATEWAY_API_KEY)
-    ? "api_key"
-    : toOptionalTrimmed(process.env.VERCEL_OIDC_TOKEN)
+  const model = resolveAiModel(params.modelId);
+  const apiKey = getPiApiKey();
+  const authMode =
+    AI_PROVIDER === "vercel-ai-gateway" &&
+    !toOptionalTrimmed(process.env.AI_GATEWAY_API_KEY) &&
+    toOptionalTrimmed(process.env.VERCEL_OIDC_TOKEN)
       ? "oidc"
       : "api_key";
   // Identifier metadata can only narrow toward private; the turn-scoped
@@ -292,8 +345,7 @@ export async function completeObject<TSchema extends ZodTypeAny>(params: {
   signal?: AbortSignal;
   metadata?: Record<string, unknown>;
 }): Promise<{ object: z.infer<TSchema> }> {
-  const apiKey = getGatewayApiKey();
-  const provider = createGatewayProvider(apiKey ? { apiKey } : {});
+  const apiKey = getAiProviderApiKey();
   try {
     const result = await withSpan(
       `${GEN_AI_OPERATION_CHAT} ${params.modelId}`,
@@ -301,7 +353,7 @@ export async function completeObject<TSchema extends ZodTypeAny>(params: {
       logContextFromMetadata(params.modelId, params.metadata),
       async () =>
         await generateObject({
-          model: provider.chat(params.modelId),
+          model: createAiSdkChatModel(params.modelId, apiKey),
           schema: params.schema,
           prompt: params.prompt,
           ...(params.system !== undefined ? { system: params.system } : {}),
@@ -359,7 +411,7 @@ export async function completeObject<TSchema extends ZodTypeAny>(params: {
   }
 }
 
-/** Generate text embeddings through the host-owned AI Gateway provider. */
+/** Generate text embeddings through the selected host-owned AI provider. */
 export async function embedTexts(params: {
   modelId: string;
   texts: string[];
@@ -375,8 +427,7 @@ export async function embedTexts(params: {
   if (texts.length === 0 || texts.some((text) => text.length === 0)) {
     throw new Error("Embedding text is required.");
   }
-  const apiKey = getGatewayApiKey();
-  const provider = createGatewayProvider(apiKey ? { apiKey } : {});
+  const apiKey = getAiProviderApiKey();
   try {
     const result = await withSpan(
       `${GEN_AI_OPERATION_EMBEDDINGS} ${params.modelId}`,
@@ -384,7 +435,7 @@ export async function embedTexts(params: {
       logContextFromMetadata(params.modelId, params.metadata),
       async () =>
         await embedMany({
-          model: provider.embeddingModel(params.modelId),
+          model: createAiSdkEmbeddingModel(params.modelId, apiKey),
           values: texts,
           ...(params.signal !== undefined
             ? { abortSignal: params.signal }

@@ -1,7 +1,7 @@
 import { expect } from "vitest";
 import { assistantMessages, describeEval, toolCalls } from "vitest-evals";
 import { getDb } from "@/chat/db";
-import { completeText, resolveGatewayModel } from "@/chat/pi/client";
+import { completeText, resolveAiModel } from "@/chat/pi/client";
 import { createMemoryStore, type MemoryDb } from "@sentry/junior-memory";
 import { createSlackSource, type PluginModel } from "@sentry/junior-plugin-api";
 import {
@@ -16,7 +16,7 @@ const memoryPluginOverrides = {
 };
 const memoryTeamId = "TEVAL";
 const actorUserId = "U-test";
-const memoryJudgeModelId = resolveGatewayModel("openai/gpt-5.4").id;
+const memoryJudgeModelId = resolveAiModel("openai/gpt-5.4").id;
 
 interface MemoryThread {
   channel_type?: "channel" | "group" | "im" | "mpim";

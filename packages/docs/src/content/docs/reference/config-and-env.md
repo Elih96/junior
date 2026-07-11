@@ -2,6 +2,7 @@
 title: Config & Environment
 description: Required and optional environment variables for runtime and plugins.
 type: reference
+summary: Choose an AI provider and configure the runtime credentials Junior needs.
 prerequisites:
   - /start-here/quickstart/
 related:
@@ -22,7 +23,8 @@ related:
 | `JUNIOR_SECRET`                             | Yes         | Signs internal queue/callback payloads and sandbox egress actor context.                                                                              |
 | `JUNIOR_BOT_NAME`                           | No          | Bot display/config naming.                                                                                                                            |
 | `JUNIOR_SLASH_COMMAND`                      | No          | Slack slash command for account-management flows. Defaults to `/jr`; the Slack app command must match this value.                                     |
-| `AI_MODEL`                                  | No          | Primary model selection override for main agent runs. Defaults to `openai/gpt-5.4`; Junior chooses the reasoning effort per run automatically.        |
+| `AI_PROVIDER`                               | No          | Host AI provider for models and AI tools: `openrouter` or `vercel-ai-gateway`. Defaults to `openrouter`.                                              |
+| `AI_MODEL`                                  | No          | Primary model selection override for main agent runs. Defaults to `openai/gpt-5.5`; Junior chooses the reasoning effort per run automatically.        |
 | `AI_FAST_MODEL`                             | No          | Faster model for lightweight tasks and routing/classification passes before the main turn begins. Defaults to `openai/gpt-5.4-mini`.                  |
 | `AI_EMBEDDING_MODEL`                        | No          | Embedding model for plugin-owned vector retrieval. Defaults to `openai/text-embedding-3-small`; memory v1 stores fixed 1536-dimensional vectors.      |
 | `AI_VISION_MODEL`                           | No          | Dedicated image-understanding model; unset disables vision features.                                                                                  |
@@ -31,7 +33,26 @@ related:
 | `JUNIOR_STATE_KEY_PREFIX`                   | No          | Optional namespace prepended to all state-adapter keys, locks, and queues. Use separate prefixes when sharing one Redis database across environments. |
 | `CRON_SECRET` or `JUNIOR_SCHEDULER_SECRET`  | Conditional | Bearer token for the internal heartbeat route; use `CRON_SECRET` with Vercel Cron, or `JUNIOR_SCHEDULER_SECRET` for a non-Vercel heartbeat caller.    |
 | `JUNIOR_TIMEZONE`                           | No          | Default IANA timezone for scheduler authoring when the scheduler plugin is enabled. Defaults to `America/Los_Angeles`.                                |
-| `AI_GATEWAY_API_KEY`                        | No          | AI gateway auth if used in your setup.                                                                                                                |
+| `OPENROUTER_API_KEY`                        | Conditional | Required when `AI_PROVIDER=openrouter`.                                                                                                               |
+| `AI_GATEWAY_API_KEY`                        | Conditional | Required when `AI_PROVIDER=vercel-ai-gateway` unless Vercel OIDC supplies `VERCEL_OIDC_TOKEN`.                                                        |
+
+## AI provider
+
+Junior sends text generation, structured output, embeddings, web search, and image generation through one selected host provider. OpenRouter is the default:
+
+```bash
+AI_PROVIDER=openrouter
+OPENROUTER_API_KEY=sk-or-v1-...
+```
+
+To use Vercel AI Gateway instead, select it explicitly and configure either an API key or Vercel OIDC:
+
+```bash
+AI_PROVIDER=vercel-ai-gateway
+AI_GATEWAY_API_KEY=...
+```
+
+Model overrides such as `AI_MODEL`, `AI_FAST_MODEL`, and `AI_WEB_SEARCH_MODEL` must exist on the selected provider. Keep `AI_PROVIDER` explicit when both provider credentials are present; Junior never chooses a provider by guessing from available keys.
 
 When `@sentry/junior-memory` is enabled, the configured Postgres database must
 support pgvector because the plugin migration creates the `vector` extension

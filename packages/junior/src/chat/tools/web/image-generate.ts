@@ -4,14 +4,22 @@ import { zodTool } from "@/chat/tool-support/zod-tool";
 import type { ImageGenerateToolDeps, ToolHooks } from "@/chat/tools/types";
 import { botConfig } from "@/chat/config";
 import {
+  AI_PROVIDER,
   completeText,
-  getGatewayApiKey,
-  MISSING_GATEWAY_CREDENTIALS_ERROR,
+  getAiProviderApiKey,
+  MISSING_AI_PROVIDER_CREDENTIALS_ERROR,
 } from "@/chat/pi/client";
 import { JUNIOR_PERSONALITY } from "@/chat/prompt";
 import { logInfo, logWarn } from "@/chat/logging";
 
-const DEFAULT_IMAGE_MODEL = "google/gemini-3-pro-image";
+const DEFAULT_IMAGE_MODEL =
+  AI_PROVIDER === "openrouter"
+    ? "google/gemini-3-pro-image-preview"
+    : "google/gemini-3-pro-image";
+const IMAGE_GENERATION_URL =
+  AI_PROVIDER === "openrouter"
+    ? "https://openrouter.ai/api/v1/chat/completions"
+    : "https://ai-gateway.vercel.sh/v1/chat/completions";
 
 const imageGenerateOutputSchema = juniorToolResultSchema
   .extend({
@@ -114,29 +122,26 @@ export function createImageGenerateTool(
     outputSchema: imageGenerateOutputSchema,
     execute: async ({ prompt }) => {
       const fetchImpl = deps.fetch ?? fetch;
-      // Raw fetch does not resolve AI Gateway env auth on its own, so this
-      // path has to turn the documented env credential into a bearer token.
-      const apiKey = getGatewayApiKey();
+      // Raw fetch cannot resolve provider auth, so pass the selected
+      // provider's documented bearer credential explicitly.
+      const apiKey = getAiProviderApiKey();
       if (!apiKey) {
-        throw new Error(MISSING_GATEWAY_CREDENTIALS_ERROR);
+        throw new Error(MISSING_AI_PROVIDER_CREDENTIALS_ERROR);
       }
       const model = process.env.AI_IMAGE_MODEL ?? DEFAULT_IMAGE_MODEL;
       const enrichedPrompt = await enrichImagePrompt(prompt);
-      const response = await fetchImpl(
-        "https://ai-gateway.vercel.sh/v1/chat/completions",
-        {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            authorization: `Bearer ${apiKey}`,
-          },
-          body: JSON.stringify({
-            model,
-            messages: [{ role: "user", content: enrichedPrompt }],
-            modalities: ["image"],
-          }),
+      const response = await fetchImpl(IMAGE_GENERATION_URL, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${apiKey}`,
         },
-      );
+        body: JSON.stringify({
+          model,
+          messages: [{ role: "user", content: enrichedPrompt }],
+          modalities: ["image"],
+        }),
+      });
 
       if (!response.ok) {
         const text = await response.text();
