@@ -6,8 +6,10 @@
  * The current model context is exactly the highest context epoch's `pi_message`
  * steps in `seq` order; host-only step types (activity, provider connection,
  * authorization requests, epoch markers) never reach `agent.state.messages`.
- * Compaction and rollback open a new epoch instead of rewriting history, so the
- * reducer only walks one epoch and never replays superseded generations.
+ * Compaction, handoff, and rollback open a new epoch instead of rewriting
+ * history, so the context reducer only walks one epoch. The epoch marker binds
+ * the projection's model profile, which later replacements inherit, and the
+ * exact resolved model id used when the epoch was opened for audit.
  */
 import { isDeepStrictEqual } from "node:util";
 import type { PiMessage } from "@/chat/pi/messages";
@@ -23,6 +25,7 @@ import type {
 } from "@/chat/conversations/history";
 import { getAgentStepStore } from "@/chat/db";
 import { ensureLegacyConversationImport } from "@/chat/conversations/legacy-import";
+import type { ModelProfile } from "@/chat/model-profile";
 
 type PiMessageStepEntry = Extract<AgentStepEntry, { type: "pi_message" }>;
 type AuthorizationCompletedEntry = Extract<
@@ -30,8 +33,16 @@ type AuthorizationCompletedEntry = Extract<
   { type: "authorization_completed" }
 >;
 
+/** Current conversation context with its authoritative model binding. */
+export interface ConversationProjection extends SessionProjection {
+  /** Model profile bound to this projection. */
+  modelProfile: ModelProfile;
+  /** Audit snapshot; runtime model selection remains profile-driven. */
+  modelId: string | undefined;
+}
+
 /** Aligned step projection: `provenance[i]` and `seqs[i]` describe `messages[i]`. */
-export interface StepProjection extends SessionProjection {
+export interface StepProjection extends ConversationProjection {
   /** The `seq` of the step each projected message came from. */
   seqs: number[];
 }
@@ -74,9 +85,16 @@ export function projectSteps(
   const messages: PiMessage[] = [];
   const provenance: PiMessageProvenance[] = [];
   const seqs: number[] = [];
+  let modelProfile: ModelProfile = "standard";
+  let modelId: string | undefined;
   for (const step of steps) {
     if (opts?.maxSeq !== undefined && step.seq > opts.maxSeq) {
       break;
+    }
+    if (step.entry.type === "context_epoch_started") {
+      modelProfile = step.entry.modelProfile ?? "standard";
+      modelId = step.entry.modelId;
+      continue;
     }
     if (step.entry.type === "pi_message") {
       messages.push(step.entry.message);
@@ -92,7 +110,7 @@ export function projectSteps(
       seqs.push(step.seq);
     }
   }
-  return { messages, provenance, seqs };
+  return { messages, provenance, seqs, modelProfile, modelId };
 }
 
 /** Distinct MCP providers durably connected in the given steps, sorted. */
@@ -205,13 +223,46 @@ export async function loadProjection(
 }
 
 /** Load the current-epoch Pi projection with aligned per-message provenance. */
-export async function loadProjectionWithProvenance(
+export async function loadConversationProjection(
   args: ScopedConversation,
-): Promise<SessionProjection> {
+): Promise<ConversationProjection> {
   await importLegacyIfNeeded(args);
   const steps = await getAgentStepStore().loadCurrentEpoch(args.conversationId);
-  const { messages, provenance } = projectSteps(steps);
-  return { messages, provenance };
+  const { messages, provenance, modelProfile, modelId } = projectSteps(steps);
+  return { messages, provenance, modelProfile, modelId };
+}
+
+/** Open a standard initial epoch before a conversation's first model request. */
+export async function openConversationProjection(
+  args: ScopedConversation & { modelId: string },
+): Promise<ConversationProjection> {
+  await importLegacyIfNeeded(args);
+  const stepStore = getAgentStepStore();
+  const steps = await stepStore.loadCurrentEpoch(args.conversationId);
+  const projection = projectSteps(steps);
+  if (
+    steps.some(
+      (step) =>
+        step.entry.type === "context_epoch_started" ||
+        step.entry.type === "pi_message",
+    )
+  ) {
+    return projection;
+  }
+  // Host facts may predate the first model request. Keep them in epoch 0 and
+  // make that formerly implicit epoch explicit before model execution.
+  await stepStore.startEpoch(args.conversationId, {
+    reason: "initial",
+    modelProfile: "standard",
+    modelId: args.modelId,
+    messages: [],
+  });
+  return {
+    messages: projection.messages,
+    provenance: projection.provenance,
+    modelProfile: "standard",
+    modelId: args.modelId,
+  };
 }
 
 /**
@@ -270,10 +321,14 @@ function messageTimestamp(message: PiMessage): number {
  * projection normally, or open a `rollback` epoch when it diverged (a
  * provider-retry trim regenerated trailing assistant output). Returns the
  * resolved provenance, the per-message step seqs, and the `seq` boundary that
- * reproduces exactly the committed messages.
+ * reproduces exactly the committed messages. A first commit atomically opens
+ * the standard initial epoch; the run boundary opens it earlier when a model
+ * may act before any session checkpoint, such as recordless handoff.
  */
 export async function commitMessages(args: {
   conversationId: string;
+  /** Exact model selected for this write; persisted for epoch audit only. */
+  modelId: string;
   messages: PiMessage[];
   /** Explicit per-message provenance aligned one-to-one with `messages`. */
   provenance?: PiMessageProvenance[];
@@ -287,9 +342,8 @@ export async function commitMessages(args: {
   provenance: PiMessageProvenance[];
 }> {
   const stepStore = getAgentStepStore();
-  const existing = projectSteps(
-    await stepStore.loadCurrentEpoch(args.conversationId),
-  );
+  const currentSteps = await stepStore.loadCurrentEpoch(args.conversationId);
+  const existing = projectSteps(currentSteps);
   const matchingPrefix = countMatchingPrefix(existing.messages, args.messages);
   const nextProvenance = resolveCommitProvenance({
     existing,
@@ -303,7 +357,18 @@ export async function commitMessages(args: {
       ? { newMessageProvenance: args.newMessageProvenance }
       : {}),
   });
-  if (matchingPrefix === existing.messages.length) {
+  if (currentSteps.length === 0) {
+    await stepStore.startEpoch(args.conversationId, {
+      reason: "initial",
+      modelProfile: "standard",
+      modelId: args.modelId,
+      messages: args.messages.map((message, index) => ({
+        message,
+        createdAtMs: messageTimestamp(message),
+        provenance: nextProvenance[index]!,
+      })),
+    });
+  } else if (matchingPrefix === existing.messages.length) {
     const newMessages = args.messages.slice(matchingPrefix);
     await stepStore.append(
       args.conversationId,
@@ -319,6 +384,8 @@ export async function commitMessages(args: {
   } else {
     await stepStore.startEpoch(args.conversationId, {
       reason: "rollback",
+      modelProfile: existing.modelProfile,
+      modelId: args.modelId,
       messages: args.messages.map((message, index) => ({
         message,
         createdAtMs: messageTimestamp(message),

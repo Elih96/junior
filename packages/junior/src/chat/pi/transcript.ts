@@ -3,9 +3,9 @@
  *
  * Shape predicates and durable-history manipulation for raw Pi messages,
  * shared by the agent executor and the services that persist, trim, or
- * summarize transcripts. Volatile runtime turn context (the
- * `<runtime-turn-context>` bootstrap block) is stripped here so durable
- * history never retains per-session runtime instructions as user text.
+ * summarize transcripts. The utilities here strip stale
+ * `<runtime-turn-context>` bootstrap blocks before history is reused or
+ * replaced; an active completed projection may retain its current bootstrap.
  */
 import type {
   AssistantMessage,
@@ -147,6 +147,20 @@ export function hasRuntimeTurnContext(messages: PiMessage[]): boolean {
       isRuntimeTurnContextPart(part),
     ),
   );
+}
+
+/** Keep only volatile bootstrap messages needed by an in-turn context replacement. */
+export function retainRuntimeTurnContext(messages: PiMessage[]): PiMessage[] {
+  return messages.flatMap((message) => {
+    const content = getUserMessageContent(message);
+    if (!content) {
+      return [];
+    }
+    const runtimeContent = content.filter(isRuntimeTurnContextPart);
+    return runtimeContent.length > 0
+      ? [{ ...message, content: runtimeContent } as PiMessage]
+      : [];
+  });
 }
 
 /**

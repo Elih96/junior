@@ -2,9 +2,10 @@
  * Context compaction.
  *
  * This module bounds visible Pi history for long conversations. It strips
- * runtime-only turn context before summarizing, opens a new compaction context
- * epoch in the durable step store, and keeps recent user intent. Compaction
- * must not preserve runtime bootstrap context as durable conversation history.
+ * runtime-only turn context before summarizing and opens replacement epochs in
+ * the durable step store. Capacity compaction retains recent user intent;
+ * handoff starts a profile-bound epoch with only its summary. Normal checkpoints
+ * may later append the current bootstrap; future replacement strips it again.
  */
 import {
   estimateContextTokens,
@@ -22,7 +23,7 @@ import {
   contextProvenance,
   type PiMessageProvenance,
 } from "@/chat/state/session-log";
-import { loadProjectionWithProvenance } from "@/chat/conversations/projection";
+import { loadConversationProjection } from "@/chat/conversations/projection";
 import { getAgentStepStore } from "@/chat/db";
 import type { ThreadConversationState } from "@/chat/state/conversation";
 import { logWarn, setSpanAttributes } from "@/chat/logging";
@@ -31,6 +32,7 @@ import {
   trimTrailingAssistantMessages,
 } from "@/chat/pi/transcript";
 import { updateConversationStats } from "@/chat/services/conversation-memory";
+import { modelIdForProfile, type ModelProfile } from "@/chat/model-profile";
 
 const RETAINED_USER_MESSAGE_TOKENS = 20_000;
 const MAX_SUMMARY_INPUT_CHARS = 80_000;
@@ -38,7 +40,13 @@ const MAX_VISIBLE_CONTEXT_CHARS = 20_000;
 const MAX_SUMMARY_CHARS = 6_000;
 const MAX_RENDERED_MESSAGE_CHARS = 4_000;
 const COMPACTION_SUMMARY_PREFIX =
+  "Context compaction summary for future Junior turns:";
+// TODO(v0.97.0): Remove support for the deployed "Context handoff summary"
+// prefix after pre-rename rows pass the conversation-history retention horizon.
+const LEGACY_COMPACTION_SUMMARY_PREFIX =
   "Context handoff summary for future Junior turns:";
+const MODEL_HANDOFF_SUMMARY_PREFIX =
+  "Model handoff checkpoint. Continue the outstanding request now using this summary as the complete prior context:";
 const OMITTED_OLDER_CONTEXT_NOTICE = "[older context omitted]";
 
 export interface ContextCompactorDeps {
@@ -68,6 +76,18 @@ export interface CompactContextResult {
   compacted: boolean;
   piMessages?: PiMessage[];
   reason?: "below_threshold" | "missing_context" | "summary_failed";
+}
+
+interface HandoffContextArgs {
+  conversationContext?: string;
+  conversationId: string;
+  metadata?: CompactContextArgs["metadata"];
+  piMessages: PiMessage[];
+  signal?: AbortSignal;
+  target: {
+    modelId: string;
+    modelProfile: ModelProfile;
+  };
 }
 
 function textPart(value: unknown): string | undefined {
@@ -123,7 +143,12 @@ function truncateToTokenBudget(text: string, maxTokens: number): string {
 }
 
 function isCompactionSummary(text: string): boolean {
-  return text.trimStart().startsWith(COMPACTION_SUMMARY_PREFIX);
+  const normalized = text.trimStart();
+  return (
+    normalized.startsWith(COMPACTION_SUMMARY_PREFIX) ||
+    normalized.startsWith(LEGACY_COMPACTION_SUMMARY_PREFIX) ||
+    normalized.startsWith(MODEL_HANDOFF_SUMMARY_PREFIX)
+  );
 }
 
 function isPayloadHeavy(text: string): boolean {
@@ -264,12 +289,13 @@ function renderSummaryInput(
   return keepTail(lines.join("\n"), MAX_SUMMARY_INPUT_CHARS);
 }
 
-/** Ask the fast model for a bounded handoff summary of durable thread context. */
+/** Ask the fast model for a bounded continuation summary of durable context. */
 async function summarizeContext(
   args: {
     conversationContext?: string;
     piMessages: PiMessage[];
     metadata?: CompactContextArgs["metadata"];
+    signal?: AbortSignal;
   },
   deps: ContextCompactorDeps,
 ): Promise<string> {
@@ -278,12 +304,13 @@ async function summarizeContext(
     modelId: botConfig.fastModelId,
     messageAttributeMode: "metadata",
     temperature: 0,
+    signal: args.signal,
     messages: [
       {
         role: "user",
         content: [
           "You are performing a CONTEXT CHECKPOINT COMPACTION for Junior.",
-          "Create a concise handoff summary for another model that will continue this Slack thread.",
+          "Create a concise continuation summary for the agent that will continue this Slack thread.",
           "",
           "Include:",
           "- Current outstanding asks",
@@ -326,7 +353,7 @@ function estimateHistoryTokens(messages: PiMessage[]): number {
 
 /**
  * Preserve each retained user message's original instruction author by using
- * the retained source projection index; the synthetic handoff summary is
+ * the retained source projection index; the synthetic compaction summary is
  * always unauthored context.
  */
 function buildReplacementProvenance(args: {
@@ -429,7 +456,7 @@ async function writeCompactedThreadContext(
   },
 ): Promise<CompactContextResult> {
   const stepStore = getAgentStepStore();
-  const sourceProjection = await loadProjectionWithProvenance({
+  const sourceProjection = await loadConversationProjection({
     conversationId: args.conversationId,
   });
   const retained = selectRetainedUserMessageEntries(
@@ -447,6 +474,8 @@ async function writeCompactedThreadContext(
   });
   await stepStore.startEpoch(args.conversationId, {
     reason: "compaction",
+    modelProfile: sourceProjection.modelProfile,
+    modelId: modelIdForProfile(botConfig, sourceProjection.modelProfile),
     messages: replacement.map((message, index) => ({
       message,
       createdAtMs: piMessageTimestamp(message),
@@ -478,4 +507,28 @@ export function createContextCompactor(
   return {
     maybeCompact: async (args) => await maybeCompactWithDeps(args, deps),
   };
+}
+
+/** Compact the active conversation and durably bind its selected handoff profile. */
+export async function compactContextForHandoff(
+  args: HandoffContextArgs,
+  deps: Pick<ContextCompactorDeps, "completeText">,
+): Promise<PiMessage[]> {
+  const summary = await summarizeContext(args, deps);
+  const message = userMessage(`${MODEL_HANDOFF_SUMMARY_PREFIX}\n${summary}`);
+  const messages = [message];
+  args.signal?.throwIfAborted();
+  await getAgentStepStore().startEpoch(args.conversationId, {
+    reason: "handoff",
+    modelProfile: args.target.modelProfile,
+    modelId: args.target.modelId,
+    messages: [
+      {
+        message,
+        createdAtMs: piMessageTimestamp(message),
+        provenance: contextProvenance,
+      },
+    ],
+  });
+  return messages;
 }

@@ -3,7 +3,7 @@
 ## Metadata
 
 - Created: 2026-03-05
-- Last Edited: 2026-07-08
+- Last Edited: 2026-07-11
 
 ## Purpose
 
@@ -45,11 +45,10 @@ This spec owns how agent session state is persisted and resumed across execution
 
 - `conversation_id`: Stable, predictable thread identity (for example, one Slack thread). This is the durable history key.
 - `context_epoch`: Conversation-local integer generation of the model-visible
-  context for the reduced projection. It starts at 0, advances when a
-  `context_epoch_started` marker begins a replacement context (compaction or
-  rollback), and is not the durable history key. Historical name: this marker was
-  `session_id`, starting at `session_0` and advanced by a `projection_reset`
-  entry.
+  context for the reduced projection. An `initial` marker opens epoch 0;
+  compaction, handoff, or rollback opens each later replacement epoch. It is
+  not the durable history key. Historical name: this marker was `session_id`,
+  starting at `session_0` and advanced by a `projection_reset` entry.
 - `agent_run_id`: Optional internal identity for one response-producing agent
   run inside the conversation. Queue-driven continuation does not need this
   value to decide where to resume; the reduced conversation session log is the
@@ -174,7 +173,7 @@ Each step row has this envelope:
   `junior_agent_steps` primary key `(conversation_id, seq)`.
 - `seq`: per-conversation append order.
 - `context_epoch`: the integer context generation this step belongs to. This
-  bounds replay after compaction/rollback and is not the conversation key.
+  bounds replay after any context replacement and is not the conversation key.
 - `createdAt`: creation time; preserved from message-internal timestamps on
   replay so Pi history is byte-stable.
 - `type`: discriminant.
@@ -199,10 +198,18 @@ happened:
 - `pi_message`: records user, assistant, tool-call, tool-result, and
   host-authored Pi messages.
 - `context_epoch_started`: opens the next context epoch, carrying `reason`
-  (`compaction` | `rollback`). It does not embed a transcript array; the
-  replacement context is written as ordinary `pi_message` rows in the new epoch
-  in the same transaction. (Historical name: `projection_reset`, which embedded
-  the replacement `messages`.)
+  (`initial` | `compaction` | `handoff` | `rollback`), the projection's
+  authoritative `modelProfile`, and the exact resolved `modelId` as an audit
+  snapshot. Initial selects `standard`, handoff records its selected configured
+  non-standard profile, and compaction/rollback inherit the current profile while resolving the model id
+  at epoch creation. The id never pins runtime execution. It does not embed a
+  transcript array; the replacement context is
+  written as ordinary `pi_message` rows in the new epoch in the same
+  transaction. Deployed legacy compaction and rollback markers may omit both
+  binding fields and resolve to `standard`; current profile
+  names must satisfy the canonical profile-name schema. (Historical name:
+  `projection_reset`, which embedded the
+  replacement `messages`.)
 - `mcp_provider_connected`: records that a configured MCP provider was
   successfully connected and its tool catalog listed for this session.
 - `authorization_requested`: records that the runtime sent or reused a private
@@ -215,7 +222,9 @@ happened:
 - `subagent_started`: records that a child agent execution became visible from
   the parent run. It carries `childConversationId`; the child's history is its
   own conversation (`parent_conversation_id` set) with its own steps
-  (`./conversation-storage.md`, `./advisor-tool.md`). The polymorphic
+  (`./conversation-storage.md`). The generic storage shape supports isolated or
+  shared child history for future subagent runtimes; historical advisor children
+  use shared history. The polymorphic
   `transcriptRef {type, key}` and the `advisor_session` Redis key are removed.
 - `subagent_ended`: records the terminal child agent outcome for a previously
   recorded `subagent_started` event.
@@ -242,7 +251,8 @@ Pi-projected events:
   belongs to the highest `context_epoch`.
 - `context_epoch_started` opens a new epoch; the reducer projects the
   `pi_message` rows of the highest epoch in `seq` order and ignores rows from
-  older epochs. The marker itself carries no messages.
+  older epochs. The marker itself carries no messages and supplies the active
+  model profile.
 
 Junior-only events are filtered out before assigning `agent.state.messages` and
 are reduced only for runtime state:
@@ -363,14 +373,14 @@ Junior follows the same rule:
 
 - The step history stays append-only.
 - Compaction opens a new context epoch: in one transaction it appends a
-  `context_epoch_started {reason: "compaction"}` marker and writes the new
+  `context_epoch_started {reason: "compaction", modelProfile, modelId}` marker and writes the new
   context as ordinary `pi_message` rows in that epoch. It does not embed a
   replacement `messages` array in the marker.
 - The new epoch is the current context. Future steps are written in the new
   epoch, so steps in earlier epochs are filtered out of both Pi history and
   derived provider/auth state.
 - The replacement context should contain retained real user messages and one
-  synthetic user-role handoff summary.
+  synthetic user-role compaction summary.
 - The reducer ignores `pi_message` rows in older epochs for the active Pi
   projection, while still allowing older epochs to be inspected for audit and
   debugging.
@@ -539,7 +549,7 @@ If the previous slice timed out after producing uncommitted partial assistant te
 ### In-Process Provider Retry Contract
 
 - Transient provider failures reported as terminal assistant messages with `stopReason=error` may be retried inside the same running slice before final Slack delivery.
-- Provider retry must not replay the original user prompt. It must remove only the trailing assistant error message(s), verify the remaining Pi history ends at a continuable boundary (`user` or `toolResult`), write a rollback epoch for that safe boundary (a `context_epoch_started {reason: "rollback"}` marker plus the trimmed `pi_message` rows in one transaction), then call `continue()`.
+- Provider retry must not replay the original user prompt. It must remove only the trailing assistant error message(s), verify the remaining Pi history ends at a continuable boundary (`user` or `toolResult`), write a rollback epoch for that safe boundary (a `context_epoch_started {reason: "rollback", modelProfile, modelId}` marker inheriting the current profile and recording the running model plus the trimmed `pi_message` rows in one transaction), then call `continue()`.
 - Provider retry is bounded and uses short exponential backoff. If the retry limit is reached, if the error is not classified as transient, or if no safe boundary remains after trimming, the normal provider-failure reply path owns user-visible recovery.
 - Provider retry does not create an awaiting pause. If a retried slice reaches a
   cooperative yield boundary later, the conversation mailbox worker owns

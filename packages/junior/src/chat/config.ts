@@ -2,6 +2,11 @@ import { getModel } from "@earendil-works/pi-ai/compat";
 import { toOptionalTrimmed } from "@/chat/optional-string";
 import { resolveGatewayModel } from "@/chat/pi/client";
 import { normalizeSlackEmojiName } from "@/chat/slack/emoji";
+import {
+  DEFAULT_HANDOFF_MODEL_PROFILE,
+  modelProfileSchema,
+  STANDARD_MODEL_PROFILE,
+} from "@/chat/model-profile";
 
 const MIN_AGENT_TURN_TIMEOUT_MS = 10 * 1000;
 const DEFAULT_AGENT_TURN_TIMEOUT_MS = 12 * 60 * 1000;
@@ -9,17 +14,6 @@ const DEFAULT_FUNCTION_MAX_DURATION_SECONDS = 300;
 const DEFAULT_SLACK_SLASH_COMMAND = "/jr";
 const DEFAULT_PROCESSING_REACTION_EMOJI = "eyes";
 const DEFAULT_COMPLETED_REACTION_EMOJI = "white_check_mark";
-const ADVISOR_THINKING_LEVELS = [
-  "minimal",
-  "low",
-  "medium",
-  "high",
-  "xhigh",
-] as const;
-
-export type AdvisorThinkingLevel = (typeof ADVISOR_THINKING_LEVELS)[number];
-
-const DEFAULT_ADVISOR_THINKING_LEVEL: AdvisorThinkingLevel = "xhigh";
 /**
  * Buffer between the Vercel function timeout and the agent turn timeout so
  * Junior can abort, persist, and schedule continuation before host teardown.
@@ -41,20 +35,15 @@ const DEFAULT_ASSISTANT_LOADING_MESSAGES = [
 ] as const;
 
 export interface BotConfig {
-  advisor: AdvisorConfig;
   embeddingModelId: string;
   fastModelId: string;
   loadingMessages: string[];
   modelId: string;
+  modelProfiles: Readonly<Record<string, string>>;
   modelContextWindowTokens?: number;
   visionModelId?: string;
   turnTimeoutMs: number;
   userName: string;
-}
-
-export interface AdvisorConfig {
-  modelId: string;
-  thinkingLevel: AdvisorThinkingLevel;
 }
 
 export type SqlDriver = "neon" | "postgres";
@@ -138,23 +127,6 @@ function parseLoadingMessages(rawValue: string | undefined): string[] {
   });
 }
 
-function parseAdvisorThinkingLevel(
-  rawValue: string | undefined,
-): AdvisorThinkingLevel {
-  const value = toOptionalTrimmed(rawValue);
-  if (!value) {
-    return DEFAULT_ADVISOR_THINKING_LEVEL;
-  }
-
-  if (ADVISOR_THINKING_LEVELS.includes(value as AdvisorThinkingLevel)) {
-    return value as AdvisorThinkingLevel;
-  }
-
-  throw new Error(
-    `AI_ADVISOR_THINKING_LEVEL must be one of: minimal, low, medium, high, xhigh`,
-  );
-}
-
 function parseOptionalPositiveInteger(
   envName: string,
   rawValue: string | undefined,
@@ -188,7 +160,7 @@ const DEFAULT_FAST_MODEL_ID = getModel(
   "vercel-ai-gateway",
   "openai/gpt-5.4-mini",
 ).id;
-const DEFAULT_ADVISOR_MODEL_ID = getModel(
+const DEFAULT_HANDOFF_MODEL_ID = getModel(
   "vercel-ai-gateway",
   "openai/gpt-5.6-sol",
 ).id;
@@ -205,12 +177,49 @@ function validateEmbeddingModelId(raw: string | undefined): string | undefined {
   return toOptionalTrimmed(raw);
 }
 
-function readAdvisorConfig(env: NodeJS.ProcessEnv): AdvisorConfig {
-  return {
-    modelId:
-      validateGatewayModelId(env.AI_ADVISOR_MODEL) ?? DEFAULT_ADVISOR_MODEL_ID,
-    thinkingLevel: parseAdvisorThinkingLevel(env.AI_ADVISOR_THINKING_LEVEL),
+function parseModelProfiles(
+  rawValue: string | undefined,
+  handoffModelId: string,
+): Readonly<Record<string, string>> {
+  const profiles: Record<string, string> = {
+    [DEFAULT_HANDOFF_MODEL_PROFILE]: handoffModelId,
   };
+  const trimmed = toOptionalTrimmed(rawValue);
+  if (trimmed === undefined) {
+    return profiles;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    throw new Error("AI_MODEL_PROFILES must be a JSON object");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("AI_MODEL_PROFILES must be a JSON object");
+  }
+  for (const [profile, rawModelId] of Object.entries(parsed)) {
+    if (!modelProfileSchema.safeParse(profile).success) {
+      throw new Error(
+        `AI_MODEL_PROFILES profile "${profile}" must match ^[a-z][a-z0-9_-]*$`,
+      );
+    }
+    if (
+      profile === STANDARD_MODEL_PROFILE ||
+      profile === DEFAULT_HANDOFF_MODEL_PROFILE
+    ) {
+      throw new Error(`AI_MODEL_PROFILES profile "${profile}" is reserved`);
+    }
+    if (typeof rawModelId !== "string") {
+      throw new Error(`AI_MODEL_PROFILES.${profile} must be a model id string`);
+    }
+    const modelId = validateGatewayModelId(rawModelId);
+    if (!modelId) {
+      throw new Error(`AI_MODEL_PROFILES.${profile} must not be empty`);
+    }
+    profiles[profile] = modelId;
+  }
+  return profiles;
 }
 
 function parseReactionEmoji(
@@ -238,10 +247,13 @@ function readBotConfig(env: NodeJS.ProcessEnv): BotConfig {
   const fastModelId =
     validateGatewayModelId(env.AI_FAST_MODEL ?? env.AI_MODEL) ??
     DEFAULT_FAST_MODEL_ID;
+  const handoffModelId =
+    validateGatewayModelId(env.AI_HANDOFF_MODEL) ?? DEFAULT_HANDOFF_MODEL_ID;
 
   return {
     userName: toOptionalTrimmed(env.JUNIOR_BOT_NAME) ?? "junior",
     modelId,
+    modelProfiles: parseModelProfiles(env.AI_MODEL_PROFILES, handoffModelId),
     modelContextWindowTokens: parseOptionalPositiveInteger(
       "AI_MODEL_CONTEXT_WINDOW_TOKENS",
       env.AI_MODEL_CONTEXT_WINDOW_TOKENS,
@@ -256,7 +268,6 @@ function readBotConfig(env: NodeJS.ProcessEnv): BotConfig {
       env.AGENT_TURN_TIMEOUT_MS,
       maxTurnTimeoutMs,
     ),
-    advisor: readAdvisorConfig(env),
   };
 }
 

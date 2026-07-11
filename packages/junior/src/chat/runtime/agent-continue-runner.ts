@@ -17,7 +17,10 @@ import {
 } from "@/chat/runtime/slack-resume";
 import { coerceThreadConversationState } from "@/chat/state/conversation";
 import { hydrateConversationMessages } from "@/chat/conversations/visible-messages";
-import { loadProjection } from "@/chat/conversations/projection";
+import {
+  loadProjection,
+  loadConversationProjection,
+} from "@/chat/conversations/projection";
 import {
   failAgentTurnSessionRecord,
   getAgentTurnSessionRecord,
@@ -72,6 +75,14 @@ import {
 import { requireSlackDestination } from "@/chat/destination";
 import type { CredentialContext } from "@/chat/credentials/context";
 import { sleep } from "@/chat/sleep";
+import {
+  modelIdForProfile,
+  STANDARD_MODEL_PROFILE,
+} from "@/chat/model-profile";
+import {
+  retainRuntimeTurnContext,
+  stripRuntimeTurnContext,
+} from "@/chat/pi/transcript";
 
 const AGENT_CONTINUE_LOCK_RETRY_DELAYS_MS = [250, 1_000, 2_000] as const;
 
@@ -573,6 +584,19 @@ async function recoverStrandedRunningSession(args: {
     return false;
   }
 
+  const recoveryProjection = await loadConversationProjection({
+    conversationId: args.conversationId,
+  });
+  const modelProfile = recoveryProjection.modelProfile;
+  const modelId = modelIdForProfile(botConfig, modelProfile);
+  const recoveryMessages =
+    modelProfile !== STANDARD_MODEL_PROFILE
+      ? [
+          ...stripRuntimeTurnContext(recoveryProjection.messages),
+          ...retainRuntimeTurnContext(sessionRecord.piMessages),
+        ]
+      : sessionRecord.piMessages;
+
   const parked = await persistYieldSessionRecord({
     channelName: sessionRecord.channelName,
     conversationId: args.conversationId,
@@ -580,9 +604,10 @@ async function recoverStrandedRunningSession(args: {
     currentSliceId: sessionRecord.sliceId,
     destination: sessionRecord.destination,
     source: sessionRecord.source,
-    messages: sessionRecord.piMessages,
+    messages: recoveryMessages,
     errorMessage: "Recovered running session after hard worker death",
-    logContext: { modelId: botConfig.modelId },
+    logContext: {},
+    modelId,
     actor: sessionRecord.actor,
     surface: sessionRecord.surface,
   });

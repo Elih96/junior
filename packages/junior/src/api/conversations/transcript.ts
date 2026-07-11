@@ -1,7 +1,7 @@
-import { unwrapAdvisorRequest } from "@/chat/advisor-request";
 import { isRecord } from "@/chat/coerce";
 import { unwrapCurrentInstruction } from "@/chat/current-instruction";
 import type { PiMessage } from "@/chat/pi/messages";
+import { unescapeXml } from "@/chat/xml";
 import type {
   ConversationSubagentActivityReport,
   ConversationSubagentTranscriptReport,
@@ -11,6 +11,40 @@ import type {
 } from "./schema";
 
 const SAFE_METADATA_KEY_LIMIT = 20;
+const LEGACY_ADVISOR_TASK_OPEN = "<advisor-task>\n";
+const LEGACY_ADVISOR_TASK_CLOSE = "\n</advisor-task>";
+const LEGACY_EXECUTOR_CONTEXT_OPEN = "<executor-context>\n";
+const LEGACY_EXECUTOR_CONTEXT_CLOSE = "\n</executor-context>";
+
+/** Decode the advisor request wire format retained by historical SQL child rows. */
+function unwrapLegacyAdvisorTask(text: string): string | undefined {
+  // TODO(v0.97.0): Remove after raw advisor-task child messages are upgraded in SQL.
+  if (
+    !text.startsWith(LEGACY_ADVISOR_TASK_OPEN) ||
+    !text.endsWith(LEGACY_EXECUTOR_CONTEXT_CLOSE)
+  ) {
+    return undefined;
+  }
+
+  const taskEnd = text.indexOf(
+    LEGACY_ADVISOR_TASK_CLOSE,
+    LEGACY_ADVISOR_TASK_OPEN.length,
+  );
+  if (taskEnd < 0) return undefined;
+
+  const contextStart = taskEnd + LEGACY_ADVISOR_TASK_CLOSE.length + 2;
+  if (!text.startsWith(LEGACY_EXECUTOR_CONTEXT_OPEN, contextStart)) {
+    return undefined;
+  }
+
+  const task = text.slice(LEGACY_ADVISOR_TASK_OPEN.length, taskEnd);
+  const context = text.slice(
+    contextStart + LEGACY_EXECUTOR_CONTEXT_OPEN.length,
+    -LEGACY_EXECUTOR_CONTEXT_CLOSE.length,
+  );
+  return `${unescapeXml(task)}\n\nExecutor context:\n${unescapeXml(context)}`;
+}
+
 function textPart(text: string): TranscriptPart {
   return { type: "text", text };
 }
@@ -27,14 +61,19 @@ function recordField(value: Record<string, unknown>, names: string[]): unknown {
 /** Normalize Pi content parts for user-facing transcript output. */
 function normalizeTranscriptPart(
   part: unknown,
-  options: { unwrapAdvisorTask?: boolean; unwrapCurrentTask?: boolean } = {},
+  options: {
+    unwrapCurrentTask?: boolean;
+    unwrapLegacyAdvisorTask?: boolean;
+  } = {},
 ): TranscriptPart {
   const displayText = (text: string) => {
     if (options.unwrapCurrentTask) {
       const instruction = unwrapCurrentInstruction(text);
       if (instruction !== undefined) return instruction;
     }
-    if (options.unwrapAdvisorTask) return unwrapAdvisorRequest(text) ?? text;
+    if (options.unwrapLegacyAdvisorTask) {
+      return unwrapLegacyAdvisorTask(text) ?? text;
+    }
     return text;
   };
 
@@ -113,7 +152,23 @@ function normalizeToolResultMessage(
 /** Normalize one provider transcript message into the reporting contract. */
 export function normalizeTranscriptMessage(
   message: PiMessage,
-  options: { unwrapAdvisorTask?: boolean } = {},
+): TranscriptMessage {
+  return normalizeMessage(message);
+}
+
+/** Normalize a stored subagent message, including bounded legacy formats. */
+export function normalizeSubagentTranscriptMessage(
+  message: PiMessage,
+  subagentKind: string,
+): TranscriptMessage {
+  return normalizeMessage(message, {
+    unwrapLegacyAdvisorTask: subagentKind === "advisor",
+  });
+}
+
+function normalizeMessage(
+  message: PiMessage,
+  options: { unwrapLegacyAdvisorTask?: boolean } = {},
 ): TranscriptMessage {
   const record = message as unknown as Record<string, unknown>;
   const content = record.content;
@@ -129,14 +184,16 @@ export function normalizeTranscriptMessage(
         : Array.isArray(content)
           ? content.map((part) =>
               normalizeTranscriptPart(part, {
-                unwrapAdvisorTask: options.unwrapAdvisorTask && role === "user",
                 unwrapCurrentTask: role === "user",
+                unwrapLegacyAdvisorTask:
+                  options.unwrapLegacyAdvisorTask && role === "user",
               }),
             )
           : [
               normalizeTranscriptPart(content, {
-                unwrapAdvisorTask: options.unwrapAdvisorTask && role === "user",
                 unwrapCurrentTask: role === "user",
+                unwrapLegacyAdvisorTask:
+                  options.unwrapLegacyAdvisorTask && role === "user",
               }),
             ],
   };

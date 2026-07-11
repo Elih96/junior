@@ -176,6 +176,7 @@ describe("agent continuation Slack integration", () => {
     });
     const sessionRecord =
       await turnSessionStoreModule.upsertAgentTurnSessionRecord({
+        modelId: "test/model",
         conversationId,
         sessionId,
         sliceId: 2,
@@ -346,6 +347,7 @@ describe("agent continuation Slack integration", () => {
     const sessionId = "turn_msg_8";
     const sessionRecord =
       await turnSessionStoreModule.upsertAgentTurnSessionRecord({
+        modelId: "test/model",
         conversationId,
         sessionId,
         sliceId: 2,
@@ -438,6 +440,7 @@ describe("agent continuation Slack integration", () => {
     const sessionId = "turn_msg_2";
     const sessionRecord =
       await turnSessionStoreModule.upsertAgentTurnSessionRecord({
+        modelId: "test/model",
         conversationId,
         sessionId,
         sliceId: 5,
@@ -535,6 +538,7 @@ describe("agent continuation Slack integration", () => {
     const sessionId = "turn_msg_7";
     const sessionRecord =
       await turnSessionStoreModule.upsertAgentTurnSessionRecord({
+        modelId: "test/model",
         conversationId,
         sessionId,
         sliceId: 2,
@@ -610,6 +614,7 @@ describe("agent continuation Slack integration", () => {
     const storedSource = slackSource("1712345.0012");
     const sessionRecord =
       await turnSessionStoreModule.upsertAgentTurnSessionRecord({
+        modelId: "test/model",
         conversationId,
         sessionId,
         sliceId: 2,
@@ -699,6 +704,7 @@ describe("agent continuation Slack integration", () => {
     const sessionId = "turn_msg_10";
     const sessionRecord =
       await turnSessionStoreModule.upsertAgentTurnSessionRecord({
+        modelId: "test/model",
         conversationId,
         sessionId,
         sliceId: 2,
@@ -789,6 +795,7 @@ describe("agent continuation Slack integration", () => {
     const sessionId = "turn_msg_11";
     const sessionRecord =
       await turnSessionStoreModule.upsertAgentTurnSessionRecord({
+        modelId: "test/model",
         conversationId,
         sessionId,
         sliceId: 2,
@@ -889,6 +896,7 @@ describe("agent continuation Slack integration", () => {
     const sessionId = "turn_msg_6";
     const sessionRecord =
       await turnSessionStoreModule.upsertAgentTurnSessionRecord({
+        modelId: "test/model",
         conversationId,
         sessionId,
         sliceId: 2,
@@ -1000,6 +1008,7 @@ describe("agent continuation Slack integration", () => {
       }),
     );
     await turnSessionStoreModule.upsertAgentTurnSessionRecord({
+      modelId: "test/model",
       conversationId,
       sessionId,
       sliceId: 1,
@@ -1100,10 +1109,188 @@ describe("agent continuation Slack integration", () => {
     });
   });
 
+  it("recovers a post-handoff worker death from the replacement summary epoch", async () => {
+    const conversationId = "slack:C123:1712345.00081";
+    const sessionId = "turn_msg_8_handoff";
+    const staleText = "raw standard context must not return";
+    const runtimeContext =
+      "<runtime-turn-context>\nKeep the active skills and workspace configuration.\n</runtime-turn-context>";
+    const previousRuntimeContext =
+      "<runtime-turn-context>\nOutdated runtime bootstrap.\n</runtime-turn-context>";
+    const summaryText = "Continue the implementation from the handoff summary.";
+    const summaryMessage = {
+      role: "user",
+      content: [{ type: "text", text: summaryText }],
+      timestamp: 5,
+    } as any;
+    await turnSessionStoreModule.upsertAgentTurnSessionRecord({
+      conversationId,
+      sessionId,
+      sliceId: 1,
+      state: "running",
+      destination: SLACK_DESTINATION,
+      source: slackSource("1712345.00081"),
+      modelId: "openai/gpt-5.5",
+      piMessages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: runtimeContext },
+            { type: "text", text: staleText },
+          ],
+          timestamp: 1,
+        },
+      ],
+      actor: {
+        platform: "slack",
+        teamId: SLACK_DESTINATION.teamId,
+        userId: "U123",
+        userName: "testuser",
+        fullName: "Test User",
+        email: "testuser@example.com",
+      },
+    });
+    const { getAgentStepStore } = await import("@/chat/db");
+    await getAgentStepStore().startEpoch(conversationId, {
+      modelId: "test/model",
+      reason: "handoff",
+      modelProfile: "handoff",
+      messages: [
+        {
+          message: summaryMessage,
+          createdAtMs: 5,
+        },
+      ],
+    });
+    // A prior recovery can park runtime context in the handoff epoch before
+    // another worker dies; the next recovery must replace rather than copy it.
+    await getAgentStepStore().append(conversationId, [
+      {
+        entry: {
+          type: "pi_message",
+          message: {
+            role: "user",
+            content: [{ type: "text", text: previousRuntimeContext }],
+            timestamp: 1,
+          } as any,
+        },
+        createdAtMs: 1,
+      },
+    ]);
+    await threadStateModule.persistThreadStateById(conversationId, {
+      artifacts: { listColumnMap: {} },
+      conversation: {
+        schemaVersion: 1,
+        backfill: {},
+        compactions: [],
+        messages: [
+          {
+            id: "msg.8.handoff",
+            role: "user",
+            text: "resume this request",
+            createdAtMs: 1,
+            author: { userId: "U123" },
+          },
+        ],
+        processing: { activeTurnId: sessionId },
+        stats: {
+          compactedMessageCount: 0,
+          estimatedContextTokens: 0,
+          totalMessageCount: 1,
+          updatedAtMs: 1,
+        },
+        vision: { byFileId: {} },
+      },
+    });
+
+    let recoveredRecord:
+      | Awaited<
+          ReturnType<typeof turnSessionStoreModule.getAgentTurnSessionRecord>
+        >
+      | undefined;
+    executeAgentRunMock.mockImplementationOnce(async () => {
+      recoveredRecord = await turnSessionStoreModule.getAgentTurnSessionRecord(
+        conversationId,
+        sessionId,
+      );
+      return completedAgentRun({
+        text: "Handoff recovery completed.",
+        piMessages: [
+          summaryMessage,
+          {
+            role: "assistant",
+            content: [{ type: "text", text: "Handoff recovery completed." }],
+            timestamp: 6,
+          },
+        ] as any,
+        diagnostics: {
+          ...makeDiagnostics(),
+          modelId: "openai/gpt-5.6-sol",
+        },
+      });
+    });
+
+    const resumed = await requestDeadlineModule.runWithTurnRequestDeadline(() =>
+      agentContinueRunnerModule.resumeAwaitingSlackContinuation(
+        conversationId,
+        {
+          agentRunner: { run: executeAgentRunMock },
+        },
+      ),
+    );
+
+    expect(resumed).toBe(true);
+    expect(recoveredRecord).toMatchObject({
+      actors: [expect.objectContaining({ userId: "U123" })],
+      modelId: "openai/gpt-5.6-sol",
+      piMessages: expect.arrayContaining([
+        expect.objectContaining({ role: "user" }),
+      ]),
+    });
+    expect(recoveredRecord?.piMessages).toHaveLength(2);
+    expect(JSON.stringify(recoveredRecord?.piMessages)).toContain(summaryText);
+    expect(recoveredRecord?.piMessages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          content: [expect.objectContaining({ text: runtimeContext })],
+        }),
+      ]),
+    );
+    expect(JSON.stringify(recoveredRecord?.piMessages)).not.toContain(
+      staleText,
+    );
+    expect(JSON.stringify(recoveredRecord?.piMessages)).not.toContain(
+      "Outdated runtime bootstrap.",
+    );
+    const { loadConversationProjection, loadProjection } =
+      await import("@/chat/conversations/projection");
+    expect(
+      (await loadConversationProjection({ conversationId })).modelProfile,
+    ).toBe("handoff");
+    const projection = await loadProjection({ conversationId });
+    expect(projection[0]).toEqual(summaryMessage);
+    expect(JSON.stringify(projection)).toContain("Handoff recovery completed.");
+    expect(JSON.stringify(projection)).not.toContain(staleText);
+    expect(JSON.stringify(projection)).not.toContain("<runtime-turn-context>");
+    const history = await getAgentStepStore().loadHistory(conversationId);
+    const rollbacks = history.filter(
+      (step) =>
+        step.entry.type === "context_epoch_started" &&
+        step.entry.reason === "rollback",
+    );
+    expect(rollbacks).toHaveLength(2);
+    for (const rollback of rollbacks) {
+      expect(rollback.entry).toEqual(
+        expect.objectContaining({ modelProfile: "handoff" }),
+      );
+    }
+  });
+
   it("terminally fails a stranded running session with no resumable boundary", async () => {
     const conversationId = "slack:C123:1712345.0009";
     const sessionId = "turn_msg_9";
     await turnSessionStoreModule.upsertAgentTurnSessionRecord({
+      modelId: "test/model",
       conversationId,
       sessionId,
       sliceId: 1,
@@ -1210,6 +1397,7 @@ describe("agent continuation Slack integration", () => {
     const sessionId = "turn_msg_3";
     const sessionRecord =
       await turnSessionStoreModule.upsertAgentTurnSessionRecord({
+        modelId: "test/model",
         conversationId,
         sessionId,
         sliceId: 2,

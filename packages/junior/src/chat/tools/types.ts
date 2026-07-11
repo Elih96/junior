@@ -14,9 +14,15 @@ import type { AgentTurnSurface } from "@/chat/state/turn-session";
 import type { ThreadArtifactsState } from "@/chat/state/artifacts";
 import type { Skill } from "@/chat/skills";
 import type { LoadSkillMetadata } from "@/chat/tools/skill/load-skill";
-import type { AdvisorToolRuntimeContext } from "@/chat/tools/advisor/tool";
 import type { JuniorToolResult } from "@/chat/tool-support/structured-result";
 import type { LocalActor, Actor, SlackActor } from "@/chat/actor";
+import type { ModelProfile } from "@/chat/model-profile";
+
+interface HandoffControl {
+  /** Non-empty catalog with the default target first. */
+  profiles: readonly [ModelProfile, ...ModelProfile[]];
+  execute: (profile: ModelProfile, signal?: AbortSignal) => Promise<void>;
+}
 
 export interface ImageGenerateToolDeps {
   fetch?: typeof fetch;
@@ -66,7 +72,7 @@ export interface ToolHooks {
 }
 
 interface BaseToolRuntimeContext {
-  advisor?: AdvisorToolRuntimeContext;
+  handoff?: HandoffControl;
   /**
    * Opaque Junior conversation/session identity for this turn.
    * Interactive Slack turns use `slack:{channelId}:{threadTs}`.

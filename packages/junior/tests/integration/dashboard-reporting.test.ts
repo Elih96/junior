@@ -1,5 +1,4 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { renderAdvisorRequest } from "@/chat/advisor-request";
 import type { PiMessage } from "@/chat/pi/messages";
 import { readConversationDetail } from "@/api/conversations/detail";
 import { readConversationSubagent as readConversationSubagentTranscriptReport } from "@/api/conversations/subagent";
@@ -69,6 +68,7 @@ describe("dashboard reporting", () => {
       await import("@/chat/state/turn-session");
 
     await upsertAgentTurnSessionRecord({
+      modelId: "test/model",
       conversationId: "slack:C1:111",
       sessionId: "turn-1",
       sliceId: 1,
@@ -76,6 +76,7 @@ describe("dashboard reporting", () => {
       piMessages: [],
     });
     await upsertAgentTurnSessionRecord({
+      modelId: "test/model",
       conversationId: "slack:C1:111",
       sessionId: "turn-1",
       sliceId: 2,
@@ -86,6 +87,7 @@ describe("dashboard reporting", () => {
       loadedSkillNames: ["triage"],
     });
     await upsertAgentTurnSessionRecord({
+      modelId: "test/model",
       conversationId: "slack:C2:222",
       sessionId: "turn-2",
       sliceId: 1,
@@ -451,6 +453,7 @@ describe("dashboard reporting", () => {
     const { getAgentStepStore } = await import("@/chat/db");
 
     await upsertAgentTurnSessionRecord({
+      modelId: "test/model",
       conversationId: "slack:G1:activity",
       sessionId: "turn-activity",
       sliceId: 1,
@@ -533,15 +536,13 @@ describe("dashboard reporting", () => {
     expect(JSON.stringify(report.activity)).not.toContain("private question");
   });
 
-  it("loads advisor subagent transcript history from the child conversation", async () => {
-    const { advisorChildConversationId } =
-      await import("@/chat/tools/advisor/tool");
+  it("loads subagent transcript history from the child conversation", async () => {
     const { getAgentStepStore, getConversationStore } =
       await import("@/chat/db");
 
-    const conversationId = "slack:C1:advisor-slices";
+    const conversationId = "slack:C1:subagent-slices";
     await confirmPublicSlackConversation(conversationId);
-    const childConversationId = advisorChildConversationId(conversationId);
+    const childConversationId = `task:${conversationId}`;
     const conversationStore = getConversationStore();
     const stepStore = getAgentStepStore();
 
@@ -558,10 +559,7 @@ describe("dashboard reporting", () => {
             content: [
               {
                 type: "text",
-                text: renderAdvisorRequest(
-                  "first advisor question",
-                  "first <evidence> packet",
-                ),
+                text: "first subagent question\n\nExecutor context:\nfirst <evidence> packet",
               },
             ],
             timestamp: 10,
@@ -574,7 +572,7 @@ describe("dashboard reporting", () => {
           type: "pi_message",
           message: {
             role: "assistant",
-            content: [{ type: "text", text: "first advisor answer" }],
+            content: [{ type: "text", text: "first subagent answer" }],
             timestamp: 20,
           } as PiMessage,
         },
@@ -585,7 +583,7 @@ describe("dashboard reporting", () => {
           type: "pi_message",
           message: {
             role: "user",
-            content: [{ type: "text", text: "second advisor question" }],
+            content: [{ type: "text", text: "second subagent question" }],
             timestamp: 30,
           } as PiMessage,
         },
@@ -596,30 +594,48 @@ describe("dashboard reporting", () => {
           type: "pi_message",
           message: {
             role: "assistant",
-            content: [{ type: "text", text: "second advisor answer" }],
+            content: [{ type: "text", text: "second subagent answer" }],
             timestamp: 40,
           } as PiMessage,
         },
         createdAtMs: 40,
       },
+      {
+        entry: {
+          type: "pi_message",
+          message: {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text:
+                  "<advisor-task>\nReview &lt;change&gt;.\n</advisor-task>\n\n" +
+                  "<executor-context>\nUse A &amp; B.\n</executor-context>",
+              },
+            ],
+            timestamp: 50,
+          } as PiMessage,
+        },
+        createdAtMs: 50,
+      },
     ]);
 
-    // Repeated advisor calls share one deterministic child conversation, so both
+    // Repeated subagent calls share one child conversation, so both
     // parent subagent markers name the same child history.
-    for (const subagentId of ["advisor-plan", "advisor-review"]) {
+    for (const subagentId of ["task-plan", "task-review"]) {
       await stepStore.append(conversationId, [
         {
           entry: {
             type: "subagent_started",
             subagentInvocationId: subagentId,
-            subagentKind: "advisor",
+            subagentKind: "task",
             parentToolCallId: subagentId,
             childConversationId,
             historyMode: "shared",
             modelId: "openai/gpt-5.6-sol",
             reasoningLevel: "high",
           },
-          createdAtMs: subagentId === "advisor-plan" ? 3 : 31,
+          createdAtMs: subagentId === "task-plan" ? 3 : 31,
         },
         {
           entry: {
@@ -627,18 +643,42 @@ describe("dashboard reporting", () => {
             subagentInvocationId: subagentId,
             outcome: "success",
           },
-          createdAtMs: subagentId === "advisor-plan" ? 25 : 45,
+          createdAtMs: subagentId === "task-plan" ? 25 : 45,
         },
       ]);
     }
+    await stepStore.append(conversationId, [
+      {
+        entry: {
+          type: "subagent_started",
+          subagentInvocationId: "legacy-advisor",
+          subagentKind: "advisor",
+          childConversationId,
+          historyMode: "shared",
+        },
+        createdAtMs: 50,
+      },
+      {
+        entry: {
+          type: "subagent_ended",
+          subagentInvocationId: "legacy-advisor",
+          outcome: "success",
+        },
+        createdAtMs: 55,
+      },
+    ]);
 
     const first = await readConversationSubagentTranscriptReport(
       conversationId,
-      "advisor-plan",
+      "task-plan",
     );
     const second = await readConversationSubagentTranscriptReport(
       conversationId,
-      "advisor-review",
+      "task-review",
+    );
+    const legacyAdvisor = await readConversationSubagentTranscriptReport(
+      conversationId,
+      "legacy-advisor",
     );
 
     expect(first.subagentConversationId).toBe(childConversationId);
@@ -646,30 +686,38 @@ describe("dashboard reporting", () => {
     expect(first.reasoningLevel).toBe("high");
     expect(first.transcriptAvailable).toBe(true);
     expect(JSON.stringify(first.transcript)).toContain(
-      "first advisor question",
+      "first subagent question",
     );
     expect(JSON.stringify(first.transcript)).toContain(
       "first <evidence> packet",
     );
-    expect(JSON.stringify(first.transcript)).not.toContain("<advisor-task>");
-    expect(JSON.stringify(first.transcript)).not.toContain(
-      "<executor-context>",
+    expect(JSON.stringify(first.transcript)).toContain(
+      "second subagent answer",
     );
-    expect(JSON.stringify(first.transcript)).toContain("second advisor answer");
     expect(second.subagentConversationId).toBe(childConversationId);
-    expect(JSON.stringify(second.transcript)).toContain("first advisor answer");
+    expect(JSON.stringify(second.transcript)).toContain(
+      "first subagent answer",
+    );
+    expect(first.transcript.at(-1)?.parts[0]).toEqual({
+      type: "text",
+      text:
+        "<advisor-task>\nReview &lt;change&gt;.\n</advisor-task>\n\n" +
+        "<executor-context>\nUse A &amp; B.\n</executor-context>",
+    });
+    expect(legacyAdvisor.transcript.at(-1)?.parts[0]).toEqual({
+      type: "text",
+      text: "Review <change>.\n\nExecutor context:\nUse A & B.",
+    });
   });
 
   it("redacts advisor subagent transcript history for private conversations", async () => {
-    const { advisorChildConversationId } =
-      await import("@/chat/tools/advisor/tool");
     const { getAgentStepStore, getConversationStore } =
       await import("@/chat/db");
 
     const conversationId = "slack:D1:advisor-private";
     const toolCallId = "advisor-private";
     const privateAdvisorText = "private advisor question";
-    const childConversationId = advisorChildConversationId(conversationId);
+    const childConversationId = `advisor:${conversationId}`;
     const conversationStore = getConversationStore();
     const stepStore = getAgentStepStore();
 
@@ -730,6 +778,7 @@ describe("dashboard reporting", () => {
     const { getAgentStepStore } = await import("@/chat/db");
 
     await upsertAgentTurnSessionRecord({
+      modelId: "test/model",
       conversationId: "slack:C1:activity-parent-result",
       sessionId: "turn-parent-result",
       sliceId: 1,
@@ -801,6 +850,7 @@ describe("dashboard reporting", () => {
 
     await confirmPublicSlackConversation("slack:C1:steering-transcript");
     await upsertAgentTurnSessionRecord({
+      modelId: "test/model",
       conversationId: "slack:C1:steering-transcript",
       sessionId: "turn-steering",
       sliceId: 1,
@@ -927,6 +977,7 @@ describe("dashboard reporting", () => {
 
     await confirmPublicSlackConversation("slack:C1:333");
     await upsertAgentTurnSessionRecord({
+      modelId: "test/model",
       conversationId: "slack:C1:333",
       destination: {
         platform: "slack",
@@ -957,6 +1008,7 @@ describe("dashboard reporting", () => {
       ] as PiMessage[],
     });
     await upsertAgentTurnSessionRecord({
+      modelId: "test/model",
       conversationId: "slack:C1:333",
       destination: {
         platform: "slack",
@@ -1041,6 +1093,7 @@ describe("dashboard reporting", () => {
     });
 
     await upsertAgentTurnSessionRecord({
+      modelId: "test/model",
       conversationId: "slack:D1:222",
       sessionId: "turn-private",
       sliceId: 1,
@@ -1143,6 +1196,7 @@ describe("dashboard reporting", () => {
     const conversationId = "slack:C1:purged";
     await confirmPublicSlackConversation(conversationId);
     await upsertAgentTurnSessionRecord({
+      modelId: "test/model",
       conversationId,
       sessionId: "turn-purged",
       sliceId: 1,
@@ -1215,7 +1269,9 @@ describe("dashboard reporting", () => {
     ]);
     // Compaction opens epoch 1 with the rebuilt context.
     await stepStore.startEpoch(conversationId, {
+      modelId: "test/model",
       reason: "compaction",
+      modelProfile: "standard",
       messages: [
         {
           message: {
@@ -1230,6 +1286,7 @@ describe("dashboard reporting", () => {
     // A turn-session record pinned to the current epoch drives the run; the
     // identical prompt commits no new rows.
     await upsertAgentTurnSessionRecord({
+      modelId: "test/model",
       conversationId,
       sessionId: "turn-compacted",
       sliceId: 1,

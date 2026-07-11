@@ -21,6 +21,7 @@ import {
 import { conversationSummaryFromStoredConversation } from "./projection";
 import {
   countConversationMessages,
+  normalizeSubagentTranscriptMessage,
   normalizeTranscriptMessage,
   redactTranscriptMessage,
   subagentTranscriptReport,
@@ -234,9 +235,7 @@ export async function buildConversationSubagent(
   }
 
   const transcript = childMessages.map((message) =>
-    normalizeTranscriptMessage(message, {
-      unwrapAdvisorTask: activity.subagentKind === "advisor",
-    }),
+    normalizeSubagentTranscriptMessage(message, activity.subagentKind),
   );
   return subagentTranscriptReport(activity, {
     ...conversationFields,

@@ -121,7 +121,7 @@ import {
 import {
   commitMessages,
   loadProjection,
-  loadProjectionWithProvenance,
+  loadConversationProjection,
 } from "@/chat/conversations/projection";
 import { getStateAdapter } from "@/chat/state/adapter";
 import { acquireActiveLock } from "@/chat/state/locks";
@@ -133,6 +133,7 @@ import {
 import { requireSlackDestination } from "@/chat/destination";
 import { escapeXml } from "@/chat/xml";
 import { persistConversationMessages } from "@/chat/conversations/visible-messages";
+import { modelIdForProfile } from "@/chat/model-profile";
 
 /**
  * Persist post-delivery Redis scratch with a short retry after durable SQL
@@ -664,7 +665,7 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
             return false;
           }
           try {
-            const projection = await loadProjectionWithProvenance({
+            const projection = await loadConversationProjection({
               conversationId,
             });
             // Dedupe per message: a partial-overlap redelivery (some messages
@@ -685,6 +686,7 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
             }
             await commitMessages({
               conversationId,
+              modelId: modelIdForProfile(botConfig, projection.modelProfile),
               messages: [
                 ...projection.messages,
                 ...missing.map((pair) => pair.message),
@@ -1487,13 +1489,13 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
                 sessionId: turnId,
                 sliceId: 1,
                 messages: reply.piMessages,
+                modelId: reply.diagnostics.modelId,
                 logContext: {
                   threadId,
                   actorId: slackActorId,
                   channelId,
                   runId,
                   assistantUserName: botConfig.userName,
-                  modelId: reply.diagnostics.modelId,
                 },
                 actor: executionActor,
                 surface: "slack",

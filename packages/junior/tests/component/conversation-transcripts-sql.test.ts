@@ -1,6 +1,7 @@
 import { eq } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 import { createSqlAgentStepStore } from "@/chat/conversations/sql/history";
+import { agentStepEntrySchema } from "@/chat/conversations/history";
 import { getAgentStepStore } from "@/chat/db";
 import { purgeConversation } from "@/chat/conversations/retention";
 import { createSqlConversationMessageStore } from "@/chat/conversations/sql/messages";
@@ -17,9 +18,151 @@ import {
   createLocalJuniorSqlFixture,
   type LocalJuniorSqlFixture,
 } from "../fixtures/sql";
+import {
+  loadConnectedMcpProviders,
+  openConversationProjection,
+  recordMcpProviderConnected,
+} from "@/chat/conversations/projection";
 
 const CONVERSATION_ID = "slack:C123:1718123456.000000";
 const CHILD_CONVERSATION_ID = "advisor:child-1";
+
+it("accepts legacy markers and validates current profile names", () => {
+  expect(
+    agentStepEntrySchema.safeParse({
+      type: "context_epoch_started",
+      reason: "initial",
+      modelProfile: "standard",
+    }).success,
+  ).toBe(false);
+  expect(
+    agentStepEntrySchema.safeParse({
+      type: "context_epoch_started",
+      reason: "initial",
+      modelProfile: "standard",
+      modelId: "openai/gpt-5.4",
+    }).success,
+  ).toBe(true);
+  expect(
+    agentStepEntrySchema.safeParse({
+      type: "context_epoch_started",
+      reason: "handoff",
+    }).success,
+  ).toBe(false);
+  expect(
+    agentStepEntrySchema.safeParse({
+      type: "context_epoch_started",
+      reason: "handoff",
+      modelProfile: "handoff",
+    }).success,
+  ).toBe(false);
+  expect(
+    agentStepEntrySchema.safeParse({
+      type: "context_epoch_started",
+      reason: "handoff",
+      modelProfile: "standard",
+      modelId: "openai/gpt-5.4",
+    }).success,
+  ).toBe(false);
+  expect(
+    agentStepEntrySchema.safeParse({
+      type: "context_epoch_started",
+      reason: "compaction",
+      modelProfile: "Fast!",
+      modelId: "openai/gpt-5.4",
+    }).success,
+  ).toBe(false);
+  expect(
+    agentStepEntrySchema.safeParse({
+      type: "context_epoch_started",
+      reason: "compaction",
+    }).success,
+  ).toBe(true);
+  expect(
+    agentStepEntrySchema.safeParse({
+      type: "context_epoch_started",
+      reason: "compaction",
+      modelProfile: "coding",
+      modelId: "openai/gpt-5.4",
+    }).success,
+  ).toBe(true);
+  expect(
+    agentStepEntrySchema.safeParse({
+      type: "context_epoch_started",
+      reason: "compaction",
+      modelProfile: "coding",
+    }).success,
+  ).toBe(false);
+  expect(
+    agentStepEntrySchema.safeParse({
+      type: "context_epoch_started",
+      reason: "compaction",
+      modelId: "openai/gpt-5.4",
+    }).success,
+  ).toBe(false);
+});
+
+it("rejects epoch markers through the ordinary append boundary", async () => {
+  await expect(
+    getAgentStepStore().append("local:test:invalid-marker-append", [
+      {
+        entry: {
+          type: "context_epoch_started",
+          reason: "compaction",
+        },
+        createdAtMs: 1,
+      } as never,
+    ]),
+  ).rejects.toThrow("Invalid input");
+});
+
+it("rejects incomplete markers through the epoch boundary", async () => {
+  const conversationId = "local:test:invalid-marker-start";
+  await expect(
+    getAgentStepStore().startEpoch(conversationId, {
+      reason: "handoff",
+      modelProfile: "handoff",
+      messages: [],
+    } as never),
+  ).rejects.toThrow("Invalid input");
+  await expect(
+    getAgentStepStore().loadHistory(conversationId),
+  ).resolves.toEqual([]);
+});
+
+it("opens an explicit initial epoch without dropping earlier host facts", async () => {
+  const conversationId = "local:test:host-fact-before-model";
+  await recordMcpProviderConnected({ conversationId, provider: "linear" });
+
+  await expect(
+    openConversationProjection({
+      conversationId,
+      modelId: "openai/gpt-5.4",
+    }),
+  ).resolves.toMatchObject({
+    messages: [],
+    modelProfile: "standard",
+    modelId: "openai/gpt-5.4",
+  });
+  await expect(loadConnectedMcpProviders({ conversationId })).resolves.toEqual([
+    "linear",
+  ]);
+  expect(await getAgentStepStore().loadHistory(conversationId)).toEqual([
+    expect.objectContaining({
+      contextEpoch: 0,
+      entry: expect.objectContaining({ type: "mcp_provider_connected" }),
+    }),
+    expect.objectContaining({
+      contextEpoch: 0,
+      entry: {
+        type: "context_epoch_started",
+        reason: "initial",
+        modelProfile: "standard",
+        modelId: "openai/gpt-5.4",
+      },
+    }),
+  ]);
+});
 
 async function seedConversation(
   fixture: LocalJuniorSqlFixture,
@@ -164,7 +307,9 @@ describe("conversation transcript SQL stores", () => {
         },
       ]);
       await store.startEpoch(CONVERSATION_ID, {
+        modelId: "test/model",
         reason: "compaction",
+        modelProfile: "standard",
         messages: [
           { message: userMessage("epoch1-summary"), createdAtMs: 3_000 },
         ],
@@ -180,6 +325,31 @@ describe("conversation transcript SQL stores", () => {
 
       const history = await store.loadHistory(CONVERSATION_ID);
       expect(history.map((step) => step.contextEpoch)).toEqual([0, 0, 1, 1]);
+    } finally {
+      await fixture.close();
+    }
+  });
+
+  it("round trips provider-neutral isolated subagent history", async () => {
+    const fixture = await createLocalJuniorSqlFixture();
+
+    try {
+      await migrateSchema(fixture.sql);
+      await seedConversation(fixture, CONVERSATION_ID);
+      const store = createSqlAgentStepStore(fixture.sql);
+      const entry = {
+        type: "subagent_started" as const,
+        subagentInvocationId: "future-subagent-call",
+        subagentKind: "task",
+        childConversationId: "subagent:future-child",
+        historyMode: "isolated" as const,
+      };
+
+      await store.append(CONVERSATION_ID, [{ entry, createdAtMs: 1_000 }]);
+
+      expect((await store.loadHistory(CONVERSATION_ID))[0]?.entry).toEqual(
+        entry,
+      );
     } finally {
       await fixture.close();
     }
@@ -213,7 +383,9 @@ describe("conversation transcript SQL stores", () => {
 
       await expect(
         failingStore.startEpoch(CONVERSATION_ID, {
+          modelId: "test/model",
           reason: "rollback",
+          modelProfile: "standard",
           messages: [{ message: userMessage("never"), createdAtMs: 2_000 }],
         }),
       ).rejects.toThrow("epoch write failed");
@@ -253,7 +425,7 @@ INSERT INTO junior_agent_steps (
       );
 
       await expect(store.loadHistory(CONVERSATION_ID)).rejects.toThrow(
-        /discriminator/,
+        /Invalid input/,
       );
     } finally {
       await fixture.close();

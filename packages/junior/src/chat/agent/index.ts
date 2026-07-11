@@ -8,7 +8,7 @@
  * endings into `AgentRunOutcome` values. Delivery and thread presentation
  * stay outside this module.
  */
-import { Agent } from "@earendil-works/pi-agent-core";
+import { Agent, type AgentLoopTurnUpdate } from "@earendil-works/pi-agent-core";
 import type { FileUpload } from "chat";
 import { botConfig } from "@/chat/config";
 import {
@@ -35,6 +35,7 @@ import { McpToolManager } from "@/chat/mcp/tool-manager";
 import type { ThreadArtifactsState } from "@/chat/state/artifacts";
 import {
   loadConnectedMcpProviders,
+  openConversationProjection,
   recordToolExecutionStarted,
   recordMcpProviderConnected,
 } from "@/chat/conversations/projection";
@@ -49,11 +50,15 @@ import {
   GEN_AI_SERVER_ADDRESS,
   GEN_AI_SERVER_PORT,
   completeObject,
+  completeText,
   getPiGatewayApiKey,
   resolveGatewayModel,
 } from "@/chat/pi/client";
 import type { PiMessage } from "@/chat/pi/messages";
-import { isAssistantMessage } from "@/chat/pi/transcript";
+import {
+  isAssistantMessage,
+  retainRuntimeTurnContext,
+} from "@/chat/pi/transcript";
 import { createTracedStreamFn } from "@/chat/pi/traced-stream";
 import { shouldEmitDevAgentTrace } from "@/chat/runtime/dev-agent-trace";
 import { isTurnInputCommitLostError } from "@/chat/runtime/turn";
@@ -100,6 +105,15 @@ import {
 import { wireAgentTools } from "@/chat/agent/tools";
 import { createResumeState, type ResumeState } from "@/chat/agent/resume";
 import { sleep } from "@/chat/sleep";
+import {
+  DEFAULT_HANDOFF_MODEL_PROFILE,
+  modelIdForProfile,
+  ModelProfileNotConfiguredError,
+  STANDARD_MODEL_PROFILE,
+  type ModelProfile,
+} from "@/chat/model-profile";
+import { compactContextForHandoff } from "@/chat/services/context-compaction";
+import { HANDOFF_TOOL_NAME } from "@/chat/tools/handoff/tool";
 
 const AGENT_ABORT_SETTLE_GRACE_MS = 5_000;
 
@@ -196,7 +210,10 @@ async function executeAgentRunInPrivacyContext(
   let connectedMcpProviders = new Set<string>();
   let canRecordMcpProviders = false;
   let turnUsage: AgentTurnUsage | undefined;
+  let handoffPhaseUsage: AgentTurnUsage | undefined;
   let thinkingSelection: TurnThinkingSelection | undefined;
+  let activeModelProfile: ModelProfile = STANDARD_MODEL_PROFILE;
+  let activeModelId = modelIdForProfile(botConfig, activeModelProfile);
   const actor = actorFromRouting(routing);
   const surface = surfaceFromRouting(routing);
   const runSource = routing.source;
@@ -218,7 +235,6 @@ async function executeAgentRunInPrivacyContext(
     runId: routing.correlation?.runId,
     ...credentialActorLogContext,
     assistantUserName: botConfig.userName,
-    modelId: botConfig.modelId,
   };
   const { conversationId: sessionConversationId, sessionId } =
     getSessionIdentifiers(routing);
@@ -250,6 +266,14 @@ async function executeAgentRunInPrivacyContext(
   });
 
   try {
+    if (sessionConversationId) {
+      const projection = await openConversationProjection({
+        conversationId: sessionConversationId,
+        modelId: activeModelId,
+      });
+      activeModelProfile = projection.modelProfile;
+      activeModelId = modelIdForProfile(botConfig, activeModelProfile);
+    }
     const shouldTrace = shouldEmitDevAgentTrace();
     const spanContext: LogContext = {
       conversationId: sessionConversationId,
@@ -259,7 +283,7 @@ async function executeAgentRunInPrivacyContext(
       runId: routing.correlation?.runId,
       ...credentialActorLogContext,
       assistantUserName: botConfig.userName,
-      modelId: botConfig.modelId,
+      modelId: activeModelId,
     };
 
     // ── Skill discovery ──────────────────────────────────────────────
@@ -309,15 +333,11 @@ async function executeAgentRunInPrivacyContext(
     // agent starts, then adds the current actor's turn-start instruction.
     // Steering appends to this array as it drains, so `run.actors` stays a
     // pure, live projection of committed instruction provenance.
-    const committedInstructionProvenance: PiMessageProvenance[] =
-      existingSessionRecord?.piMessageProvenance
-        ? [
-            ...existingSessionRecord.piMessageProvenance,
-            ...(resumedFromSessionRecord
-              ? []
-              : [instructionProvenanceFor(actor)]),
-          ]
-        : [instructionProvenanceFor(actor)];
+    const committedInstructionProvenance: PiMessageProvenance[] = [
+      ...(existingSessionRecord?.piMessageProvenance ?? []),
+      ...(existingSessionRecord?.actors ?? []).map(instructionProvenanceFor),
+      ...(resumedFromSessionRecord ? [] : [instructionProvenanceFor(actor)]),
+    ];
     const runActors = (): Actor[] =>
       instructionActors(committedInstructionProvenance);
     canRecordMcpProviders = Boolean(
@@ -332,7 +352,7 @@ async function executeAgentRunInPrivacyContext(
       getLoadedSkillNames: () => loadedSkillNamesForResume,
       getReasoningLevel: () => thinkingSelection?.thinkingLevel,
       logContext: sessionRecordLogContext,
-      modelId: botConfig.modelId,
+      getModelId: () => activeModelId,
       recordActiveMcpProviders,
       actor,
       runSource,
@@ -426,7 +446,7 @@ async function executeAgentRunInPrivacyContext(
       messageText: userInput,
     });
     setSpanAttributes({
-      "gen_ai.request.model": botConfig.modelId,
+      "gen_ai.request.model": activeModelId,
       "gen_ai.request.reasoning.level": thinkingSelection.thinkingLevel,
       "app.ai.thinking_level_reason": thinkingSelection.reason,
       ...(thinkingSelection.confidence !== undefined
@@ -441,8 +461,73 @@ async function executeAgentRunInPrivacyContext(
     const artifactStatePatch: Partial<ThreadArtifactsState> = {};
     const toolCalls: string[] = [];
     let agent: Agent | undefined;
+    // Handoff becomes live only after its replacement epoch commits. This
+    // pending value then drives the one-way model/context swap at Pi's boundary.
+    let pendingHandoff:
+      | {
+          messages: PiMessage[];
+          model: ReturnType<typeof resolveGatewayModel>;
+          thinkingLevel: NonNullable<AgentLoopTurnUpdate["thinkingLevel"]>;
+        }
+      | undefined;
     const currentAgentMessages = (): PiMessage[] =>
       agent ? [...agent.state.messages] : [];
+    const handoffProfiles: [ModelProfile, ...ModelProfile[]] = [
+      DEFAULT_HANDOFF_MODEL_PROFILE,
+      ...Object.keys(botConfig.modelProfiles)
+        .filter((profile) => profile !== DEFAULT_HANDOFF_MODEL_PROFILE)
+        .sort(),
+    ];
+    const requestHandoff =
+      activeModelProfile === STANDARD_MODEL_PROFILE && sessionConversationId
+        ? {
+            profiles: handoffProfiles,
+            execute: async (profile: ModelProfile, signal?: AbortSignal) => {
+              const sourceMessages = [...agent!.state.messages];
+              const runtimeContext = retainRuntimeTurnContext(sourceMessages);
+              const standardPhaseUsage = extractGenAiUsageSummary(
+                ...sourceMessages
+                  .slice(runResume.beforeMessageCount)
+                  .filter(isAssistantMessage),
+              );
+              const phaseUsage = hasAgentTurnUsage(standardPhaseUsage)
+                ? standardPhaseUsage
+                : undefined;
+              const target = {
+                modelId: modelIdForProfile(botConfig, profile),
+                modelProfile: profile,
+              };
+              const handoffModel = resolveGatewayModel(target.modelId);
+              const handoffThinkingLevel = toAgentThinkingLevel(
+                thinkingSelection!.thinkingLevel,
+              );
+              const handoffMessages = await compactContextForHandoff(
+                {
+                  conversationContext: input.conversationContext,
+                  conversationId: sessionConversationId,
+                  piMessages: sourceMessages,
+                  signal,
+                  target,
+                  metadata: {
+                    threadId: routing.correlation?.threadId,
+                    channelId: routing.correlation?.channelId,
+                    actorId: routing.correlation?.actorId,
+                    runId: routing.correlation?.runId,
+                  },
+                },
+                { completeText },
+              );
+              handoffPhaseUsage = phaseUsage;
+              pendingHandoff = {
+                messages: [...handoffMessages, ...runtimeContext],
+                model: handoffModel,
+                thinkingLevel: handoffThinkingLevel,
+              };
+              activeModelProfile = profile;
+              activeModelId = target.modelId;
+            },
+          }
+        : undefined;
 
     setTags({
       conversationId: spanContext.conversationId,
@@ -452,7 +537,7 @@ async function executeAgentRunInPrivacyContext(
       runId: routing.correlation?.runId,
       ...credentialActorLogContext,
       assistantUserName: botConfig.userName,
-      modelId: botConfig.modelId,
+      modelId: activeModelId,
     });
 
     // ── Tool wiring ──────────────────────────────────────────────────
@@ -479,6 +564,7 @@ async function executeAgentRunInPrivacyContext(
       preAgentPromptMessages,
       priorPiMessages,
       recordConnectedMcpProvider,
+      requestHandoff,
       resume: runResume,
       routing,
       sessionConversationId,
@@ -494,6 +580,9 @@ async function executeAgentRunInPrivacyContext(
     mcpToolManager = wiring.mcpToolManager;
     const sandboxExecutor = wiring.sandboxExecutor;
     const getPendingAuthPause = wiring.getPendingAuthPause;
+    const toolsAfterHandoff = wiring.agentTools.filter(
+      (tool) => tool.name !== HANDOFF_TOOL_NAME,
+    );
 
     // ── Prompt context ───────────────────────────────────────────────
     const {
@@ -522,10 +611,45 @@ async function executeAgentRunInPrivacyContext(
       toolRuntimeContext: wiring.toolRuntimeContext,
       userContentParts,
     });
-
     // ── Agent execution ──────────────────────────────────────────────
     let hasEmittedText = false;
     let needsSeparator = false;
+    // Standard text is provisional until message_end proves the assistant did
+    // not request handoff; post-handoff output can stream immediately.
+    let bufferedStandardText = "";
+    let bufferedStandardMessageStart = false;
+    const startAssistantMessage = () => {
+      Promise.resolve(observers.onAssistantMessageStart?.()).catch((error) => {
+        logWarn(
+          "streaming_message_start_error",
+          {},
+          {
+            "exception.message":
+              error instanceof Error ? error.message : String(error),
+          },
+          "Failed to deliver assistant message start to stream coordinator",
+        );
+      });
+      if (hasEmittedText) {
+        needsSeparator = true;
+      }
+    };
+    const deliverText = (deltaText: string) => {
+      const text = needsSeparator ? "\n\n" + deltaText : deltaText;
+      needsSeparator = false;
+      hasEmittedText = true;
+      Promise.resolve(observers.onTextDelta?.(text)).catch((error) => {
+        logWarn(
+          "streaming_text_delta_error",
+          {},
+          {
+            "exception.message":
+              error instanceof Error ? error.message : String(error),
+          },
+          "Failed to deliver text delta to stream",
+        );
+      });
+    };
     const drainSteeringMessages = async (): Promise<void> => {
       if (
         !durability.drainSteeringMessages ||
@@ -586,14 +710,57 @@ async function executeAgentRunInPrivacyContext(
       ...(apiKeyOverride ? { getApiKey: () => apiKeyOverride } : {}),
       streamFn: createTracedStreamFn({ conversationPrivacy }),
       steeringMode: "all",
+      beforeToolCall: async ({ assistantMessage }) => {
+        const toolCalls = assistantMessage.content.filter(
+          (part) => part.type === "toolCall",
+        );
+        const containsHandoff = toolCalls.some(
+          (call) => call.name === HANDOFF_TOOL_NAME,
+        );
+        if (containsHandoff && toolCalls.length !== 1) {
+          return {
+            block: true,
+            reason:
+              "handoff must be the only tool call in its assistant message; reissue it alone",
+          };
+        }
+        return undefined;
+      },
       prepareNextTurn: async () => {
+        let update: AgentLoopTurnUpdate | undefined;
+        if (pendingHandoff) {
+          const { messages, model, thinkingLevel } = pendingHandoff;
+          const replacement = [...messages];
+          pendingHandoff = undefined;
+          agent!.state.messages = replacement;
+          agent!.state.model = model;
+          agent!.state.thinkingLevel = thinkingLevel;
+          agent!.state.tools = toolsAfterHandoff;
+          runResume.setBeforeMessageCount(replacement.length);
+          runResume.setTurnStartMessageIndex(0);
+          runResume.adoptCommittedBoundary(replacement);
+          setSpanAttributes({
+            "gen_ai.request.model": activeModelId,
+            "gen_ai.request.reasoning.level": thinkingSelection!.thinkingLevel,
+            "app.ai.model_profile": activeModelProfile,
+          });
+          update = {
+            context: {
+              systemPrompt: baseInstructions,
+              messages: replacement,
+              tools: toolsAfterHandoff,
+            },
+            model,
+            thinkingLevel,
+          };
+        }
         await drainSteeringMessages();
         runResume.yieldAtSafeBoundaryIfDue(currentAgentMessages());
-        return undefined;
+        return update;
       },
       initialState: {
         systemPrompt: baseInstructions,
-        model: resolveGatewayModel(botConfig.modelId),
+        model: resolveGatewayModel(activeModelId),
         thinkingLevel: toAgentThinkingLevel(thinkingSelection.thinkingLevel),
         tools: wiring.agentTools,
       },
@@ -604,49 +771,48 @@ async function executeAgentRunInPrivacyContext(
         return recordParentToolExecutionStart(event);
       }
       if (event.type === "turn_end" && event.toolResults.length > 0) {
+        if (pendingHandoff) {
+          return;
+        }
         return runResume
           .persistSafeBoundary([...agent!.state.messages])
           .then(() => undefined);
       }
       if (event.type === "message_start") {
-        Promise.resolve(observers.onAssistantMessageStart?.()).catch(
-          (error) => {
-            logWarn(
-              "streaming_message_start_error",
-              {},
-              {
-                "exception.message":
-                  error instanceof Error ? error.message : String(error),
-              },
-              "Failed to deliver assistant message start to stream coordinator",
-            );
-          },
-        );
-        if (hasEmittedText) {
-          needsSeparator = true;
+        if (activeModelProfile === STANDARD_MODEL_PROFILE && requestHandoff) {
+          bufferedStandardMessageStart = true;
+          bufferedStandardText = "";
+        } else {
+          startAssistantMessage();
         }
+        return;
+      }
+      if (event.type === "message_end" && isAssistantMessage(event.message)) {
+        if (!bufferedStandardMessageStart) {
+          return;
+        }
+        const containsHandoff = event.message.content.some(
+          (part) => part.type === "toolCall" && part.name === HANDOFF_TOOL_NAME,
+        );
+        if (!containsHandoff) {
+          startAssistantMessage();
+          if (bufferedStandardText) {
+            deliverText(bufferedStandardText);
+          }
+        }
+        bufferedStandardMessageStart = false;
+        bufferedStandardText = "";
         return;
       }
       if (event.type !== "message_update") return;
       if (event.assistantMessageEvent.type !== "text_delta") return;
       const deltaText = event.assistantMessageEvent.delta;
       if (!deltaText) return;
-
-      const text = needsSeparator ? "\n\n" + deltaText : deltaText;
-      needsSeparator = false;
-      hasEmittedText = true;
-
-      Promise.resolve(observers.onTextDelta?.(text)).catch((error) => {
-        logWarn(
-          "streaming_text_delta_error",
-          {},
-          {
-            "exception.message":
-              error instanceof Error ? error.message : String(error),
-          },
-          "Failed to deliver text delta to stream",
-        );
-      });
+      if (bufferedStandardMessageStart) {
+        bufferedStandardText += deltaText;
+      } else {
+        deliverText(deltaText);
+      }
     });
 
     let newMessages: PiMessage[] = [];
@@ -667,7 +833,7 @@ async function executeAgentRunInPrivacyContext(
       }
 
       await withSpan(
-        `invoke_agent ${botConfig.modelId}`,
+        `invoke_agent ${activeModelId}`,
         "gen_ai.invoke_agent",
         spanContext,
         async () => {
@@ -742,7 +908,7 @@ async function executeAgentRunInPrivacyContext(
                   {
                     "gen_ai.provider.name": GEN_AI_PROVIDER_NAME,
                     "gen_ai.operation.name": "invoke_agent",
-                    "gen_ai.request.model": botConfig.modelId,
+                    "gen_ai.request.model": activeModelId,
                     ...(thinkingSelection
                       ? {
                           "gen_ai.request.reasoning.level":
@@ -819,7 +985,11 @@ async function executeAgentRunInPrivacyContext(
             const currentUsage = hasAgentTurnUsage(usageSummary)
               ? usageSummary
               : undefined;
-            turnUsage = addAgentTurnUsage(retryUsage, currentUsage);
+            const currentPhaseUsage = addAgentTurnUsage(
+              retryUsage,
+              currentUsage,
+            );
+            turnUsage = addAgentTurnUsage(handoffPhaseUsage, currentPhaseUsage);
             setSpanAttributes({
               ...(outputMessagesAttribute
                 ? { "gen_ai.output.messages": outputMessagesAttribute }
@@ -847,7 +1017,7 @@ async function executeAgentRunInPrivacyContext(
               break;
             }
 
-            retryUsage = turnUsage;
+            retryUsage = currentPhaseUsage;
             agent!.state.messages = providerRetry.messages;
             await runResume.persistSafeBoundary(providerRetry.messages);
             logWarn(
@@ -864,7 +1034,7 @@ async function executeAgentRunInPrivacyContext(
         {
           "gen_ai.provider.name": GEN_AI_PROVIDER_NAME,
           "gen_ai.operation.name": "invoke_agent",
-          "gen_ai.request.model": botConfig.modelId,
+          "gen_ai.request.model": activeModelId,
           "gen_ai.output.type": "text",
           "server.address": GEN_AI_SERVER_ADDRESS,
           "server.port": GEN_AI_SERVER_PORT,
@@ -921,6 +1091,7 @@ async function executeAgentRunInPrivacyContext(
         thinkingSelection,
         correlation: routing.correlation,
         assistantUserName: botConfig.userName,
+        modelId: activeModelId,
       }),
     };
   } catch (error) {
@@ -934,6 +1105,9 @@ async function executeAgentRunInPrivacyContext(
       }
     }
 
+    if (error instanceof ModelProfileNotConfiguredError) {
+      throw error;
+    }
     if (isProviderRetryError(error)) {
       throw error;
     }
@@ -957,7 +1131,7 @@ async function executeAgentRunInPrivacyContext(
         runId: routing.correlation?.runId,
         ...credentialActorLogContext,
         assistantUserName: botConfig.userName,
-        modelId: botConfig.modelId,
+        modelId: activeModelId,
       },
       {},
       "executeAgentRun failed",
@@ -973,7 +1147,7 @@ async function executeAgentRunInPrivacyContext(
         ...getSandboxMetadata(),
         diagnostics: {
           outcome: "provider_error",
-          modelId: botConfig.modelId,
+          modelId: activeModelId,
           assistantMessageCount: 0,
           ...(thinkingSelection
             ? {

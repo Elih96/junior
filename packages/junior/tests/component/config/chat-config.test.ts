@@ -51,6 +51,60 @@ describe("chat config", () => {
     expect(botConfig.modelId).toBe("openai/gpt-5.5");
   });
 
+  it("uses gpt-5.6-sol for the default handoff profile", async () => {
+    delete process.env.AI_HANDOFF_MODEL;
+    delete process.env.AI_MODEL_PROFILES;
+
+    const { botConfig } = await loadConfig();
+    expect(botConfig.modelProfiles).toEqual({
+      handoff: "openai/gpt-5.6-sol",
+    });
+  });
+
+  it("uses AI_HANDOFF_MODEL for the default handoff profile", async () => {
+    process.env.AI_HANDOFF_MODEL = "openai/gpt-5.4";
+
+    const { botConfig } = await loadConfig();
+    expect(botConfig.modelProfiles.handoff).toBe("openai/gpt-5.4");
+  });
+
+  it("adds named profiles from AI_MODEL_PROFILES", async () => {
+    process.env.AI_MODEL_PROFILES = JSON.stringify({
+      coding: "openai/gpt-5.4",
+      research: "anthropic/claude-opus-4.6",
+    });
+
+    const { botConfig } = await loadConfig();
+    expect(botConfig.modelProfiles).toEqual({
+      handoff: "openai/gpt-5.6-sol",
+      coding: "openai/gpt-5.4",
+      research: "anthropic/claude-opus-4.6",
+    });
+  });
+
+  it("fails when a durable profile is no longer configured", async () => {
+    delete process.env.AI_MODEL_PROFILES;
+
+    const { botConfig } = await loadConfig();
+    const { modelIdForProfile, ModelProfileNotConfiguredError } =
+      await import("@/chat/model-profile");
+    expect(() => modelIdForProfile(botConfig, "coding")).toThrowError(
+      ModelProfileNotConfiguredError,
+    );
+  });
+
+  it.each([
+    ["[]", "must be a JSON object"],
+    ['{"standard":"openai/gpt-5.4"}', 'profile "standard" is reserved'],
+    ['{"handoff":"openai/gpt-5.4"}', 'profile "handoff" is reserved'],
+    ['{"Coding":"openai/gpt-5.4"}', "must match"],
+    ['{"coding":""}', "must not be empty"],
+  ])("rejects invalid AI_MODEL_PROFILES %s", async (value, message) => {
+    process.env.AI_MODEL_PROFILES = value;
+
+    await expect(loadConfig()).rejects.toThrow(message);
+  });
+
   it("uses the default embedding model when AI_EMBEDDING_MODEL is unset", async () => {
     delete process.env.AI_EMBEDDING_MODEL;
 
@@ -173,42 +227,6 @@ describe("chat config", () => {
 
     await expect(loadConfig()).rejects.toThrow(
       "AI_MODEL_CONTEXT_WINDOW_TOKENS must be a positive integer",
-    );
-  });
-
-  it("uses the default advisor config when AI_ADVISOR_MODEL is absent", async () => {
-    delete process.env.AI_ADVISOR_MODEL;
-
-    const { botConfig } = await loadConfig();
-    // Assert structure and thinking-level default without pinning the model string,
-    // which is an intentional product decision tracked in config.ts rather than tests.
-    expect(botConfig.advisor.modelId).toEqual(expect.any(String));
-    expect(botConfig.advisor.thinkingLevel).toBe("xhigh");
-  });
-
-  it("parses advisor config when AI_ADVISOR_MODEL is set", async () => {
-    process.env.AI_ADVISOR_MODEL = "openai/gpt-5.4";
-    process.env.AI_ADVISOR_THINKING_LEVEL = "xhigh";
-
-    const { botConfig } = await loadConfig();
-    expect(botConfig.advisor).toEqual({
-      modelId: "openai/gpt-5.4",
-      thinkingLevel: "xhigh",
-    });
-  });
-
-  it("throws at config load when AI_ADVISOR_MODEL is not registered", async () => {
-    process.env.AI_ADVISOR_MODEL = "openai/gpt-definitely-not-real";
-
-    await expect(loadConfig()).rejects.toThrow(/Unknown AI Gateway model id/);
-  });
-
-  it("throws at config load when AI_ADVISOR_THINKING_LEVEL is invalid", async () => {
-    process.env.AI_ADVISOR_MODEL = "openai/gpt-5.4";
-    process.env.AI_ADVISOR_THINKING_LEVEL = "deeply";
-
-    await expect(loadConfig()).rejects.toThrow(
-      "AI_ADVISOR_THINKING_LEVEL must be one of",
     );
   });
 
