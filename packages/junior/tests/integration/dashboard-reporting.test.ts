@@ -322,7 +322,7 @@ describe("dashboard reporting", () => {
   });
 
   it("reports the complete SQL conversation transcript", async () => {
-    const { upsertAgentTurnSessionRecord } =
+    const { recordAgentTurnSessionSummary, upsertAgentTurnSessionRecord } =
       await import("@/chat/state/turn-session");
     const { readConversationDetailFromSql } =
       await import("@/api/conversations/detail.query");
@@ -393,11 +393,19 @@ describe("dashboard reporting", () => {
         },
       ] as PiMessage[],
     });
+    await recordAgentTurnSessionSummary({
+      conversationId: "slack:C1:222",
+      sessionId: "turn-running",
+      sliceId: 1,
+      state: "running",
+    });
 
     const report = await readConversationDetailFromSql("slack:C1:222");
     expect(report).toMatchObject({
       cumulativeDurationMs: 1_200,
       cumulativeUsage: { totalTokens: 120 },
+      modelId: "openai/gpt-5.5",
+      reasoningLevel: "high",
       transcriptMessageCount: 4,
     });
     expect(report?.transcript).toEqual([
@@ -970,6 +978,55 @@ describe("dashboard reporting", () => {
         parts: [{ type: "text", text: "target question" }],
       },
     ]);
+  });
+
+  it("keeps SQL detail available when optional execution settings fail", async () => {
+    const { getAgentStepStore, getConversationStore } =
+      await import("@/chat/db");
+    const { getStateAdapter } = await import("@/chat/state/adapter");
+    const conversationId = "slack:C1:settings-unavailable";
+    await getConversationStore().recordActivity({
+      conversationId,
+      destination: {
+        platform: "slack",
+        teamId: "T1",
+        channelId: "C1",
+      },
+      source: "slack",
+      visibility: "public",
+    });
+    await getAgentStepStore().append(conversationId, [
+      {
+        entry: {
+          type: "pi_message",
+          message: {
+            role: "user",
+            content: [{ type: "text", text: "available transcript" }],
+            timestamp: 1,
+          } as PiMessage,
+        },
+        createdAtMs: 1,
+      },
+    ]);
+    vi.spyOn(getStateAdapter(), "getList").mockRejectedValueOnce(
+      new Error("execution settings unavailable"),
+    );
+
+    const report = await readConversationDetailReport(conversationId);
+
+    expect(report).toMatchObject({
+      conversationId,
+      transcriptAvailable: true,
+      transcript: [
+        {
+          role: "user",
+          timestamp: 1,
+          parts: [{ type: "text", text: "available transcript" }],
+        },
+      ],
+    });
+    expect(report).not.toHaveProperty("modelId");
+    expect(report).not.toHaveProperty("reasoningLevel");
   });
 
   it("reports multiple message exchanges as one complete SQL transcript", async () => {
