@@ -653,7 +653,7 @@ describe("dashboard telemetry components", () => {
     expect(html).not.toContain("tool call");
   });
 
-  it("shows the conversation model and thinking level in the detail header", () => {
+  it("shows the conversation model and thinking level in the transcript header", () => {
     const session = {
       conversationId: "conversation-1",
       cumulativeDurationMs: 0,
@@ -675,12 +675,17 @@ describe("dashboard telemetry components", () => {
     client.setQueryData(["conversation", "conversation-1"], detail);
 
     const html = renderConversationPage(dashboardData([session]));
+    const transcriptStart = html.indexOf('aria-label="Transcript view"');
+    const detailHeader = html.slice(0, transcriptStart);
+    const transcript = html.slice(transcriptStart);
 
-    expect(html).toContain(
+    expect(detailHeader).not.toContain("gpt-5.6-sol");
+    expect(transcript).toContain(
       'aria-label="Execution settings: openai/gpt-5.6-sol, high"',
     );
-    expect(html).toContain("gpt-5.6-sol");
-    expect(html).toContain("(high)");
+    expect(transcript).toContain("break-all font-mono");
+    expect(transcript).toContain("gpt-5.6-sol");
+    expect(transcript).toContain("(high)");
   });
 
   it("renders execution activity inside the transcript", () => {
@@ -1673,6 +1678,40 @@ describe("dashboard telemetry components", () => {
     expect(html).toContain("checking the rollout");
     expect(html).toContain("listing <mark");
     expect(html).toContain(">deploy<");
+  });
+
+  it("keeps execution settings visible when transcript search has no matches", () => {
+    const turn = {
+      conversationId: "conversation-1",
+      lastProgressAt: "2026-01-01T00:00:10.000Z",
+      lastSeenAt: "2026-01-01T00:00:10.000Z",
+      modelId: "openai/gpt-5.6-sol",
+      reasoningLevel: "high",
+      startedAt: "2026-01-01T00:00:00.000Z",
+      status: "completed",
+      surface: "internal",
+      displayTitle: "Conversation",
+      transcript: [
+        {
+          role: "assistant",
+          parts: [{ type: "text", text: "A visible response" }],
+        },
+      ],
+      transcriptAvailable: true,
+    } as ConversationTranscript;
+
+    const html = renderToStaticMarkup(
+      <QueryClientProvider client={client}>
+        <TranscriptSearchProvider query="not-present">
+          <ConversationTranscriptView conversation={turn} view="rich" />
+        </TranscriptSearchProvider>
+      </QueryClientProvider>,
+    );
+
+    expect(html).toContain("gpt-5.6-sol");
+    expect(html).toContain("(high)");
+    expect(html).toContain("No events match your search.");
+    expect(html).not.toContain("A visible response");
   });
 
   it("consolidates mixed tool-and-thinking run at threshold behind a reveal", () => {
