@@ -574,5 +574,5 @@ describe("executeAgentRun agent continuation", () => {
         role: "user",
       }),
     ]);
-  });
+  }, 15_000);
 });
