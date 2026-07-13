@@ -337,6 +337,7 @@ vi.mock("@/chat/mcp/oauth", () => ({
       await import("@/chat/mcp/auth-store");
     const authSessionId = `${input.provider}-auth-session`;
     await putMcpAuthSession({
+      schemaVersion: 2,
       authSessionId,
       provider: input.provider,
       userId: input.userId,
@@ -626,8 +627,10 @@ function makeAgentRunRequest(
     ...(overrides.state ? { state: overrides.state } : {}),
     ...(overrides.observers ? { observers: overrides.observers } : {}),
     durability: {
-      recordPendingAuth: async (pendingAuth: ConversationPendingAuthState) => {
-        pendingAuthRecords.push(pendingAuth);
+      recordPendingAuth: async (pendingAuth) => {
+        if (pendingAuth) {
+          pendingAuthRecords.push(pendingAuth);
+        }
       },
       ...(overrides.durability ?? {}),
     },
@@ -738,14 +741,15 @@ describe("executeAgentRun progressive MCP loading", () => {
       toolName: "loadSkill",
     });
     expect(deliverPrivateMessageMock).toHaveBeenCalledTimes(1);
-    expect(pendingAuthRecords).toEqual([
+    expect(pendingAuthRecords).toHaveLength(1);
+    expect(pendingAuthRecords.at(-1)).toEqual(
       expect.objectContaining({
         kind: "mcp",
         provider: "demo",
         actorId: "U123",
         sessionId: "turn-1",
       }),
-    ]);
+    );
     expect(loadSkillExecutionErrorCount.value).toBe(0);
 
     const reply = finalReply(await executeAgentRun(context));

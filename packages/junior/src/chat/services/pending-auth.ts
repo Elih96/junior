@@ -49,6 +49,21 @@ export function canReusePendingAuthLink(args: {
   );
 }
 
+/** Return the exact pending authorization target for one actor and provider. */
+export function getConversationPendingAuth(args: {
+  conversation: ThreadConversationState;
+  kind: "mcp";
+  provider: string;
+  actorId: string;
+  scope?: string;
+}): Extract<ConversationPendingAuthState, { kind: "mcp" }> | undefined;
+export function getConversationPendingAuth(args: {
+  conversation: ThreadConversationState;
+  kind: "plugin";
+  provider: string;
+  actorId: string;
+  scope?: string;
+}): Extract<ConversationPendingAuthState, { kind: "plugin" }> | undefined;
 export function getConversationPendingAuth(args: {
   conversation: ThreadConversationState;
   kind: AuthorizationPauseKind;
@@ -87,26 +102,20 @@ export function clearPendingAuth(
   conversation.processing.pendingAuth = undefined;
 }
 
-/**
- * Apply a new pending-auth record to the conversation and, when replacing a
- * different session's pending-auth, mark the prior session record as abandoned.
- * Callers are responsible for persisting the mutated conversation afterwards.
- */
-export async function applyPendingAuthUpdate(args: {
-  conversation: ThreadConversationState;
+/** Mark the prior blocked turn abandoned after a new auth attempt replaces it. */
+export async function abandonReplacedPendingAuth(args: {
   conversationId: string | undefined;
+  previousPendingAuth: ConversationPendingAuthState | undefined;
   nextPendingAuth: ConversationPendingAuthState;
 }): Promise<void> {
-  const previousPendingAuth = args.conversation.processing.pendingAuth;
-  args.conversation.processing.pendingAuth = args.nextPendingAuth;
   if (
-    previousPendingAuth &&
-    previousPendingAuth.sessionId !== args.nextPendingAuth.sessionId &&
+    args.previousPendingAuth &&
+    args.previousPendingAuth.sessionId !== args.nextPendingAuth.sessionId &&
     args.conversationId
   ) {
     await abandonAgentTurnSessionRecord({
       conversationId: args.conversationId,
-      sessionId: previousPendingAuth.sessionId,
+      sessionId: args.previousPendingAuth.sessionId,
       errorMessage:
         "Abandoned by a newer auth-blocked request in the same conversation.",
     });

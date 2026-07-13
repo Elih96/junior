@@ -16,7 +16,10 @@ import {
 } from "@/chat/mcp/auth-store";
 import { formatOAuthAuthorizationMessage } from "@/chat/oauth-authorization-message";
 import { deliverPrivateMessage, formatProviderLabel } from "@/chat/oauth-flow";
-import { canReusePendingAuthLink } from "@/chat/services/pending-auth";
+import {
+  abandonReplacedPendingAuth,
+  canReusePendingAuthLink,
+} from "@/chat/services/pending-auth";
 import {
   AuthorizationFlowDisabledError,
   AuthorizationPauseError,
@@ -53,7 +56,7 @@ export interface McpAuthOrchestrationInput {
   getArtifactState: () => ThreadArtifactsState | undefined;
   getMergedArtifactState: () => ThreadArtifactsState;
   recordPendingAuth?: (
-    pendingAuth: ConversationPendingAuthState,
+    pendingAuth: ConversationPendingAuthState | undefined,
   ) => void | Promise<void>;
   authorizationFlowMode?: AuthorizationFlowMode;
 }
@@ -141,8 +144,20 @@ export function createMcpAuthOrchestration(
       );
     }
 
+    const reusingPendingLink = canReusePendingAuthLink({
+      pendingAuth: input.pendingAuth,
+      kind: "mcp",
+      provider,
+      actorId,
+      sessionId,
+    });
+    const reusedAuthSessionId =
+      reusingPendingLink && input.pendingAuth?.kind === "mcp"
+        ? input.pendingAuth.authSessionId
+        : undefined;
+    const activeAuthSessionId = reusedAuthSessionId ?? authSessionId;
     const latestArtifactState = input.getMergedArtifactState();
-    await patchMcpAuthSession(authSessionId, {
+    await patchMcpAuthSession(activeAuthSessionId, {
       configuration: { ...input.getConfiguration() },
       artifactState: latestArtifactState,
       toolChannelId:
@@ -151,21 +166,27 @@ export function createMcpAuthOrchestration(
         input.channelId,
     });
 
-    const authSession = await getMcpAuthSession(authSessionId);
-    if (!authSession?.authorizationUrl) {
-      throw new Error(`Missing MCP authorization URL for plugin "${provider}"`);
-    }
+    const providerLabel = formatProviderLabel(provider);
 
-    const reusingPendingLink = canReusePendingAuthLink({
-      pendingAuth: input.pendingAuth,
+    const nextPendingAuth: ConversationPendingAuthState = {
+      authSessionId: activeAuthSessionId,
       kind: "mcp",
       provider,
       actorId,
       sessionId,
-    });
-    const providerLabel = formatProviderLabel(provider);
+      linkSentAtMs: reusingPendingLink
+        ? input.pendingAuth!.linkSentAtMs
+        : Date.now(),
+    };
 
     if (!reusingPendingLink) {
+      const authSession = await getMcpAuthSession(authSessionId);
+      if (!authSession?.authorizationUrl) {
+        throw new Error(
+          `Missing MCP authorization URL for plugin "${provider}"`,
+        );
+      }
+      await recordPendingAuth(nextPendingAuth);
       const delivery = await deliverPrivateMessage({
         channelId: authSession.channelId,
         threadTs: authSession.threadTs,
@@ -178,23 +199,21 @@ export function createMcpAuthOrchestration(
         }),
       });
       if (!delivery) {
+        await deleteMcpAuthSession(authSessionId);
+        await recordPendingAuth(input.pendingAuth);
         throw new Error(
           `Unable to deliver MCP authorization link for plugin "${provider}"`,
         );
       }
+      await abandonReplacedPendingAuth({
+        conversationId,
+        previousPendingAuth: input.pendingAuth,
+        nextPendingAuth,
+      });
     } else {
       await deleteMcpAuthSession(authSessionId);
+      await recordPendingAuth(nextPendingAuth);
     }
-
-    await recordPendingAuth({
-      kind: "mcp",
-      provider,
-      actorId,
-      sessionId,
-      linkSentAtMs: reusingPendingLink
-        ? input.pendingAuth!.linkSentAtMs
-        : Date.now(),
-    });
     await recordAuthorizationRequested({
       conversationId,
       kind: "mcp",

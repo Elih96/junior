@@ -65,7 +65,6 @@ import {
   updateConversationStats,
 } from "@/chat/services/conversation-memory";
 import type { ContextCompactor } from "@/chat/services/context-compaction";
-import { applyPendingAuthUpdate } from "@/chat/services/pending-auth";
 import {
   countPotentialImageAttachments,
   hasPotentialImageAttachment,
@@ -1258,11 +1257,7 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
                 });
               },
               recordPendingAuth: async (pendingAuth) => {
-                await applyPendingAuthUpdate({
-                  conversation: preparedState.conversation,
-                  conversationId,
-                  nextPendingAuth: pendingAuth,
-                });
+                preparedState.conversation.processing.pendingAuth = pendingAuth;
                 await persistThreadState(thread, {
                   conversation: preparedState.conversation,
                 });

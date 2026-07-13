@@ -1,5 +1,14 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+const { abandonAgentTurnSessionRecord } = vi.hoisted(() => ({
+  abandonAgentTurnSessionRecord: vi.fn(),
+}));
+
+vi.mock("@/chat/state/turn-session", () => ({
+  abandonAgentTurnSessionRecord,
+}));
+
 import {
+  abandonReplacedPendingAuth,
   canReusePendingAuthLink,
   isPendingAuthLatestRequest,
 } from "@/chat/services/pending-auth";
@@ -11,6 +20,10 @@ import type {
 const NOW = 1_700_000_000_000;
 const REUSE_WINDOW_MS = 10 * 60 * 1000;
 
+beforeEach(() => {
+  abandonAgentTurnSessionRecord.mockReset();
+});
+
 function pendingAuth(
   overrides: Partial<{
     kind: "mcp" | "plugin";
@@ -19,15 +32,18 @@ function pendingAuth(
     sessionId: string;
     linkSentAtMs: number;
   }> = {},
-) {
-  return {
-    kind: "mcp" as const,
+): ConversationPendingAuthState {
+  const { kind = "mcp", ...rest } = overrides;
+  const value = {
     provider: "eval-auth",
     actorId: "U123",
     sessionId: "run_1",
     linkSentAtMs: NOW - 60_000,
-    ...overrides,
+    ...rest,
   };
+  return kind === "mcp"
+    ? { ...value, authSessionId: "auth-session-1", kind }
+    : { ...value, kind };
 }
 
 function conversationWithMessages(
@@ -163,6 +179,26 @@ describe("canReusePendingAuthLink", () => {
         nowMs: NOW,
       }),
     ).toBe(false);
+  });
+});
+
+describe("abandonReplacedPendingAuth", () => {
+  it("abandons a prior blocked session after replacement succeeds", async () => {
+    const previousPendingAuth = pendingAuthState("run_old");
+    const nextPendingAuth = pendingAuthState("run_new");
+
+    await abandonReplacedPendingAuth({
+      conversationId: "conversation-1",
+      previousPendingAuth,
+      nextPendingAuth,
+    });
+
+    expect(abandonAgentTurnSessionRecord).toHaveBeenCalledWith({
+      conversationId: "conversation-1",
+      sessionId: "run_old",
+      errorMessage:
+        "Abandoned by a newer auth-blocked request in the same conversation.",
+    });
   });
 });
 

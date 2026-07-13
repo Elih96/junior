@@ -57,7 +57,6 @@ import {
   recordAuthorizationCompleted,
 } from "@/chat/conversations/projection";
 import {
-  applyPendingAuthUpdate,
   clearPendingAuth,
   getConversationPendingAuth,
   isPendingAuthLatestRequest,
@@ -435,11 +434,7 @@ async function resumeOAuthSessionRecordTurn(
           },
           durability: {
             recordPendingAuth: async (nextPendingAuth) => {
-              await applyPendingAuthUpdate({
-                conversation: lockedConversation,
-                conversationId: stored.resumeConversationId!,
-                nextPendingAuth,
-              });
+              lockedConversation.processing.pendingAuth = nextPendingAuth;
               await persistThreadStateById(stored.resumeConversationId!, {
                 conversation: lockedConversation,
               });
