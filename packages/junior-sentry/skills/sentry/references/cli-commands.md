@@ -11,7 +11,7 @@ The npm `sentry` package is intentionally installed at runtime from the plugin m
 2. Do not use stale plural subcommands such as `sentry organizations list`.
 3. If a command errors as unknown, run `sentry --help` and the nearest subcommand help before declaring the surface unavailable.
 4. Prefer `--json` and, when useful, `--fields` for structured parsing.
-5. Use `sentry api <endpoint>` for authenticated read-only API calls when a high-level command does not cover the requested data.
+5. Use `sentry api <endpoint>` for authenticated API calls when a high-level command does not cover the request. Default to `GET`; only perform documented alert or monitor mutations when explicitly requested.
 
 ## Issue commands
 
@@ -78,16 +78,53 @@ sentry trace list [ORG/PROJECT|PROJECT] [--query QUERY] [--period PERIOD] [--sor
 Use `sentry trace view [ORG/PROJECT/]TRACE_ID` for trace details.
 Use `sentry trace logs [ORG/]TRACE_ID` when the user asks for logs associated with a trace.
 
+## Metric alert commands
+
+Use the first-class CLI surface for metric alerts:
+
+```bash
+sentry alert metrics list ORG/ [--query NAME] [--fresh] [--json]
+sentry alert metrics view ORG/RULE_ID_OR_NAME [--json]
+sentry alert metrics create ORG --name NAME --query QUERY --aggregate AGGREGATE \
+  --dataset DATASET --time-window MINUTES --trigger TRIGGER_JSON \
+  [--project PROJECT]... [--environment ENVIRONMENT] [--owner OWNER] [--dry-run] [--json]
+sentry alert metrics edit ORG/RULE_ID_OR_NAME [OPTIONS]
+sentry alert metrics delete ORG/RULE_ID_OR_NAME [--dry-run]
+```
+
+Before creating a rule:
+
+- Run `sentry alert metrics create --help` and treat live help as authoritative.
+- Resolve the exact org, project, owner, integration, and notification target IDs.
+- List existing rules and stop on a likely duplicate unless the user explicitly asks for another.
+- Run the complete create command with `--dry-run`, then execute it once without `--dry-run`.
+- Pass each trigger as JSON with `--trigger`; do not guess action IDs or target identifiers.
+
+Example static error-volume rule:
+
+```bash
+sentry alert metrics create ORG \
+  --name 'Non-Zod error spike' \
+  --query '!error.type:ZodError' \
+  --aggregate 'count()' \
+  --dataset errors \
+  --time-window 60 \
+  --project PROJECT \
+  --environment production \
+  --owner 'team:TEAM_ID' \
+  --trigger '{"alertThreshold":50,"actions":[...]}' \
+  --dry-run
+```
+
+The current CLI create command exposes threshold triggers but no dynamic/anomaly detection flags. If the user explicitly needs anomaly detection, verify live CLI help first; when still unsupported, use `sentry api` with the current public monitor/alert API rather than inventing CLI flags.
+
 ## API fallback
 
 ```bash
 sentry api ENDPOINT [--method METHOD] [--field KEY=VALUE] [--data JSON] [--json]
 ```
 
-- `ENDPOINT` is relative to `/api/0/`, for example `organizations/` or `issues/123456789/`.
-- Use read-only `GET` requests by default.
-- Do not use API write methods unless the user explicitly asks for a mutating Sentry action.
-- Use `--dry-run` when verifying a complex endpoint or request body.
+Use `sentry api` only when no first-class CLI command covers the requested operation. Default to read-only `GET` requests. For an explicitly requested alerting write, validate with `--dry-run` and verify the current API schema before executing. Do not mutate unrelated Sentry resources.
 
 ## Common flags
 
@@ -109,6 +146,8 @@ sentry api ENDPOINT [--method METHOD] [--field KEY=VALUE] [--data JSON] [--json]
 | "Inspect a trace"                                     | `sentry trace view ORG/PROJECT/TRACE_ID --json`                     |
 | "Show logs for a trace"                               | `sentry trace logs ORG/TRACE_ID --json`                             |
 | "Call an endpoint not covered by high-level commands" | `sentry api organizations/ --json`                                  |
+| "Create a static metric alert"                       | `sentry alert metrics create ... --dry-run`, then execute           |
+| "Create a dynamic anomaly alert"                     | Verify CLI help; use API fallback only if still unsupported         |
 
 ## Troubleshooting
 
@@ -124,5 +163,8 @@ sentry api ENDPOINT [--method METHOD] [--field KEY=VALUE] [--data JSON] [--json]
 | API returns `401` or invalid/expired/revoked token text             | Stale or missing credential                | Rerun the real command once so the runtime can trigger reconnect.                             |
 | API returns explicit missing scope text                             | OAuth grant lacks a named scope            | Rerun the real command once so the runtime can trigger reconnect.                             |
 | API returns generic `403` or permission denied                      | Connected account lacks org/project access | Stop and tell the user the current connection cannot access the requested data.               |
+| Alert write returns an explicit missing-scope error                  | OAuth grant predates alert writes         | Rerun once to trigger reconnect; the connection needs `alerts:write`.                          |
+| Static metric alert requested                                       | First-class CLI command is available       | Use `sentry alert metrics create`; do not drop directly to `sentry api`.                        |
+| Dynamic/anomaly alert flags are unavailable                         | CLI coverage gap                          | Verify live help, then use the current API fallback if needed.                                 |
 
 Use these command shapes during normal skill execution, but treat live CLI help as the final source when this reference and the installed CLI disagree.
