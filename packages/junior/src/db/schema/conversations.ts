@@ -63,6 +63,7 @@ export const juniorConversations = pgTable(
     usage: jsonb("usage_json").$type<AgentTurnUsage>(),
     executionDurationMs: integer("execution_duration_ms").notNull().default(0),
     executionUsage: jsonb("execution_usage_json").$type<AgentTurnUsage>(),
+    metricRunId: text("metric_run_id"),
   },
   (table) => [
     index("junior_conversations_last_activity_idx").on(
