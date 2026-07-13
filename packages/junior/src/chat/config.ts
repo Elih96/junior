@@ -3,6 +3,10 @@ import { toOptionalTrimmed } from "@/chat/optional-string";
 import { resolveGatewayModel } from "@/chat/pi/client";
 import { normalizeSlackEmojiName } from "@/chat/slack/emoji";
 import {
+  parseTurnReasoningLevel,
+  type TurnReasoningLevel,
+} from "@/chat/reasoning-level";
+import {
   DEFAULT_HANDOFF_MODEL_PROFILE,
   modelProfileSchema,
   STANDARD_MODEL_PROFILE,
@@ -40,6 +44,7 @@ export interface BotConfig {
   loadingMessages: string[];
   modelId: string;
   modelProfiles: Readonly<Record<string, string>>;
+  reasoningLevel?: TurnReasoningLevel;
   modelContextWindowTokens?: number;
   visionModelId?: string;
   turnTimeoutMs: number;
@@ -244,6 +249,7 @@ function readBotConfig(env: NodeJS.ProcessEnv): BotConfig {
   const functionMaxDurationSeconds = resolveFunctionMaxDurationSeconds(env);
   const maxTurnTimeoutMs = resolveMaxTurnTimeoutMs(functionMaxDurationSeconds);
   const modelId = validateGatewayModelId(env.AI_MODEL) ?? DEFAULT_MODEL_ID;
+  const reasoningLevel = toOptionalTrimmed(env.AI_REASONING_LEVEL);
   const fastModelId =
     validateGatewayModelId(env.AI_FAST_MODEL ?? env.AI_MODEL) ??
     DEFAULT_FAST_MODEL_ID;
@@ -258,6 +264,10 @@ function readBotConfig(env: NodeJS.ProcessEnv): BotConfig {
       "AI_MODEL_CONTEXT_WINDOW_TOKENS",
       env.AI_MODEL_CONTEXT_WINDOW_TOKENS,
     ),
+    reasoningLevel:
+      reasoningLevel === undefined
+        ? undefined
+        : parseTurnReasoningLevel(reasoningLevel),
     fastModelId,
     embeddingModelId:
       validateEmbeddingModelId(env.AI_EMBEDDING_MODEL) ??

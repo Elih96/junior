@@ -69,10 +69,10 @@ import {
   nextProviderRetry,
 } from "@/chat/services/provider-retry";
 import {
-  selectTurnThinkingLevel,
-  toAgentThinkingLevel,
-  type TurnThinkingSelection,
-} from "@/chat/services/turn-thinking-level";
+  configuredTurnReasoningLevel,
+  selectTurnReasoningLevel,
+  toPiReasoningLevel,
+} from "@/chat/services/turn-reasoning-level";
 import {
   addAgentTurnUsage,
   hasAgentTurnUsage,
@@ -211,7 +211,14 @@ async function executeAgentRunInPrivacyContext(
   let canRecordMcpProviders = false;
   let turnUsage: AgentTurnUsage | undefined;
   let handoffPhaseUsage: AgentTurnUsage | undefined;
-  let thinkingSelection: TurnThinkingSelection | undefined;
+  const configuredReasoningLevel =
+    policy.reasoningLevel ?? botConfig.reasoningLevel;
+  let reasoningSelection = configuredReasoningLevel
+    ? configuredTurnReasoningLevel(
+        configuredReasoningLevel,
+        policy.reasoningLevel ? "agent_config" : "default",
+      )
+    : undefined;
   let activeModelProfile: ModelProfile = STANDARD_MODEL_PROFILE;
   let activeModelId = modelIdForProfile(botConfig, activeModelProfile);
   const actor = actorFromRouting(routing);
@@ -350,7 +357,7 @@ async function executeAgentRunInPrivacyContext(
       destination: routing.destination,
       durability,
       getLoadedSkillNames: () => loadedSkillNamesForResume,
-      getReasoningLevel: () => thinkingSelection?.thinkingLevel,
+      getReasoningLevel: () => reasoningSelection?.reasoningLevel,
       logContext: sessionRecordLogContext,
       getModelId: () => activeModelId,
       recordActiveMcpProviders,
@@ -432,7 +439,7 @@ async function executeAgentRunInPrivacyContext(
     const preAgentPromptMessages = (): PiMessage[] =>
       existingSessionRecord?.piMessages ?? [...(input.piMessages ?? [])];
 
-    thinkingSelection = await selectTurnThinkingLevel({
+    reasoningSelection ??= await selectTurnReasoningLevel({
       completeObject,
       conversationContext: input.conversationContext,
       context: {
@@ -447,11 +454,11 @@ async function executeAgentRunInPrivacyContext(
     });
     setSpanAttributes({
       "gen_ai.request.model": activeModelId,
-      "gen_ai.request.reasoning.level": thinkingSelection.thinkingLevel,
-      "app.ai.thinking_level_reason": thinkingSelection.reason,
-      ...(thinkingSelection.confidence !== undefined
+      "gen_ai.request.reasoning.level": reasoningSelection.reasoningLevel,
+      "app.ai.reasoning_level_reason": reasoningSelection.reason,
+      ...(reasoningSelection.confidence !== undefined
         ? {
-            "app.ai.thinking_level_confidence": thinkingSelection.confidence,
+            "app.ai.reasoning_level_confidence": reasoningSelection.confidence,
           }
         : {}),
     });
@@ -498,8 +505,8 @@ async function executeAgentRunInPrivacyContext(
                 modelProfile: profile,
               };
               const handoffModel = resolveGatewayModel(target.modelId);
-              const handoffThinkingLevel = toAgentThinkingLevel(
-                thinkingSelection!.thinkingLevel,
+              const handoffThinkingLevel = toPiReasoningLevel(
+                reasoningSelection!.reasoningLevel,
               );
               void (async () => {
                 await observers.onStatus?.({ text: "Switching models" });
@@ -755,7 +762,8 @@ async function executeAgentRunInPrivacyContext(
           runResume.adoptCommittedBoundary(replacement);
           setSpanAttributes({
             "gen_ai.request.model": activeModelId,
-            "gen_ai.request.reasoning.level": thinkingSelection!.thinkingLevel,
+            "gen_ai.request.reasoning.level":
+              reasoningSelection!.reasoningLevel,
             "app.ai.model_profile": activeModelProfile,
           });
           update = {
@@ -775,7 +783,7 @@ async function executeAgentRunInPrivacyContext(
       initialState: {
         systemPrompt: baseInstructions,
         model: resolveGatewayModel(activeModelId),
-        thinkingLevel: toAgentThinkingLevel(thinkingSelection.thinkingLevel),
+        thinkingLevel: toPiReasoningLevel(reasoningSelection.reasoningLevel),
         tools: wiring.agentTools,
       },
     });
@@ -922,10 +930,10 @@ async function executeAgentRunInPrivacyContext(
                     "gen_ai.provider.name": GEN_AI_PROVIDER_NAME,
                     "gen_ai.operation.name": "invoke_agent",
                     "gen_ai.request.model": activeModelId,
-                    ...(thinkingSelection
+                    ...(reasoningSelection
                       ? {
                           "gen_ai.request.reasoning.level":
-                            thinkingSelection.thinkingLevel,
+                            reasoningSelection.reasoningLevel,
                         }
                       : {}),
                     "app.ai.turn_timeout_ms": turnTimeoutBudgetMs,
@@ -1055,7 +1063,7 @@ async function executeAgentRunInPrivacyContext(
             : {}),
           ...(sessionId ? { "app.ai.turn.session_id": sessionId } : {}),
           ...(currentSliceId ? { "app.ai.turn.slice_id": currentSliceId } : {}),
-          "gen_ai.request.reasoning.level": thinkingSelection.thinkingLevel,
+          "gen_ai.request.reasoning.level": reasoningSelection.reasoningLevel,
           ...toGenAiMessagesTraceAttributes("app.ai.input", inputMessages),
           ...(inputMessagesAttribute
             ? { "gen_ai.input.messages": inputMessagesAttribute }
@@ -1097,7 +1105,7 @@ async function executeAgentRunInPrivacyContext(
         shouldTrace,
         spanContext,
         usage: turnUsage,
-        thinkingSelection,
+        reasoningSelection,
         correlation: routing.correlation,
         assistantUserName: botConfig.userName,
         modelId: activeModelId,
@@ -1158,9 +1166,9 @@ async function executeAgentRunInPrivacyContext(
           outcome: "provider_error",
           modelId: activeModelId,
           assistantMessageCount: 0,
-          ...(thinkingSelection
+          ...(reasoningSelection
             ? {
-                thinkingLevel: thinkingSelection.thinkingLevel,
+                reasoningLevel: reasoningSelection.reasoningLevel,
               }
             : {}),
           toolCalls: [],
