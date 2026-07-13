@@ -59,6 +59,15 @@ describe("people profile API", () => {
         "failed",
         "active",
       ]);
+      expect(report.recentConversations[0]).toMatchObject({
+        channelName: "Private Conversation",
+        channelNameRedacted: true,
+        displayTitle: "Private Conversation",
+      });
+      expect(report.recentConversations[1]).toMatchObject({
+        conversationId: "slack:C1:123",
+        locationId: expect.any(String),
+      });
 
       const untrusted = await readPeopleProfileFromSql("untrusted@example.com");
       expect(untrusted).toMatchObject({
