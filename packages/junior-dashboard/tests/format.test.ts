@@ -19,6 +19,7 @@ import {
   actorLabel,
   slackLocationLabel,
   summarizeMessages,
+  summarizeTurns,
   summarizeCost,
   summarizeToolCalls,
   summarizeUsage,
@@ -161,6 +162,10 @@ describe("dashboard token formatting", () => {
       ],
       total: 2,
     });
+    expect(summarizeTurns(conversation)).toEqual({
+      items: [{ author: "alice", bytes: 10 }],
+      total: 1,
+    });
     expect(
       summarizeUsage({
         cachedInputTokens: 2,
@@ -175,6 +180,19 @@ describe("dashboard token formatting", () => {
       reasoningTokens: 10,
       totalTokens: 10,
     });
+  });
+
+  it("does not count assistant-only transcripts as actor turns", () => {
+    const conversation = transcript({
+      transcript: [
+        {
+          role: "assistant",
+          parts: [{ type: "text", text: "proactive update" }],
+        },
+      ],
+    });
+
+    expect(summarizeTurns(conversation)).toBeUndefined();
   });
 
   it("counts activity-only tool calls in tool summaries", () => {
