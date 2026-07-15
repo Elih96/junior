@@ -89,7 +89,6 @@ export async function lookupSlackUser(
       ok?: boolean;
       user?: {
         name?: string;
-        real_name?: string;
         profile?: {
           display_name?: string;
           real_name?: string;
@@ -104,9 +103,8 @@ export async function lookupSlackUser(
 
     const userName = payload.user.name?.trim() || undefined;
     const fullName =
-      payload.user.profile?.display_name?.trim() ||
       payload.user.profile?.real_name?.trim() ||
-      payload.user.real_name?.trim() ||
+      payload.user.profile?.display_name?.trim() ||
       undefined;
 
     const result: SlackUserLookupResult = {
