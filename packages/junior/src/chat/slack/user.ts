@@ -1,3 +1,4 @@
+import { z } from "zod";
 import { getSlackBotToken } from "@/chat/config";
 import { logWarn } from "@/chat/logging";
 import { createSlackActor, type SlackActor } from "@/chat/actor";
@@ -7,6 +8,19 @@ interface SlackUserLookupResult {
   fullName?: string;
   email?: string;
 }
+
+const slackUserInfoSchema = z.object({
+  ok: z.literal(true),
+  user: z.object({
+    name: z.string().nullish(),
+    profile: z
+      .object({
+        email: z.string().nullish(),
+        real_name: z.string().nullish(),
+      })
+      .optional(),
+  }),
+});
 
 const USER_CACHE_TTL_MS = 5 * 60 * 1000;
 const userCache = new Map<
@@ -85,27 +99,13 @@ export async function lookupSlackUser(
       return null;
     }
 
-    const payload = (await response.json()) as {
-      ok?: boolean;
-      user?: {
-        name?: string;
-        profile?: {
-          display_name?: string;
-          real_name?: string;
-          email?: string;
-        };
-      };
-    };
-
-    if (!payload.ok || !payload.user) {
+    const parsed = slackUserInfoSchema.safeParse(await response.json());
+    if (!parsed.success) {
       return null;
     }
-
+    const payload = parsed.data;
     const userName = payload.user.name?.trim() || undefined;
-    const fullName =
-      payload.user.profile?.real_name?.trim() ||
-      payload.user.profile?.display_name?.trim() ||
-      undefined;
+    const fullName = payload.user.profile?.real_name?.trim() || undefined;
 
     const result: SlackUserLookupResult = {
       userName,
