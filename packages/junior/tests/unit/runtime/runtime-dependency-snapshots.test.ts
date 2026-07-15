@@ -32,6 +32,9 @@ vi.mock("@/chat/plugins/catalog-runtime", () => ({
     getRuntimePostinstall: getRuntimePostinstallMock,
   },
 }));
+vi.mock("@/chat/sandbox/runtime-dependencies", () => ({
+  GLOBAL_RUNTIME_DEPENDENCIES: [],
+}));
 vi.mock("@/chat/logging", () => ({
   withSpan: withSpanMock,
 }));
