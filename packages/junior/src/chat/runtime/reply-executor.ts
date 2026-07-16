@@ -11,6 +11,7 @@ import type { SlackAdapter } from "@chat-adapter/slack";
 import { createSlackSource, type Destination } from "@sentry/junior-plugin-api";
 import { botConfig } from "@/chat/config";
 import { getSlackMessageTs } from "@/chat/slack/message";
+import { readSlackActionToken } from "@/chat/slack/action-token";
 import {
   logException,
   getActiveTraceId,
@@ -467,6 +468,7 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
       threadTs,
       type: destinationVisibility === "public" ? "pub" : "priv",
     });
+    const slackActionToken = readSlackActionToken(message);
     const runId = getRunId(thread, message);
     const conversationId = threadId ?? runId;
 
@@ -1215,6 +1217,7 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
                 actorId: slackActorId,
               },
               toolChannelId,
+              slackActionToken,
             },
             policy: {
               configuration: preparedState.configuration,
