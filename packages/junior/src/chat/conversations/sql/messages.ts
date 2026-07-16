@@ -1,4 +1,4 @@
-import { and, asc, eq, isNull, sql } from "drizzle-orm";
+import { and, asc, eq, isNotNull, isNull, sql } from "drizzle-orm";
 import type { JuniorSqlDatabase } from "@/db/db";
 import type {
   ConversationMessage,
@@ -6,7 +6,7 @@ import type {
   NewConversationMessage,
 } from "../messages";
 import { ensureConversationRow } from "./conversation-row";
-import { juniorConversationMessages } from "@/db/schema";
+import { juniorConversationMessages, juniorConversations } from "@/db/schema";
 
 type ConversationMessageRow = typeof juniorConversationMessages.$inferSelect;
 
@@ -45,6 +45,16 @@ class SqlConversationMessageStore implements ConversationMessageStore {
         conversationId,
         newestCreatedAtMs,
       );
+      await this.executor
+        .db()
+        .update(juniorConversations)
+        .set({ archivedAt: null })
+        .where(
+          and(
+            eq(juniorConversations.conversationId, conversationId),
+            isNotNull(juniorConversations.archivedAt),
+          ),
+        );
       await this.executor
         .db()
         .insert(juniorConversationMessages)

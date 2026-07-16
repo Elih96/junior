@@ -129,6 +129,50 @@ describe("Junior REST API", () => {
       tokens: 120,
     });
 
+    const invalidArchive = await app.request(
+      `http://localhost/api/conversations/${encodeURIComponent(conversationId)}/archive`,
+      {
+        body: JSON.stringify({ archived: "yes" }),
+        headers: { "content-type": "application/json" },
+        method: "PATCH",
+      },
+    );
+    expect(invalidArchive.status).toBe(400);
+
+    const archive = await app.request(
+      `http://localhost/api/conversations/${encodeURIComponent(conversationId)}/archive`,
+      {
+        body: JSON.stringify({
+          archived: true,
+          lastSeenAt: "2026-06-15T11:51:00.000Z",
+        }),
+        headers: { "content-type": "application/json" },
+        method: "PATCH",
+      },
+    );
+    expect(archive.status).toBe(200);
+    await expect(archive.json()).resolves.toEqual({ archived: true });
+
+    const defaultFeedAfterArchive = await app.request(
+      "http://localhost/api/conversations",
+    );
+    expect(
+      ((await defaultFeedAfterArchive.json()) as {
+        conversations: Array<{ conversationId: string }>;
+      }).conversations,
+    ).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ conversationId })]),
+    );
+
+    const statsAfterArchive = await app.request(
+      "http://localhost/api/conversations/stats",
+    );
+    await expect(statsAfterArchive.json()).resolves.toMatchObject({
+      conversations: 4,
+      durationMs: 1_500,
+      tokens: 120,
+    });
+
     const detail = await app.request(
       `http://localhost/api/conversations/${encodeURIComponent(conversationId)}`,
     );
@@ -162,6 +206,7 @@ describe("Junior REST API", () => {
     expect(profile.status).toBe(200);
     await expect(profile.json()).resolves.toMatchObject({
       actor: { email: "person@example.com" },
+      recentConversations: [],
       totals: { conversations: 1, durationMs: 1_500, tokens: 120 },
     });
 
@@ -240,7 +285,7 @@ describe("Junior REST API", () => {
       ],
       conversations: 3,
       label: "#product",
-      recentConversations: expect.arrayContaining([
+      recentConversations: expect.not.arrayContaining([
         expect.objectContaining({ conversationId }),
       ]),
     });

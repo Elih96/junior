@@ -1,4 +1,4 @@
-import { QueryClient, useQuery } from "@tanstack/react-query";
+import { QueryClient, useMutation, useQuery } from "@tanstack/react-query";
 import type { ZodType } from "zod";
 import type { ConversationDetailReport } from "@sentry/junior/api/schema";
 import type { ConversationSubagentTranscriptReport } from "@sentry/junior/api/schema";
@@ -56,6 +56,17 @@ function restartDashboardSignIn(): void {
       loginSearch ? `${loginPath}?${loginSearch}` : loginPath,
     );
   }
+}
+
+async function mutate(path: string, body: unknown): Promise<void> {
+  const response = await fetch(path, {
+    body: JSON.stringify(body),
+    credentials: "same-origin",
+    headers: { "content-type": "application/json" },
+    method: "PATCH",
+  });
+  if (response.status === 401) restartDashboardSignIn();
+  if (!response.ok) throw new DashboardApiError(path, response.status);
 }
 
 async function read<T>(schema: ZodType<T>, path: string): Promise<T> {
@@ -197,6 +208,27 @@ export function useSystemData() {
     isPending:
       coreQuery.isPending || pluginsQuery.isPending || skillsQuery.isPending,
   };
+}
+
+/** Archive or restore one conversation and refresh dashboard caches. */
+export function useArchiveConversation(conversationId: string) {
+  return useMutation({
+    mutationFn: (args: { archived: boolean; lastSeenAt: string }) =>
+      mutate(
+        `/api/conversations/${encodeURIComponent(conversationId)}/archive`,
+        args,
+      ),
+    onSettled: async () => {
+      await Promise.all([
+        client.invalidateQueries({ queryKey: ["dashboard", "conversations"] }),
+        client.invalidateQueries({ queryKey: ["dashboard", "locations"] }),
+        client.invalidateQueries({ queryKey: ["dashboard", "people"] }),
+        client.invalidateQueries({
+          queryKey: ["conversation", conversationId],
+        }),
+      ]);
+    },
+  });
 }
 
 /** Fetch one conversation transcript while preserving route-level disabled state. */
