@@ -25,9 +25,14 @@ function personMeta(person: ActorSummaryReport): string | undefined {
     : person.actor.email;
 }
 
-function runtimeLabel(durationMs: number, conversations: number): string {
+function runtimeLabel(
+  durationMs: number,
+  conversations: number,
+  maxUnits?: number,
+): string {
   if (durationMs <= 0 && conversations > 0) return "unknown";
-  return formatDuration(durationMs);
+  const duration = formatDuration(durationMs);
+  return maxUnits ? duration.split(" ").slice(0, maxUnits).join(" ") : duration;
 }
 
 /** Filter and order people without mutating the reporting response. */
@@ -102,7 +107,7 @@ export function PeopleDirectory(props: {
         />
       </div>
       {props.loading ? (
-        <DirectoryRowsSkeleton />
+        <DirectoryRowsSkeleton wideRuntime />
       ) : props.people.length === 0 ? (
         <div className="p-4">
           <EmptyTelemetry>No people match this search.</EmptyTelemetry>
@@ -110,7 +115,7 @@ export function PeopleDirectory(props: {
       ) : (
         <div className="min-w-0" role="table">
           <div
-            className="grid grid-cols-[minmax(14rem,1fr)_repeat(3,minmax(5rem,auto))] items-center gap-4 border-b border-white/[0.06] bg-black/20 px-4 py-2.5 font-mono text-[0.62rem] uppercase tracking-[0.1em] text-white/30 max-md:hidden"
+            className="grid grid-cols-[minmax(14rem,1fr)_repeat(2,minmax(5rem,auto))_minmax(8rem,auto)] items-center gap-4 border-b border-white/[0.06] bg-black/20 px-4 py-2.5 font-mono text-[0.62rem] uppercase tracking-[0.1em] text-white/30 max-md:hidden"
             role="row"
           >
             <div>Person</div>
@@ -120,7 +125,7 @@ export function PeopleDirectory(props: {
           </div>
           {props.people.map((person) => (
             <Link
-              className="group grid min-w-0 grid-cols-[minmax(14rem,1fr)_repeat(3,minmax(5rem,auto))] items-center gap-4 border-b border-white/[0.055] px-4 py-3.5 text-inherit no-underline transition-colors last:border-b-0 hover:bg-white/[0.035] max-md:grid-cols-3 max-md:gap-x-3 max-md:gap-y-4"
+              className="group grid min-w-0 grid-cols-[minmax(14rem,1fr)_repeat(2,minmax(5rem,auto))_minmax(8rem,auto)] items-center gap-4 border-b border-white/[0.055] px-4 py-3.5 text-inherit no-underline transition-colors last:border-b-0 hover:bg-white/[0.035] max-md:grid-cols-3 max-md:gap-x-3 max-md:gap-y-4"
               key={person.actor.email}
               to={peoplePath(person.actor.email)}
             >
@@ -149,7 +154,16 @@ export function PeopleDirectory(props: {
               />
               <DirectoryMetric
                 label="Runtime"
-                value={runtimeLabel(person.durationMs, person.conversations)}
+                value={
+                  <>
+                    <span className="whitespace-nowrap md:hidden">
+                      {runtimeLabel(person.durationMs, person.conversations, 2)}
+                    </span>
+                    <span className="hidden whitespace-nowrap md:inline">
+                      {runtimeLabel(person.durationMs, person.conversations)}
+                    </span>
+                  </>
+                }
               />
             </Link>
           ))}
