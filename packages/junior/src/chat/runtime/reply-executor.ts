@@ -1203,6 +1203,7 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
               slackConversation,
               source,
               destination,
+              destinationVisibility,
               surface: "slack",
               correlation: {
                 conversationId,
