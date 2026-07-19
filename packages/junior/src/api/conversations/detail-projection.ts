@@ -12,7 +12,12 @@ import type { Conversation } from "@/chat/conversations/store";
 import { loadProjection, projectSteps } from "@/chat/conversations/projection";
 import { getAgentStepStore, getConversationMessageStore } from "@/chat/db";
 import type { PiMessage } from "@/chat/pi/messages";
-import { stripRuntimeTurnContext } from "@/chat/pi/transcript";
+import {
+  isAssistantMessage,
+  stripRuntimeTurnContext,
+} from "@/chat/pi/transcript";
+import { extractGenAiUsageSummary } from "@/chat/logging";
+import { addAgentTurnUsage, hasAgentTurnUsage } from "@/chat/usage";
 import {
   buildSentryConversationUrl,
   buildSentryTraceUrl,
@@ -36,6 +41,7 @@ import type {
   ConversationActivityReport,
   ConversationContextEvent,
   ConversationDetailReport,
+  ConversationModelUsage,
   ConversationSubagentTranscriptReport,
   TranscriptMessage,
 } from "./schema";
@@ -215,6 +221,7 @@ async function conversationContent(args: {
 }): Promise<{
   activity: ConversationActivityReport[];
   contextEvents: ConversationContextEvent[];
+  messages: PiMessage[];
   transcript: TranscriptMessage[];
 }> {
   const steps = await args.stepStore.loadHistory(args.conversationId);
@@ -236,8 +243,26 @@ async function conversationContent(args: {
       messages,
     }),
     contextEvents: history.contextEvents,
+    messages,
     transcript,
   };
+}
+
+function modelUsageFromMessages(
+  messages: PiMessage[],
+): ConversationModelUsage[] {
+  const byModel = new Map<string, ConversationModelUsage["usage"]>();
+  for (const message of messages) {
+    if (!isAssistantMessage(message)) continue;
+    const usage = extractGenAiUsageSummary(message);
+    if (!hasAgentTurnUsage(usage)) continue;
+    const modelId = `${message.provider}/${message.model}`;
+    const cumulativeUsage = addAgentTurnUsage(byModel.get(modelId), usage);
+    if (cumulativeUsage) byModel.set(modelId, cumulativeUsage);
+  }
+  return [...byModel.entries()]
+    .map(([modelId, usage]) => ({ modelId, usage }))
+    .sort((left, right) => left.modelId.localeCompare(right.modelId));
 }
 
 function visibleMessageTranscript(
@@ -283,8 +308,9 @@ export async function buildConversationDetail(args: {
           stepStore,
           canExposePayload: canExposeSqlContent,
         })
-      : { activity: [], contextEvents: [], transcript: [] };
+      : { activity: [], contextEvents: [], messages: [], transcript: [] };
 
+  const modelUsage = modelUsageFromMessages(currentContent.messages);
   const currentTranscript = currentContent.transcript;
   const traceId = canExposeSqlContent
     ? traceIdFromTranscript(currentTranscript)
@@ -303,6 +329,7 @@ export async function buildConversationDetail(args: {
     ...(sentryTraceUrl ? { sentryTraceUrl } : {}),
     activity: currentContent.activity,
     contextEvents: currentContent.contextEvents,
+    ...(modelUsage.length > 0 ? { modelUsage } : {}),
     transcriptAvailable:
       transcriptExpiredAt === undefined &&
       canExposeSqlContent &&
