@@ -69,7 +69,7 @@ For each `it()` case inside a `describeEval()` suite:
 
 - Use the Slack eval harness for Slack/runtime behavior: mentions, thread/channel delivery, OAuth privacy, lifecycle/resume behavior, reactions, and Slack-visible side effects.
 - Use an agent-level harness for prompt, skill routing, tool choice, provider/tool calls, and reply quality when Slack transport is not the behavior under test.
-- The Slack eval harness preserves inbound messages and direct thread replies in observed order. Slack API-captured side effects may be collected afterward. The rubric judge receives only non-empty user-visible text from normalized user and assistant messages; tool calls, artifacts, logs, metadata, and other runtime observations stay outside its prompt.
+- The Slack eval harness preserves inbound messages and direct thread replies in observed order. Slack API-captured side effects may be collected afterward. The rubric judge receives only non-empty user-visible text plus visible Slack author names from normalized user and assistant messages; tool calls, artifacts, logs, other metadata, and other runtime observations stay outside its prompt.
 - When the eval boundary is Junior's Pi agent or needs an ordered full-turn transcript, prefer `@vitest-evals/harness-pi-ai` primitives instead of rebuilding transcript capture locally. The Pi harness already owns normalized `session.messages`, `toolCalls(result.session)`, artifacts, traces, replay, and judge context.
 - Do not assert against logs, spans, or status telemetry for product behavior. Use `vitest-evals` session/tool/artifact primitives for behavior contracts; reserve traces/spans for instrumentation tests or diagnostics.
 
@@ -107,15 +107,20 @@ Pass eval file paths and `-t` filters directly after the `evals` script. Do not 
 - Adding the `trigger-evals` label triggers a run immediately; adding unrelated labels does not.
 - Eval-related files are:
   - `packages/junior-evals/evals/**`
+  - `packages/junior-evals/package.json`
+  - `packages/junior-evals/global-setup.ts`
+  - `packages/junior-evals/postgres-global-setup.ts`
+  - `packages/junior-evals/src/**`
+  - `packages/junior-evals/tests/**`
   - `packages/junior-evals/vitest.evals.config.ts`
   - `packages/junior/src/**`
 - The simplest Gateway and Sandbox setup is `VERCEL_OIDC_TOKEN` alone.
 - The fallback CI setup is `AI_GATEWAY_API_KEY` plus `VERCEL_TOKEN` + `VERCEL_TEAM_ID` + `VERCEL_PROJECT_ID`.
-- Provider HTTP and generic OAuth evals also require `JUNIOR_BASE_URL` plus `CLOUDFLARE_TUNNEL_TOKEN` so Vercel Sandbox can reach the eval egress proxy.
-- This repo is not intended to configure those GitHub Actions secrets right now. The workflow support and setup doc are future-facing.
+- Eval global setup starts one Cloudflare Quick Tunnel for the suite so Vercel Sandbox can reach the eval egress proxy. Local runs require `cloudflared` on `PATH`; CI installs a pinned binary.
+- Eval state always uses a loopback Redis. Local runs default to `redis://127.0.0.1:6382`; CI sets `JUNIOR_EVAL_REDIS_URL` for its Redis service.
 - Setup details for GitHub Actions live in `evals/github-actions.md`.
 
-Evals require real Vercel Sandbox access. If sandbox bootstrap fails, the eval fails immediately (no local fallback path).
+Evals require real Vercel Sandbox access and public Quick Tunnel connectivity. If either bootstrap fails, the eval fails immediately with no local fallback path.
 
 ## Authoring Rules
 

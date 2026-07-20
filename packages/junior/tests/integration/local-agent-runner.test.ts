@@ -185,14 +185,16 @@ describe("local agent runner", () => {
       const context = flattenAgentRunRequestForTest(request);
 
       context.onToolInvocation?.({
-        toolName: "createMemory",
         params: { content: "The actor prefers short updates." },
+        toolCallId: "tool-call-1",
+        toolName: "createMemory",
       });
       await context.onToolResult?.({
         ok: true,
-        toolName: "createMemory",
         params: { content: "The actor prefers short updates." },
         result: { ok: true },
+        toolCallId: "tool-call-1",
+        toolName: "createMemory",
       });
       return completedAgentRun(
         successReply("saved", { toolCalls: ["createMemory"] }),
@@ -220,6 +222,7 @@ describe("local agent runner", () => {
 
     expect(invocations).toEqual([
       {
+        toolCallId: "tool-call-1",
         toolName: "createMemory",
         params: { content: "The actor prefers short updates." },
       },
@@ -227,6 +230,7 @@ describe("local agent runner", () => {
     expect(results).toEqual([
       {
         ok: true,
+        toolCallId: "tool-call-1",
         toolName: "createMemory",
         params: { content: "The actor prefers short updates." },
         result: { ok: true },
