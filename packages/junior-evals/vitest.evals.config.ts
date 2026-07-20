@@ -10,7 +10,9 @@ const evalsPackageRoot = __dirname;
 const pluginApiPackageRoot = path.resolve(__dirname, "../junior-plugin-api");
 const memoryPackageRoot = path.resolve(__dirname, "../junior-memory");
 const schedulerPackageRoot = path.resolve(__dirname, "../junior-scheduler");
-const EVAL_TEST_TIMEOUT_MS = 60_000;
+// Leave room for harness cleanup and rubric judging after a reply reaches its
+// separate 60-second behavior budget.
+const EVAL_TEST_TIMEOUT_MS = 120_000;
 const evalReportPath = path.resolve(
   evalsPackageRoot,
   process.env.VITEST_EVALS_OUTPUT_FILE ?? "vitest-results.json",
@@ -33,7 +35,8 @@ if (evalRedisHostname !== "localhost" && evalRedisHostname !== "127.0.0.1") {
     `JUNIOR_EVAL_REDIS_URL must point at localhost or 127.0.0.1, got ${evalRedisHostname}`,
   );
 }
-process.env.AI_MODEL = "openai/gpt-5.4";
+process.env.AI_MODEL = "xai/grok-4.5";
+process.env.AI_FAST_MODEL = "anthropic/claude-haiku-4.5";
 process.env.AI_HANDOFF_MODEL = "openai/gpt-5.6-sol";
 process.env.AI_MODEL_PROFILES = JSON.stringify({
   coding: "openai/gpt-5.6-sol",
@@ -66,9 +69,9 @@ export default defineConfig({
     include: ["evals/**/*.eval.ts"],
     maxWorkers: 1,
     setupFiles: [
+      path.resolve(__dirname, "src/setup.ts"),
       path.resolve(juniorPackageRoot, "tests/msw/setup.ts"),
       path.resolve(juniorPackageRoot, "tests/fixtures/postgres/setup.ts"),
-      path.resolve(__dirname, "src/setup.ts"),
     ],
     outputFile: { json: evalReportPath },
     reporters: [new DefaultEvalReporter(), "json"],
