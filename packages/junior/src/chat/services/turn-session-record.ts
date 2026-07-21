@@ -20,12 +20,11 @@ import { TurnSliceLimitExceededError } from "@/chat/services/turn-limit";
 import { botConfig } from "@/chat/config";
 
 export interface TurnSessionContext {
-  conversationId?: string;
-  sessionId?: string;
+  conversationId: string;
+  sessionId: string;
 }
 
 export interface TurnSessionState {
-  canUseTurnSession: boolean;
   resumedFromSessionRecord: boolean;
   currentSliceId: number;
   existingSessionRecord?: AgentTurnSessionRecord;
@@ -109,19 +108,14 @@ function resumableBoundary(
 export async function loadTurnSessionRecord(
   ctx: TurnSessionContext,
 ): Promise<TurnSessionState> {
-  const canUseTurnSession = Boolean(ctx.conversationId && ctx.sessionId);
-  const existingSessionRecord =
-    canUseTurnSession && ctx.conversationId && ctx.sessionId
-      ? await getAgentTurnSessionRecordForResume(
-          ctx.conversationId,
-          ctx.sessionId,
-        )
-      : undefined;
+  const existingSessionRecord = await getAgentTurnSessionRecordForResume(
+    ctx.conversationId,
+    ctx.sessionId,
+  );
   const hasAwaitingResumeRecord = Boolean(
     existingSessionRecord && existingSessionRecord.state === "awaiting_resume",
   );
   return {
-    canUseTurnSession,
     resumedFromSessionRecord: hasAwaitingResumeRecord,
     currentSliceId: hasAwaitingResumeRecord
       ? existingSessionRecord!.sliceId
@@ -217,13 +211,13 @@ export async function persistRunningSessionRecord(args: {
 }
 
 /**
- * Commit the delivered final reply as the terminal completed session record.
+ * Commit a run after assistant output handling has settled.
  *
- * Generation completing is not delivery: call this only after the destination
- * accepted the visible final reply, so an undelivered assistant reply never
- * becomes durable conversation history or a terminal completed state. The
- * write is retried because the reply is already user-visible, then any remaining
- * failure surfaces to the post-delivery boundary for one authoritative error.
+ * Generation completing is not durable completion: call this only after the
+ * destination accepted each visible message or intentional silence was
+ * resolved. The write is retried because output may already be user-visible;
+ * any remaining failure surfaces to the post-output boundary for one
+ * authoritative error.
  */
 export async function persistCompletedSessionRecord(args: {
   channelName?: string;

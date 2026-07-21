@@ -10,6 +10,7 @@ import {
   type PluginAppFixture,
 } from "../fixtures/plugin-app";
 import { completedAgentRun } from "@/chat/runtime/agent-run-outcome";
+import { deliverAssistantMessagesForTest } from "../fixtures/agent-runner";
 import {
   hydrateConversationMessages,
   persistConversationMessages,
@@ -90,12 +91,15 @@ let pluginApp: PluginAppFixture | undefined;
 describe("oauth callback slack integration", () => {
   beforeEach(async () => {
     executeAgentRunMock.mockReset();
-    executeAgentRunMock.mockResolvedValue(
-      completedAgentRun({
+    executeAgentRunMock.mockImplementation(async (request) => {
+      await deliverAssistantMessagesForTest(request, [
+        { text: "Here are your Sentry issues." },
+      ]);
+      return completedAgentRun({
         text: "Here are your Sentry issues.",
         diagnostics: makeDiagnostics(),
-      }),
-    );
+      });
+    });
     resetSlackApiMockState();
     process.env = {
       ...ORIGINAL_ENV,
@@ -218,6 +222,8 @@ describe("oauth callback slack integration", () => {
     expect(response.status).toBe(200);
     expect(executeAgentRunMock).toHaveBeenCalledWith(
       expect.objectContaining({
+        conversationId: "slack:C123:1700000000.001",
+        turnId: "turn_user-1",
         input: expect.objectContaining({
           messageText: "list my sentry issues",
           conversationContext: expect.stringContaining(
@@ -413,6 +419,8 @@ describe("oauth callback slack integration", () => {
     );
     expect(executeAgentRunMock).toHaveBeenCalledWith(
       expect.objectContaining({
+        conversationId,
+        turnId: sessionId,
         input: expect.objectContaining({
           messageText: "list my sentry issues",
           conversationContext: expect.stringContaining(
@@ -430,11 +438,6 @@ describe("oauth callback slack integration", () => {
           }),
           destination: SLACK_DESTINATION,
           source: storedSource,
-          correlation: expect.objectContaining({
-            channelId: "C123",
-            threadTs: "1700000000.009",
-            actorId: "U123",
-          }),
           toolChannelId: "C999",
         }),
       }),
@@ -885,12 +888,9 @@ describe("oauth callback slack integration", () => {
     expect(response.status).toBe(200);
     expect(executeAgentRunMock).toHaveBeenCalledWith(
       expect.objectContaining({
+        conversationId,
+        turnId: newSessionId,
         input: expect.objectContaining({ messageText: "new request" }),
-        routing: expect.objectContaining({
-          correlation: expect.objectContaining({
-            turnId: newSessionId,
-          }),
-        }),
       }),
     );
     expect(getCapturedSlackApiCalls("chat.postMessage")).toEqual(

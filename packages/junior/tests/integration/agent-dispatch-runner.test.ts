@@ -35,7 +35,10 @@ import {
   getCapturedSlackApiCalls,
   queueSlackApiResponse,
 } from "../msw/handlers/slack-api";
-import { flattenAgentRunRequestForTest } from "../fixtures/agent-runner";
+import {
+  flattenAgentRunRequestForTest,
+  scriptedAssistantMessageRunner,
+} from "../fixtures/agent-runner";
 
 vi.hoisted(() => {
   process.env.JUNIOR_STATE_ADAPTER = "memory";
@@ -61,11 +64,6 @@ function zeroUsage() {
 function createReply(): AgentRunResult {
   return {
     text: "Dispatch delivered.",
-    deliveryMode: "thread",
-    deliveryPlan: {
-      mode: "thread",
-      postThreadText: true,
-    },
     diagnostics: {
       assistantMessageCount: 1,
       durationMs: 1234,
@@ -94,6 +92,17 @@ function createReply(): AgentRunResult {
       },
     ],
   };
+}
+
+async function deliverCompletedReply(
+  request: Parameters<AgentRunner["run"]>[0],
+  reply = createReply(),
+) {
+  if (!request.delivery) {
+    throw new Error("dispatch test runner requires assistant delivery");
+  }
+  await request.delivery.onAssistantMessage({ text: reply.text });
+  return completedAgentRun(reply);
 }
 
 function failedDispatchPiMessages(): PiMessage[] {
@@ -180,6 +189,55 @@ describe("agent dispatch runner", () => {
     delete process.env.JUNIOR_SECRET;
   });
 
+  it("delivers and persists completed dispatch assistant messages in order", async () => {
+    queueSlackApiResponse("chat.postMessage", {
+      body: chatPostMessageOk({ channel: "C123", ts: "1700000000.000010" }),
+    });
+    queueSlackApiResponse("chat.postMessage", {
+      body: chatPostMessageOk({ channel: "C123", ts: "1700000000.000011" }),
+    });
+    const created = await createOrGetDispatch({
+      plugin: "scheduler",
+      nowMs: Date.parse("2026-05-26T12:00:00.000Z"),
+      options: {
+        idempotencyKey: "assistant-message-order",
+        destination: slackAddress(),
+        destinationVisibility: "public",
+        input: "Run the scheduled task.",
+        source: slackSource(),
+      },
+    });
+
+    await runAgentDispatchSlice(
+      { id: created.record.id, expectedVersion: created.record.version },
+      {
+        agentRunner: scriptedAssistantMessageRunner({
+          messages: [
+            { text: "Starting now." },
+            { text: "Dispatch delivered." },
+          ],
+          result: createReply(),
+        }),
+      },
+    );
+
+    expect(
+      getCapturedSlackApiCalls("chat.postMessage").map(
+        (call) => call.params.text,
+      ),
+    ).toEqual(["Starting now.", "Dispatch delivered."]);
+    const conversationId = getDispatchConversationId(created.record);
+    const conversation = coerceThreadConversationState(
+      await getPersistedThreadState(conversationId),
+    );
+    await hydrateConversationMessages({ conversation, conversationId });
+    expect(
+      conversation.messages
+        .filter((message) => message.role === "assistant")
+        .map((message) => message.text),
+    ).toEqual(["Starting now.", "Dispatch delivered."]);
+  });
+
   it("runs a system dispatch and persists Slack delivery", async () => {
     queueSlackApiResponse("chat.postMessage", {
       body: chatPostMessageOk({
@@ -213,9 +271,11 @@ describe("agent dispatch runner", () => {
         metadata: { runId: "run-1" },
         plugin: "scheduler",
       });
-      expect(context.correlation).toMatchObject({
-        conversationId: dispatchConversationId,
-        threadId: dispatchConversationId,
+      expect(context.conversationId).toBe(dispatchConversationId);
+      expect(context.turnId).toBeTruthy();
+      expect(context.runId).toBe(created.record.id);
+      expect(context.destination).toEqual({
+        platform: "slack",
         channelId: "C123",
         teamId: "T123",
       });
@@ -225,7 +285,7 @@ describe("agent dispatch runner", () => {
       expect(context.sandboxTracePropagation).toEqual({
         domains: ["*.sentry.io"],
       });
-      return completedAgentRun(createReply());
+      return await deliverCompletedReply(request);
     });
     const scheduleSessionCompletedPluginTasks = vi.fn(async () => undefined);
 
@@ -271,7 +331,7 @@ describe("agent dispatch runner", () => {
           }),
         }),
         expect.objectContaining({
-          id: `dispatch:${created.record.id}:assistant`,
+          id: `dispatch:${created.record.id}:assistant:1`,
           meta: expect.objectContaining({
             slackTs: "1700000000.000001",
             replied: true,
@@ -358,7 +418,7 @@ describe("agent dispatch runner", () => {
       const context = flattenAgentRunRequestForTest(request);
       expect(context.conversationContext).toBeUndefined();
       expect(context.piMessages).toEqual([]);
-      return completedAgentRun(createReply());
+      return await deliverCompletedReply(request);
     });
 
     await runAgentDispatchSlice(
@@ -392,7 +452,7 @@ describe("agent dispatch runner", () => {
           id: `dispatch:${created.record.id}:user`,
         }),
         expect.objectContaining({
-          id: `dispatch:${created.record.id}:assistant`,
+          id: `dispatch:${created.record.id}:assistant:1`,
         }),
       ]),
     );
@@ -424,10 +484,6 @@ describe("agent dispatch runner", () => {
             completedAgentRun({
               ...sideEffectReply,
               text: "",
-              deliveryPlan: {
-                mode: "thread",
-                postThreadText: false,
-              },
               diagnostics: {
                 ...sideEffectReply.diagnostics,
                 toolCalls: ["addReaction"],
@@ -457,6 +513,14 @@ describe("agent dispatch runner", () => {
         (message) => message.role === "assistant",
       ),
     ).toBeUndefined();
+    const lifecycle = (
+      await getConversationEventStore().loadHistory(dispatchConversationId)
+    ).filter((event) => event.data.type.startsWith("turn_"));
+    expect(lifecycle.at(-1)?.data).toMatchObject({
+      type: "turn_completed",
+      turnId: `dispatch:${created.record.id}`,
+      outcome: "no_reply",
+    });
   });
 
   it("preserves task-scoped creator credentials across dispatch slices", async () => {
@@ -494,7 +558,7 @@ describe("agent dispatch runner", () => {
             },
           },
         });
-        return completedAgentRun(createReply());
+        return await deliverCompletedReply(request);
       });
 
     await runAgentDispatchSlice(
@@ -568,7 +632,7 @@ describe("agent dispatch runner", () => {
         },
       });
       expect(context.authorizationFlowMode).toBe("disabled");
-      return completedAgentRun(createReply());
+      return await deliverCompletedReply(request);
     });
 
     await runAgentDispatchSlice(
@@ -622,7 +686,7 @@ describe("agent dispatch runner", () => {
         },
       });
       expect(context.authorizationFlowMode).toBe("disabled");
-      return completedAgentRun(createReply());
+      return await deliverCompletedReply(request);
     });
 
     await runAgentDispatchSlice(
@@ -676,7 +740,7 @@ describe("agent dispatch runner", () => {
           expectedVersion: created.record.version,
         },
         {
-          agentRunner: { run: async () => completedAgentRun(createReply()) },
+          agentRunner: { run: deliverCompletedReply },
         },
       );
     } finally {
@@ -794,7 +858,7 @@ describe("agent dispatch runner", () => {
         id: created.record.id,
         expectedVersion: created.record.version,
       },
-      { agentRunner: { run: async () => completedAgentRun(createReply()) } },
+      { agentRunner: { run: deliverCompletedReply } },
     );
     await expect(getDispatchRecord(created.record.id)).resolves.toMatchObject({
       status: "completed",

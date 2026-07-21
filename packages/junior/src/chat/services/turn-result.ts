@@ -1,13 +1,9 @@
 import { logInfo, logWarn, summarizeMessageText } from "@/chat/logging";
 import type { LogContext } from "@/chat/logging";
-import {
-  containsNoReplyMarker,
-  isNoReplyMarker,
-} from "@/chat/no-reply";
+import { containsNoReplyMarker, isNoReplyMarker } from "@/chat/no-reply";
 import type { PiMessage } from "@/chat/pi/messages";
 import type { TurnReasoningSelection } from "@/chat/services/turn-reasoning-level";
 import type { AgentTurnUsage } from "@/chat/usage";
-import type { ReplyDeliveryPlan } from "@/chat/services/reply-delivery-plan";
 import type { ThreadArtifactsState } from "@/chat/state/artifacts";
 import {
   extractAssistantText,
@@ -90,13 +86,9 @@ function isRawToolPayloadResponse(text: string): boolean {
   if (isToolPayloadShape(parsed)) {
     return true;
   }
-
-  const compact = text.replace(/\s+/g, " ");
-  return /"type"\s*:\s*"tool[-_](use|call|result|error)"/i.test(compact);
+  return false;
 }
 
-const POST_CANVAS_REPLY_MAX_CHARS = 700;
-const POST_CANVAS_REPLY_MAX_LINES = 8;
 const THINKING_XML_BLOCK_PATTERN =
   /[ \t]*<thinking\b[^>]*>[\s\S]*?<\/thinking>[ \t]*(?:\r?\n)?/gi;
 const FENCED_CODE_BLOCK_PATTERN = /```[\s\S]*?```/g;
@@ -118,10 +110,9 @@ export interface AgentTurnDiagnostics {
 }
 
 export interface AgentRunResult {
+  /** Sanitized terminal text for diagnostics and failure fallback, not success delivery. */
   text: string;
   artifactStatePatch?: Partial<ThreadArtifactsState>;
-  deliveryPlan?: ReplyDeliveryPlan;
-  deliveryMode?: "thread" | "channel_only";
   sandboxId?: string;
   sandboxDependencyProfileHash?: string;
   piMessages?: PiMessage[];
@@ -142,40 +133,8 @@ export interface TurnResultInput {
   spanContext: LogContext;
   usage?: AgentTurnUsage;
   reasoningSelection: TurnReasoningSelection;
-  correlation?: {
-    threadId?: string;
-    actorId?: string;
-    channelId?: string;
-    runId?: string;
-  };
   assistantUserName?: string;
   modelId: string;
-}
-
-function isVerbosePostCanvasReply(text: string): boolean {
-  const lines = text.split(/\r?\n/).filter((line) => line.trim().length > 0);
-  return (
-    text.length > POST_CANVAS_REPLY_MAX_CHARS ||
-    lines.length > POST_CANVAS_REPLY_MAX_LINES
-  );
-}
-
-function getCreatedCanvasUrl(
-  artifactStatePatch: Partial<ThreadArtifactsState>,
-): string | undefined {
-  if (artifactStatePatch.lastCanvasUrl) {
-    return artifactStatePatch.lastCanvasUrl;
-  }
-  return artifactStatePatch.recentCanvases?.find((canvas) => canvas.url)?.url;
-}
-
-function buildBriefPostCanvasReply(
-  artifactStatePatch: Partial<ThreadArtifactsState>,
-): string {
-  const canvasUrl = getCreatedCanvasUrl(artifactStatePatch);
-  return canvasUrl
-    ? `I created a canvas with the full reference: ${canvasUrl}`
-    : "I created a canvas with the full reference.";
 }
 
 function stripThinkingXmlBlocks(text: string): string {
@@ -196,6 +155,31 @@ function stripThinkingXmlBlocks(text: string): string {
   return result;
 }
 
+function getVisibleAssistantText(rawText: string): string | undefined {
+  const text = stripThinkingXmlBlocks(rawText).trim();
+  if (
+    !text ||
+    isNoReplyMarker(text) ||
+    containsNoReplyMarker(text) ||
+    isRawToolPayloadResponse(text)
+  ) {
+    return undefined;
+  }
+  return text;
+}
+
+/** Return the destination-visible text from one completed assistant message. */
+export function getAssistantMessageText(
+  message: Parameters<typeof extractAssistantText>[0],
+): string | undefined {
+  const text = getVisibleAssistantText(extractAssistantText(message));
+  if (!text) {
+    return undefined;
+  }
+  const hasToolCall = message.content.some((part) => part.type === "toolCall");
+  return !hasToolCall && isExecutionEscapeResponse(text) ? undefined : text;
+}
+
 /** Process raw agent messages into a structured AgentRunResult. */
 export function buildTurnResult(input: TurnResultInput): AgentRunResult {
   const {
@@ -209,7 +193,6 @@ export function buildTurnResult(input: TurnResultInput): AgentRunResult {
     spanContext,
     usage,
     reasoningSelection,
-    correlation,
     assistantUserName,
     modelId,
   } = input;
@@ -227,23 +210,24 @@ export function buildTurnResult(input: TurnResultInput): AgentRunResult {
   const mixedNoReplyMarker =
     !exactNoReplyMarker && containsNoReplyMarker(rawPrimaryText);
   const noReplyRequested = exactNoReplyMarker || mixedNoReplyMarker;
-  const primaryText = noReplyRequested ? "" : rawPrimaryText;
+  const primaryText = noReplyRequested
+    ? ""
+    : terminalAssistantMessages
+        .map((message) => getAssistantMessageText(message))
+        .filter((text): text is string => Boolean(text))
+        .join("\n\n");
 
   const toolErrorCount = toolResults.filter((result) => result.isError).length;
-  const successfulToolResults = toolResults.filter(
-    (result) => !isToolResultError(result),
+  const reactionPerformed = toolResults.some(
+    (result) =>
+      !isToolResultError(result) &&
+      normalizeToolNameFromResult(result) === "addReaction",
   );
-  const successfulToolNames = new Set(
-    successfulToolResults
-      .map((result) => normalizeToolNameFromResult(result))
-      .filter((value): value is string => Boolean(value)),
-  );
-  const canvasCreated = successfulToolNames.has("slackCanvasCreate");
-  const reactionPerformed = successfulToolNames.has("addReaction");
-  const silentCompletionSuccess = noReplyRequested;
-  const baseDeliveryPlan: ReplyDeliveryPlan = {
-    mode: "thread",
-    postThreadText: true,
+  const completedWithoutTerminalText = noReplyRequested;
+  const resultLogContext = {
+    ...spanContext,
+    assistantUserName,
+    modelId,
   };
   const lastAssistant = terminalAssistantMessages.at(-1) as
     | { stopReason?: unknown; errorMessage?: unknown }
@@ -260,14 +244,7 @@ export function buildTurnResult(input: TurnResultInput): AgentRunResult {
 
   if (exactNoReplyMarker) {
     const markerCategory = reactionPerformed ? "reaction" : "none";
-    const markerContext = {
-      slackThreadId: correlation?.threadId,
-      slackUserId: correlation?.actorId,
-      slackChannelId: correlation?.channelId,
-      runId: correlation?.runId,
-      assistantUserName,
-      modelId,
-    };
+    const markerContext = resultLogContext;
     const markerAttributes = {
       "app.ai.no_reply_marker": true,
       "app.ai.no_reply_marker_category": markerCategory,
@@ -285,14 +262,7 @@ export function buildTurnResult(input: TurnResultInput): AgentRunResult {
   } else if (mixedNoReplyMarker) {
     logWarn(
       "ai_no_reply_marker_mixed_text",
-      {
-        slackThreadId: correlation?.threadId,
-        slackUserId: correlation?.actorId,
-        slackChannelId: correlation?.channelId,
-        runId: correlation?.runId,
-        assistantUserName,
-        modelId,
-      },
+      resultLogContext,
       {
         "app.ai.no_reply_marker": true,
         "app.ai.no_reply_marker_mode": "mixed",
@@ -301,17 +271,10 @@ export function buildTurnResult(input: TurnResultInput): AgentRunResult {
     );
   }
 
-  if (!primaryText && !silentCompletionSuccess && !isProviderError) {
+  if (!primaryText && !completedWithoutTerminalText && !isProviderError) {
     logWarn(
       "ai_model_response_empty",
-      {
-        slackThreadId: correlation?.threadId,
-        slackUserId: correlation?.actorId,
-        slackChannelId: correlation?.channelId,
-        runId: correlation?.runId,
-        assistantUserName,
-        modelId,
-      },
+      resultLogContext,
       {
         "app.ai.tool_results": toolResults.length,
         "app.ai.tool_error_results": toolErrorCount,
@@ -325,32 +288,17 @@ export function buildTurnResult(input: TurnResultInput): AgentRunResult {
   let outcome: AgentTurnDiagnostics["outcome"];
   if (isProviderError) {
     outcome = "provider_error";
-  } else if (primaryText || silentCompletionSuccess) {
+  } else if (primaryText || completedWithoutTerminalText) {
     outcome = "success";
   } else {
     outcome = "execution_failure";
   }
-  const rawResponseText = primaryText;
-  const responseText =
-    canvasCreated && isVerbosePostCanvasReply(rawResponseText)
-      ? buildBriefPostCanvasReply(artifactStatePatch)
-      : rawResponseText;
-  const escapedOrRawPayload =
-    Boolean(primaryText) &&
-    (isExecutionEscapeResponse(primaryText) ||
-      isRawToolPayloadResponse(primaryText));
-  const resolvedText = escapedOrRawPayload ? "" : responseText;
-  const resolvedOutcome: AgentTurnDiagnostics["outcome"] = escapedOrRawPayload
+  const rejectedPrimaryText = Boolean(
+    rawPrimaryText && !noReplyRequested && !primaryText,
+  );
+  const resolvedOutcome: AgentTurnDiagnostics["outcome"] = rejectedPrimaryText
     ? "execution_failure"
     : outcome;
-  const deliveryPlan =
-    resolvedOutcome === "success" && !resolvedText
-      ? {
-          ...baseDeliveryPlan,
-          postThreadText: false,
-        }
-      : baseDeliveryPlan;
-  const deliveryMode: "thread" | "channel_only" = deliveryPlan.mode;
 
   if (shouldTrace) {
     logInfo(
@@ -358,8 +306,8 @@ export function buildTurnResult(input: TurnResultInput): AgentRunResult {
       spanContext,
       {
         "app.message.kind": "assistant_outbound",
-        "app.message.length": resolvedText.length,
-        "app.message.output": summarizeMessageText(resolvedText),
+        "app.message.length": primaryText.length,
+        "app.message.output": summarizeMessageText(primaryText),
         "app.ai.outcome": resolvedOutcome,
         "app.ai.assistant_messages": assistantMessages.length,
         ...(stopReason
@@ -387,13 +335,11 @@ export function buildTurnResult(input: TurnResultInput): AgentRunResult {
   };
 
   return {
-    text: resolvedText,
+    text: primaryText,
     artifactStatePatch:
       Object.keys(artifactStatePatch).length > 0
         ? artifactStatePatch
         : undefined,
-    deliveryPlan,
-    deliveryMode,
     sandboxId,
     sandboxDependencyProfileHash,
     piMessages: input.piMessages,

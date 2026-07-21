@@ -11,9 +11,13 @@ import {
   createTestThread,
 } from "../../fixtures/slack-harness";
 import { completedAgentRun } from "@/chat/runtime/agent-run-outcome";
+import type { AgentRunner } from "@/chat/runtime/agent-runner";
 import { hydrateConversationMessages } from "@/chat/conversations/messages";
 import { coerceThreadConversationState } from "@/chat/state/conversation";
-import { flattenAgentRunRequestForTest } from "../../fixtures/agent-runner";
+import {
+  deliverAssistantMessagesForTest,
+  flattenAgentRunRequestForTest,
+} from "../../fixtures/agent-runner";
 
 interface FakeReplyCall {
   prompt: string;
@@ -35,7 +39,12 @@ function toPostedText(value: unknown): string {
   return String(value);
 }
 
-function completedReply(text: string, toolCalls: string[] = []) {
+async function completedReply(
+  request: Parameters<AgentRunner["run"]>[0],
+  text: string,
+  toolCalls: string[] = [],
+) {
+  await deliverAssistantMessagesForTest(request, [{ text }]);
   return completedAgentRun({
     text,
     diagnostics: {
@@ -62,7 +71,8 @@ describe("Slack behavior: new mention", () => {
               const prompt = request.input.messageText;
 
               fakeReplyCalls.push({ prompt });
-              return completedReply(
+              return await completedReply(
+                request,
                 "Acknowledged. Rollback is complete and error rates are stable.",
               );
             },
@@ -108,7 +118,7 @@ describe("Slack behavior: new mention", () => {
               const context = flattenAgentRunRequestForTest(request);
 
               fakeReplyCalls.push({ prompt, piMessages: context.piMessages });
-              return completedReply("Handled both updates.");
+              return await completedReply(request, "Handled both updates.");
             },
           },
         },
@@ -197,7 +207,10 @@ describe("Slack behavior: new mention", () => {
                 attachmentText: attachments[0]?.data?.toString("utf8"),
                 piMessages: context?.piMessages,
               });
-              return completedReply("Handled queued attachment.");
+              return await completedReply(
+                request,
+                "Handled queued attachment.",
+              );
             },
           },
         },
@@ -267,7 +280,7 @@ describe("Slack behavior: new mention", () => {
               };
 
               await context?.onStatus?.(makeAssistantStatus("running", "bash"));
-              return completedReply("Done.", ["bash"]);
+              return await completedReply(request, "Done.", ["bash"]);
             },
           },
         },
@@ -333,52 +346,5 @@ describe("Slack behavior: new mention", () => {
       text: "",
       loadingMessages: undefined,
     });
-  });
-
-  it("suppresses thread reply when assistant marks delivery as channel_only", async () => {
-    const { slackRuntime } = createTestChatRuntime({
-      services: {
-        replyExecutor: {
-          agentRunner: {
-            run: async () => {
-              return completedAgentRun({
-                text: "Posted in channel.",
-                deliveryMode: "channel_only" as const,
-                diagnostics: {
-                  assistantMessageCount: 1,
-                  modelId: "fake-agent-model",
-                  outcome: "success" as const,
-                  toolCalls: ["sendMessage"],
-                  toolErrorCount: 0,
-                  toolResultCount: 1,
-                  usedPrimaryText: true,
-                },
-              });
-            },
-          },
-        },
-      },
-    });
-
-    const thread = createTestThread({
-      id: "slack:C0BEHAVIOR:1700005678.000",
-    });
-    const message = createTestMessage({
-      id: "m-behavior-2",
-      text: "<@U0APP> say hello to the channel",
-      isMention: true,
-      threadId: thread.id,
-      author: {
-        userId: "U0TESTER",
-        userName: "tester",
-      },
-    });
-
-    await slackRuntime.handleNewMention(thread, message, {
-      destination: createTestDestination(thread),
-    });
-
-    expect(thread.subscribeCalls).toBe(1);
-    expect(thread.posts).toHaveLength(0);
   });
 });

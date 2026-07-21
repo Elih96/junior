@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   buildConversationContext,
   getThreadTitleSourceMessage,
+  turnHasReply,
 } from "@/chat/services/conversation-memory";
 import { coerceThreadConversationState } from "@/chat/state/conversation";
+import { buildDeterministicAssistantMessageId } from "@/chat/state/turn-id";
 
 describe("conversation memory title source", () => {
   it("selects the earliest human message known for the thread", () => {
@@ -161,5 +163,23 @@ describe("buildConversationContext", () => {
     expect(context).toContain('actor_id="U039RR91S"');
     expect(context).toContain("[user] user: hello");
     expect(context).not.toContain("@U039RR91S");
+  });
+});
+
+describe("turnHasReply", () => {
+  it("recognizes delivered assistant message ids", () => {
+    const conversation = coerceThreadConversationState({});
+    conversation.messages = [
+      {
+        id: buildDeterministicAssistantMessageId("turn-1"),
+        role: "assistant",
+        text: "Working on it.",
+        createdAtMs: 1,
+      },
+    ];
+
+    expect(turnHasReply(conversation, "turn-1")).toBe(true);
+    expect(turnHasReply(conversation, "turn-2")).toBe(false);
+    expect(turnHasReply(conversation, "turn-3")).toBe(false);
   });
 });

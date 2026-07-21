@@ -148,6 +148,51 @@ export function upsertConversationMessage(
   return message.id;
 }
 
+/** Record one assistant message after its destination accepts it. */
+export function recordDeliveredAssistantMessage(args: {
+  conversation: ThreadConversationState;
+  sessionId: string;
+  text: string;
+  userMessageId?: string;
+}): string {
+  const prefix = `${args.sessionId}:assistant:`;
+  const ordinal =
+    args.conversation.messages.filter((message) =>
+      message.id.startsWith(prefix),
+    ).length + 1;
+  const messageId = `${prefix}${ordinal}`;
+  markConversationMessage(args.conversation, args.userMessageId, {
+    replied: true,
+    skippedReason: undefined,
+  });
+  upsertConversationMessage(args.conversation, {
+    id: messageId,
+    role: "assistant",
+    text: normalizeConversationText(args.text),
+    createdAtMs: Date.now(),
+    author: {
+      userName: botConfig.userName,
+      isBot: true,
+    },
+    meta: {
+      replied: true,
+    },
+  });
+  return messageId;
+}
+
+/** Return whether a turn already has a destination-accepted assistant reply. */
+export function turnHasReply(
+  conversation: ThreadConversationState,
+  turnId: string,
+): boolean {
+  const assistantPrefix = `${turnId}:assistant:`;
+  return conversation.messages.some(
+    (message) =>
+      message.role === "assistant" && message.id.startsWith(assistantPrefix),
+  );
+}
+
 export function markConversationMessage(
   conversation: ThreadConversationState,
   messageId: string | undefined,

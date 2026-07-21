@@ -1,4 +1,3 @@
-import { botConfig } from "@/chat/config";
 import type { AgentRunResult } from "@/chat/services/turn-result";
 import type { ThreadConversationState } from "@/chat/state/conversation";
 import type { ThreadArtifactsState } from "@/chat/state/artifacts";
@@ -9,14 +8,11 @@ import {
 import { markTurnCompleted } from "@/chat/runtime/turn";
 import {
   markConversationMessage,
-  normalizeConversationText,
-  upsertConversationMessage,
   updateConversationStats,
 } from "@/chat/services/conversation-memory";
 import { clearPendingAuth } from "@/chat/services/pending-auth";
-import { buildDeterministicAssistantMessageId } from "@/chat/state/turn-id";
 
-/** Build the canonical thread-state patch after final Slack delivery succeeds. */
+/** Build state after destination delivery or intentional no-reply completion. */
 export function buildDeliveredTurnStatePatch(args: {
   artifactStatePatch?: Partial<ThreadArtifactsState>;
   artifacts: ThreadArtifactsState;
@@ -36,28 +32,10 @@ export function buildDeliveredTurnStatePatch(args: {
       : undefined;
 
   clearPendingAuth(conversation, args.sessionId);
-  const assistantText =
-    normalizeConversationText(args.reply.text) || "[empty response]";
   markConversationMessage(conversation, args.userMessageId, {
     replied: true,
     skippedReason: undefined,
   });
-  const intentionalSilence = args.reply.deliveryPlan?.postThreadText === false;
-  if (!intentionalSilence) {
-    upsertConversationMessage(conversation, {
-      id: buildDeterministicAssistantMessageId(args.sessionId),
-      role: "assistant",
-      text: assistantText,
-      createdAtMs: Date.now(),
-      author: {
-        userName: botConfig.userName,
-        isBot: true,
-      },
-      meta: {
-        replied: true,
-      },
-    });
-  }
   markTurnCompleted({
     conversation,
     nowMs: Date.now(),

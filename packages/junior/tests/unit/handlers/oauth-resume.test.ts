@@ -3,6 +3,11 @@ import { createSlackSource } from "@sentry/junior-plugin-api";
 import { disconnectStateAdapter, getStateAdapter } from "@/chat/state/adapter";
 import { setPlugins } from "@/chat/plugins/agent-hooks";
 import { completedAgentRun } from "@/chat/runtime/agent-run-outcome";
+import { persistThreadStateById } from "@/chat/runtime/thread-state";
+import { coerceThreadConversationState } from "@/chat/state/conversation";
+import { buildDeterministicTurnId } from "@/chat/runtime/turn";
+import { persistConversationMessages } from "@/chat/conversations/messages";
+import { deliverAssistantMessagesForTest } from "../../fixtures/agent-runner";
 
 const { postMessageMock, setStatusMock, uploadFilesToThreadMock } = vi.hoisted(
   () => ({
@@ -65,10 +70,7 @@ vi.mock("@/chat/slack/outbound", () => ({
   uploadFilesToThread: uploadFilesToThreadMock,
 }));
 
-import {
-  resumeAuthorizedRequest,
-  resumeSlackTurn,
-} from "@/chat/runtime/slack-resume";
+import { resumeSlackTurn } from "@/chat/runtime/slack-resume";
 
 const TEST_SLACK_DESTINATION = {
   platform: "slack",
@@ -86,9 +88,30 @@ function testSlackSource(threadTs: string) {
   });
 }
 
-describe("resumeAuthorizedRequest", () => {
+async function seedResumedTurn(threadTs: string) {
+  const visibleConversationId = `slack:C-test:${threadTs}`;
+  const conversationId = `slack:T-test:C-test:${threadTs}`;
+  const userMessageId = threadTs;
+  const conversation = coerceThreadConversationState({});
+  conversation.messages.push({
+    id: userMessageId,
+    role: "user",
+    text: "continue this turn",
+    createdAtMs: 1,
+    author: { userId: "U-test", userName: "test" },
+    meta: { slackTs: threadTs },
+  });
+  await persistThreadStateById(visibleConversationId, { conversation });
+  await persistConversationMessages({ conversation, conversationId });
+  return {
+    conversationId,
+    turnId: buildDeterministicTurnId(userMessageId),
+    visibleConversationId,
+  };
+}
+
+describe("resumeSlackTurn", () => {
   beforeEach(async () => {
-    vi.useFakeTimers();
     postMessageMock.mockReset();
     setStatusMock.mockReset();
     uploadFilesToThreadMock.mockReset();
@@ -99,64 +122,20 @@ describe("resumeAuthorizedRequest", () => {
   });
 
   afterEach(async () => {
-    vi.useRealTimers();
     setPlugins([]);
     await disconnectStateAdapter();
-  });
-
-  it("runs failure handling when resumed reply generation exceeds the configured timeout", async () => {
-    const onFailure = vi.fn(async () => undefined);
-
-    const resumePromise = resumeAuthorizedRequest({
-      messageText: "tell me the saved deadline",
-      channelId: "C-test",
-      threadTs: "1700000000.0001",
-      connectedText: "connected",
-      replyContext: {
-        routing: {
-          credentialContext: {
-            actor: { type: "user", userId: "U-test" },
-          },
-          destination: TEST_SLACK_DESTINATION,
-          source: testSlackSource("1700000000.0001"),
-          actor: { platform: "slack", teamId: "T-test", userId: "U-test" },
-        },
-      },
-      agentRunner: { run: () => new Promise<never>(() => {}) },
-      replyTimeoutMs: 10,
-      onFailure,
-    });
-
-    await vi.advanceTimersByTimeAsync(10);
-    await resumePromise;
-
-    expect(onFailure).toHaveBeenCalledTimes(1);
-    expect(postMessageMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        channel: "C-test",
-        thread_ts: "1700000000.0001",
-        text: "connected",
-      }),
-    );
-    expect(postMessageMock).toHaveBeenLastCalledWith(
-      expect.objectContaining({
-        channel: "C-test",
-        thread_ts: "1700000000.0001",
-        text: expect.stringContaining(
-          "I ran into an internal error while processing that. Reference: `event_id=",
-        ),
-      }),
-    );
   });
 
   it("persists failure state before posting the failure reply", async () => {
     const onFailure = vi.fn(async () => undefined);
 
-    await resumeAuthorizedRequest({
+    await resumeSlackTurn({
       messageText: "tell me the saved deadline",
+      conversationId: "slack:C-test:1700000000.0004",
+      turnId: "turn-failure",
       channelId: "C-test",
       threadTs: "1700000000.0004",
-      connectedText: "connected",
+      initialText: "connected",
       replyContext: {
         routing: {
           credentialContext: {
@@ -196,10 +175,13 @@ describe("resumeAuthorizedRequest", () => {
 
   it("does not post a failure reply when completion persistence fails after final delivery", async () => {
     const onFailure = vi.fn(async () => undefined);
+    const resumed = await seedResumedTurn("1700000000.0005");
 
     await expect(
       resumeSlackTurn({
         messageText: "continue this turn",
+        conversationId: "slack:T-test:C-test:1700000000.0005",
+        turnId: resumed.turnId,
         channelId: "C-test",
         threadTs: "1700000000.0005",
         replyContext: {
@@ -217,8 +199,11 @@ describe("resumeAuthorizedRequest", () => {
           },
         },
         agentRunner: {
-          run: async () =>
-            completedAgentRun({
+          run: async (request) => {
+            await deliverAssistantMessagesForTest(request, [
+              { text: "Final resumed answer" },
+            ]);
+            return completedAgentRun({
               text: "Final resumed answer",
               diagnostics: {
                 assistantMessageCount: 1,
@@ -229,7 +214,8 @@ describe("resumeAuthorizedRequest", () => {
                 toolResultCount: 0,
                 usedPrimaryText: true,
               },
-            }),
+            });
+          },
         },
         onSuccess: async () => {
           throw new Error("state write failed");
@@ -259,9 +245,12 @@ describe("resumeAuthorizedRequest", () => {
 
   it("schedules plugin tasks after a successful resumed turn", async () => {
     const scheduleSessionCompletedPluginTasks = vi.fn(async () => undefined);
+    const resumed = await seedResumedTurn("1700000000.0006");
 
     await resumeSlackTurn({
       messageText: "continue this turn",
+      conversationId: "slack:T-test:C-test:1700000000.0006",
+      turnId: resumed.turnId,
       channelId: "C-test",
       threadTs: "1700000000.0006",
       replyContext: {
@@ -269,18 +258,17 @@ describe("resumeAuthorizedRequest", () => {
           credentialContext: {
             actor: { type: "user", userId: "U-test" },
           },
-          correlation: {
-            conversationId: "slack:T-test:C-test:1700000000.0006",
-            turnId: "turn_1700000000_0006",
-          },
           destination: TEST_SLACK_DESTINATION,
           source: testSlackSource("1700000000.0006"),
           actor: { platform: "slack", teamId: "T-test", userId: "U-test" },
         },
       },
       agentRunner: {
-        run: async () =>
-          completedAgentRun({
+        run: async (request) => {
+          await deliverAssistantMessagesForTest(request, [
+            { text: "Final resumed answer" },
+          ]);
+          return completedAgentRun({
             text: "Final resumed answer",
             diagnostics: {
               assistantMessageCount: 1,
@@ -291,14 +279,15 @@ describe("resumeAuthorizedRequest", () => {
               toolResultCount: 0,
               usedPrimaryText: true,
             },
-          }),
+          });
+        },
       },
       scheduleSessionCompletedPluginTasks,
     });
 
     expect(scheduleSessionCompletedPluginTasks).toHaveBeenCalledWith({
       conversationId: "slack:T-test:C-test:1700000000.0006",
-      sessionId: "turn_1700000000_0006",
+      sessionId: resumed.turnId,
     });
   });
 
@@ -318,6 +307,8 @@ describe("resumeAuthorizedRequest", () => {
 
     await resumeSlackTurn({
       messageText: "continue this turn",
+      conversationId: "slack:C-test:1700000000.0002",
+      turnId: "turn-timeout-pause",
       channelId: "C-test",
       threadTs: "1700000000.0002",
       replyContext: {
@@ -348,6 +339,8 @@ describe("resumeAuthorizedRequest", () => {
 
     await resumeSlackTurn({
       messageText: "continue this turn",
+      conversationId: "slack:C-test:1700000000.0003",
+      turnId: "turn-timeout-pause-failure",
       channelId: "C-test",
       threadTs: "1700000000.0003",
       replyContext: {

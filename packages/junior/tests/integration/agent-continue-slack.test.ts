@@ -14,6 +14,7 @@ import type { AgentRunRequest } from "@/chat/agent/request";
 import type { SandboxWorkspace } from "@/chat/sandbox/workspace";
 import { createTools } from "@/chat/tools";
 import type { ToolRuntimeContext } from "@/chat/tools/types";
+import { deliverAssistantMessagesForTest } from "../fixtures/agent-runner";
 
 const executeAgentRunMock = vi.fn();
 
@@ -81,7 +82,7 @@ function createToolContext(
   return {
     artifactState: request.state?.artifactState,
     configuration: request.policy?.configuration,
-    conversationId: request.routing.correlation?.conversationId,
+    conversationId: request.conversationId,
     destination: request.routing.destination,
     egress: {} as ToolRuntimeContext["egress"],
     actor:
@@ -142,12 +143,15 @@ describe("agent continuation Slack integration", () => {
   beforeEach(async () => {
     queue = createConversationWorkQueueTestAdapter();
     executeAgentRunMock.mockReset();
-    executeAgentRunMock.mockResolvedValue(
-      completedAgentRun({
+    executeAgentRunMock.mockImplementation(async (request) => {
+      await deliverAssistantMessagesForTest(request, [
+        { text: "Final resumed answer" },
+      ]);
+      return completedAgentRun({
         text: "Final resumed answer",
         diagnostics: makeDiagnostics(),
-      }),
-    );
+      });
+    });
     resetSlackApiMockState();
     process.env = {
       ...ORIGINAL_ENV,
@@ -903,9 +907,6 @@ describe("agent continuation Slack integration", () => {
           },
           destination: SLACK_DESTINATION,
           source: storedSource,
-          correlation: expect.not.objectContaining({
-            actorId: expect.anything(),
-          }),
         }),
       }),
     );
@@ -1207,8 +1208,11 @@ describe("agent continuation Slack integration", () => {
     // exactly one visible reply and only then a delivered/completed session.
     const conversationId = "slack:C123:1712345.0008";
     const sessionId = "turn_msg_8";
-    executeAgentRunMock.mockResolvedValueOnce(
-      completedAgentRun({
+    executeAgentRunMock.mockImplementationOnce(async (request) => {
+      await deliverAssistantMessagesForTest(request, [
+        { text: "Final resumed answer" },
+      ]);
+      return completedAgentRun({
         text: "Final resumed answer",
         piMessages: [
           {
@@ -1223,8 +1227,8 @@ describe("agent continuation Slack integration", () => {
           },
         ] as any,
         diagnostics: makeDiagnostics(),
-      }),
-    );
+      });
+    });
     await turnSessionStoreModule.upsertAgentTurnSessionRecord({
       modelId: "test/model",
       conversationId,
@@ -1425,11 +1429,14 @@ describe("agent continuation Slack integration", () => {
           ReturnType<typeof turnSessionStoreModule.getAgentTurnSessionRecord>
         >
       | undefined;
-    executeAgentRunMock.mockImplementationOnce(async () => {
+    executeAgentRunMock.mockImplementationOnce(async (request) => {
       recoveredRecord = await turnSessionStoreModule.getAgentTurnSessionRecord(
         conversationId,
         sessionId,
       );
+      await deliverAssistantMessagesForTest(request, [
+        { text: "Handoff recovery completed." },
+      ]);
       return completedAgentRun({
         text: "Handoff recovery completed.",
         piMessages: [
@@ -1639,18 +1646,20 @@ describe("agent continuation Slack integration", () => {
           }),
         ),
       );
-      const sendMessage = tools.sendMessage;
-      if (!sendMessage?.execute) {
-        throw new Error("sendMessage tool missing from resumed Slack context");
+      const sendFiles = tools.sendFiles;
+      if (!sendFiles?.execute) {
+        throw new Error("sendFiles tool missing from resumed Slack context");
       }
-      await sendMessage.execute(
+      await sendFiles.execute(
         {
-          text: "Sharing the resumed image.",
           files: [{ path: "/tmp/resumed-image.png" }],
         },
         {} as never,
       );
 
+      await deliverAssistantMessagesForTest(request, [
+        { text: "Final resumed answer." },
+      ]);
       return completedAgentRun({
         text: "Final resumed answer.",
         diagnostics: makeDiagnostics(),
@@ -1717,7 +1726,6 @@ describe("agent continuation Slack integration", () => {
     ).toMatchObject({
       channel_id: "C123",
       thread_ts: "1712345.0003",
-      initial_comment: "Sharing the resumed image.",
     });
     expect(slackApiOutbox.calls("files.completeUploadExternal")).toHaveLength(
       1,

@@ -1,7 +1,7 @@
 # Chat Runtime
 
 `packages/junior/src/chat` turns source events into durable agent runs and
-delivers finalized replies. Code, runtime schemas, and tests are authoritative;
+delivers completed assistant messages. Code, runtime schemas, and tests are authoritative;
 this file records ownership boundaries that are difficult to infer from one
 file.
 
@@ -15,9 +15,10 @@ file.
 4. `runtime/` prepares and orchestrates the run; `agent/` owns Pi execution.
 5. Tools, plugins, credentials, sandbox, and MCP operate within harness-owned
    actor and destination context.
-6. `egress/` and provider adapters deliver the finalized reply.
-7. Successful delivery commits the visible assistant message and durable turn
-   outcome.
+6. `agent/` emits every completed visible assistant message through one awaited
+   delivery port; provider adapters deliver and record each message in order.
+7. The completed run result supplies diagnostics and artifacts; successful
+   delivery or intentional no-reply completion commits the durable turn outcome.
 
 The local CLI uses `local/runner.ts` directly rather than pretending to be a
 mailbox-backed provider.
@@ -27,7 +28,7 @@ mailbox-backed provider.
 - `app/`: composition root only.
 - `ingress/`: source parsing, classification, and routing.
 - `task-execution/`: mailbox, queue, lease, worker, and recovery.
-- `runtime/`: turn orchestration and destination-neutral delivery planning.
+- `runtime/`: turn orchestration and provider-neutral delivery callbacks.
 - `agent/` and `pi/`: model execution and Pi state conversion.
 - `services/`: consumer-owned domain decisions.
 - `state/` and `conversations/`: persistence by concern.
@@ -46,7 +47,7 @@ the production singleton.
 - **Run**: one bounded attempt to advance a turn; a turn may span resumed runs.
 - **Step**: one persisted agent-history entry.
 - **History replacement**: explicit agent-history reset after compaction or handoff.
-- **Reply**: finalized destination-visible assistant output.
+- **Reply**: one destination-visible assistant message owned by delivery code.
 - **Actor**: human or system principal associated with current work.
 - **Credential subject**: principal whose provider authority may be used.
 - **Destination**: platform location where output is delivered.
@@ -58,8 +59,8 @@ delegation without becoming the execution actor or a general task owner.
 
 ## Invariants
 
-- User-visible assistant text is delivered only after the run outcome is
-  finalized.
+- Each completed visible assistant message is delivered before the run advances;
+  assistant output handling settles before the turn is finalized.
 - Tool failures remain internal agent-loop data unless the final result exposes
   an appropriate diagnostic.
 - Durable state is committed before acknowledging queue work or yielding.

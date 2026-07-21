@@ -2,6 +2,7 @@ import { describeEval, toolCalls } from "vitest-evals";
 import { beforeAll, expect } from "vitest";
 import { NO_REPLY_MARKER } from "@/chat/no-reply";
 import {
+  assistantTextContent,
   hasImageAttachment,
   mention,
   rubric,
@@ -27,6 +28,9 @@ describeEval("Slack Message Delivery", slackEvals, (it) => {
       ],
     });
 
+    expect(toolCalls(result.session).map((call) => call.name)).toContain(
+      "addReaction",
+    );
     expect(visibleThreadReplies(result.session)).toEqual([]);
     expect(visibleAssistantText(result.session)).not.toContain(NO_REPLY_MARKER);
   });
@@ -51,10 +55,42 @@ describeEval("Slack Message Delivery", slackEvals, (it) => {
     });
 
     expect(toolCalls(result.session).map((call) => call.name)).not.toContain(
-      "sendMessage",
+      "sendFiles",
     );
     expect(visibleAssistantText(result.session)).not.toContain(NO_REPLY_MARKER);
     expect(visibleThreadReplies(result.session)).toHaveLength(1);
+  });
+
+  it("when a task needs a progress update, post complete messages rather than partial revisions", async ({
+    run,
+  }) => {
+    const result = await run({
+      initialEvents: [
+        mention(
+          "Tell me the current UTC time. Send a short update before you check, then give me the answer separately when you're done.",
+        ),
+      ],
+      requireSandboxReady: false,
+      criteria: rubric({
+        pass: [
+          "The assistant sends a distinct progress update before a separate completed summary.",
+          "Each visible assistant message reads as a complete message at that point in the work.",
+        ],
+        fail: [
+          "Do not expose token-by-token fragments, cumulative drafts, or repeated copies of the same reply.",
+        ],
+      }),
+    });
+
+    expect(
+      toolCalls(result.session).some((call) => call.name === "systemTime"),
+    ).toBe(true);
+    const replies = visibleThreadReplies(result.session);
+    expect(replies.length).toBeGreaterThanOrEqual(2);
+    const replyTexts = replies.map((reply) =>
+      assistantTextContent(reply.content).trim(),
+    );
+    expect(new Set(replyTexts).size).toBe(replyTexts.length);
   });
 
   it("when a generated image should be shared here, send it to the thread", async ({
@@ -71,14 +107,17 @@ describeEval("Slack Message Delivery", slackEvals, (it) => {
       expect.arrayContaining([
         expect.objectContaining({ name: "imageGenerate" }),
         expect.objectContaining({
-          name: "sendMessage",
+          name: "sendFiles",
         }),
       ]),
     );
-    const sendMessageCall = toolCalls(result.session).find(
-      (call) => call.name === "sendMessage",
+    const sendFilesCall = toolCalls(result.session).find(
+      (call) => call.name === "sendFiles",
     );
-    expect(sendMessageCall?.arguments).not.toHaveProperty("target");
+    expect(sendFilesCall).toMatchObject({
+      status: "ok",
+      result: { ok: true, status: "success" },
+    });
     expect(hasImageAttachment(result.session)).toBe(true);
     expect(visibleAssistantText(result.session)).not.toContain(NO_REPLY_MARKER);
     expect(visibleThreadReplies(result.session).length).toBeGreaterThan(0);
