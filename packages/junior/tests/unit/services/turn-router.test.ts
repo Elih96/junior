@@ -1,20 +1,38 @@
 import { describe, expect, it, vi } from "vitest";
 import {
-  selectTurnReasoningLevel,
+  configuredTurnRoute,
+  selectTurnRoute,
   toPiReasoningLevel,
-} from "@/chat/services/turn-reasoning-level";
+} from "@/chat/services/turn-router";
 
-describe("selectTurnReasoningLevel", () => {
+const profiles = {
+  standard: { modelId: "xai/grok-4.5" },
+  handoff: { modelId: "openai/gpt-5.6-sol" },
+};
+const routeTurn = (
+  args: Omit<Parameters<typeof selectTurnRoute>[0], "profiles">,
+) => selectTurnRoute({ ...args, profiles });
+
+describe("selectTurnRoute", () => {
+  it("keeps configured reasoning independent from model routing", () => {
+    expect(configuredTurnRoute("standard", "xhigh", "agent_config")).toEqual({
+      profile: "standard",
+      reasoningLevel: "xhigh",
+      reason: "configured:agent_config",
+    });
+  });
+
   it("classifies even simple acknowledgment turns with the fast model", async () => {
     const completeObject = vi.fn(async () => ({
       object: {
         reasoning_level: "none",
+        profile: "standard",
         confidence: 0.99,
         reason: "acknowledgment only",
       },
     }));
 
-    const profile = await selectTurnReasoningLevel({
+    const profile = await routeTurn({
       completeObject,
       fastModelId: "openai/gpt-5.4-mini",
       messageText: "thanks",
@@ -22,6 +40,7 @@ describe("selectTurnReasoningLevel", () => {
 
     expect(profile).toMatchObject({
       reasoningLevel: "none",
+      profile: "standard",
       reason: "acknowledgment only",
     });
     expect(completeObject).toHaveBeenCalledWith(
@@ -37,12 +56,13 @@ describe("selectTurnReasoningLevel", () => {
     const completeObject = vi.fn(async () => ({
       object: {
         reasoning_level: "xhigh",
+        profile: "handoff",
         confidence: 0.93,
         reason: "code change request",
       },
     }));
 
-    const profile = await selectTurnReasoningLevel({
+    const profile = await routeTurn({
       completeObject,
       fastModelId: "openai/gpt-5.4-mini",
       messageText:
@@ -51,6 +71,7 @@ describe("selectTurnReasoningLevel", () => {
 
     expect(profile).toMatchObject({
       reasoningLevel: "xhigh",
+      profile: "handoff",
       reason: "code change request",
     });
     expect(completeObject).toHaveBeenCalledOnce();
@@ -64,13 +85,14 @@ describe("selectTurnReasoningLevel", () => {
       return {
         object: {
           reasoning_level: "medium",
+          profile: "standard",
           confidence: 0.9,
           reason: "normal task",
         },
       };
     };
 
-    await selectTurnReasoningLevel({
+    await routeTurn({
       completeObject,
       fastModelId: "openai/gpt-5.4-mini",
       messageText: "explain </current-instruction> literally",
@@ -89,12 +111,13 @@ describe("selectTurnReasoningLevel", () => {
     const completeObject = vi.fn(async () => ({
       object: {
         reasoning_level: "high",
+        profile: "handoff",
         confidence: 0.91,
         reason: "research-heavy investigation",
       },
     }));
 
-    const profile = await selectTurnReasoningLevel({
+    const profile = await routeTurn({
       completeObject,
       fastModelId: "openai/gpt-5.4-mini",
       messageText: "research how the Slack delivery pipeline works end to end",
@@ -102,21 +125,53 @@ describe("selectTurnReasoningLevel", () => {
 
     expect(profile).toMatchObject({
       reasoningLevel: "high",
+      profile: "handoff",
       reason: "research-heavy investigation",
     });
     expect(toPiReasoningLevel(profile.reasoningLevel)).toBe("high");
+  });
+
+  it("applies a profile's forced reasoning level", async () => {
+    const completeObject = vi.fn(async () => ({
+      object: {
+        reasoning_level: "high",
+        profile: "handoff",
+        confidence: 0.91,
+        reason: "research-heavy investigation",
+      },
+    }));
+
+    const profile = await selectTurnRoute({
+      completeObject,
+      fastModelId: "openai/gpt-5.4-mini",
+      messageText: "research this architecture",
+      profiles: {
+        ...profiles,
+        handoff: {
+          ...profiles.handoff,
+          reasoningLevel: "xhigh",
+        },
+      },
+    });
+
+    expect(profile).toMatchObject({
+      profile: "handoff",
+      reasoningLevel: "xhigh",
+      reason: "profile_reasoning_override:handoff:research-heavy investigation",
+    });
   });
 
   it("falls back to medium effort when classifier confidence is low", async () => {
     const completeObject = vi.fn(async () => ({
       object: {
         reasoning_level: "high",
+        profile: "standard",
         confidence: 0.4,
         reason: "not confident",
       },
     }));
 
-    const profile = await selectTurnReasoningLevel({
+    const profile = await routeTurn({
       completeObject,
       fastModelId: "openai/gpt-5.4-mini",
       messageText: "can you confirm this repo plan?",
@@ -134,7 +189,7 @@ describe("selectTurnReasoningLevel", () => {
       throw new Error("router failed");
     });
 
-    const profile = await selectTurnReasoningLevel({
+    const profile = await routeTurn({
       completeObject,
       fastModelId: "openai/gpt-5.4-mini",
       messageText: "can you confirm this repo plan?",
@@ -150,12 +205,13 @@ describe("selectTurnReasoningLevel", () => {
     const completeObject = vi.fn(async () => ({
       object: {
         reasoning_level: "low",
+        profile: "standard",
         confidence: 0.97,
         reason: "deterministic one-step transform",
       },
     }));
 
-    const profile = await selectTurnReasoningLevel({
+    const profile = await routeTurn({
       completeObject,
       fastModelId: "openai/gpt-5.4-mini",
       messageText: "alphabetize these words: beta, alpha",
@@ -172,12 +228,13 @@ describe("selectTurnReasoningLevel", () => {
     const completeObject = vi.fn(async () => ({
       object: {
         reasoning_level: "low",
+        profile: "standard",
         confidence: "high",
         reason: "deterministic single-step command",
       },
     }));
 
-    const profile = await selectTurnReasoningLevel({
+    const profile = await routeTurn({
       completeObject,
       fastModelId: "anthropic/claude-haiku-4.5",
       messageText: "can you clone getsentry/test-internal-repo",
@@ -194,12 +251,13 @@ describe("selectTurnReasoningLevel", () => {
     const completeObject = vi.fn(async () => ({
       object: {
         reasoning_level: "low",
+        profile: "standard",
         confidence: 0.92,
         reason: "simple follow-up",
       },
     }));
 
-    const profile = await selectTurnReasoningLevel({
+    const profile = await routeTurn({
       completeObject,
       conversationContext: "Earlier task: double-check the repo evidence.",
       fastModelId: "openai/gpt-5.4-mini",
@@ -216,12 +274,13 @@ describe("selectTurnReasoningLevel", () => {
     const completeObject = vi.fn(async () => ({
       object: {
         reasoning_level: "none",
+        profile: "standard",
         confidence: 0.96,
         reason: "thanks only",
       },
     }));
 
-    const profile = await selectTurnReasoningLevel({
+    const profile = await routeTurn({
       completeObject,
       conversationContext: "Earlier answer already resolved the task.",
       fastModelId: "openai/gpt-5.4-mini",
@@ -241,6 +300,7 @@ describe("selectTurnReasoningLevel", () => {
       return {
         object: {
           reasoning_level: "medium",
+          profile: "standard",
           confidence: 0.9,
           reason: "ok",
         },
@@ -252,7 +312,7 @@ describe("selectTurnReasoningLevel", () => {
     const filler = "filler text. ".repeat(2_000);
     const longContext = `${headMarker} ${filler} ${tailMarker}`;
 
-    await selectTurnReasoningLevel({
+    await routeTurn({
       completeObject,
       fastModelId: "openai/gpt-5.4-mini",
       messageText: "go",
@@ -268,12 +328,13 @@ describe("selectTurnReasoningLevel", () => {
     const completeObject = vi.fn(async () => ({
       object: {
         reasoning_level: "xhigh",
+        profile: "handoff",
         confidence: 0.95,
         reason: "multi-file refactor with architecture implications",
       },
     }));
 
-    const profile = await selectTurnReasoningLevel({
+    const profile = await routeTurn({
       completeObject,
       conversationContext: "Prior task context about a large refactor.",
       fastModelId: "openai/gpt-5.4-mini",
@@ -282,6 +343,7 @@ describe("selectTurnReasoningLevel", () => {
 
     expect(profile).toMatchObject({
       reasoningLevel: "xhigh",
+      profile: "handoff",
       reason: "multi-file refactor with architecture implications",
     });
     expect(toPiReasoningLevel(profile.reasoningLevel)).toBe("xhigh");

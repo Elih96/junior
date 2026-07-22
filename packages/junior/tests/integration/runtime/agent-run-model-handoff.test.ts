@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createLocalSource } from "@sentry/junior-plugin-api";
 
@@ -9,14 +10,21 @@ const observations = vi.hoisted(() => ({
   }>,
   afterHandoffToolNames: [] as string[],
   initialModelId: "",
+  initialImagePart: undefined as
+    | { type: unknown; data: unknown; mimeType: unknown }
+    | undefined,
   initialToolNames: [] as string[],
   mixedBatch: false,
   progressTool: false,
   providerCalls: 0,
-  requestedProfile: undefined as string | null | undefined,
+  routerCalls: 0,
+  requestedProfile: "handoff" as string | null | undefined,
+  routedModelProfile: "standard",
   routedReasoningLevel: "high",
   reasoningLevels: [] as string[],
   summaryCalls: 0,
+  summaryAborted: false,
+  summaryPending: false,
   handoffStatusBeforeSummary: false,
   statuses: [] as string[],
 }));
@@ -35,17 +43,34 @@ vi.mock("@/chat/pi/client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/chat/pi/client")>();
   return {
     ...actual,
-    completeObject: async () => ({
-      object: {
-        reasoning_level: observations.routedReasoningLevel,
-        confidence: 0.99,
-        reason: "complex implementation",
-      },
-    }),
-    completeText: async () => {
+    completeObject: async () => {
+      observations.routerCalls += 1;
+      return {
+        object: {
+          reasoning_level: observations.routedReasoningLevel,
+          profile: observations.routedModelProfile,
+          confidence: 0.99,
+          reason: "complex implementation",
+        },
+      };
+    },
+    completeText: async (args: { signal?: AbortSignal }) => {
       observations.handoffStatusBeforeSummary =
         observations.statuses.includes("Switching models");
       observations.summaryCalls += 1;
+      if (observations.summaryPending) {
+        return await new Promise<never>((_resolve, reject) => {
+          const abort = () => {
+            observations.summaryAborted = true;
+            reject(args.signal?.reason);
+          };
+          if (args.signal?.aborted) {
+            abort();
+            return;
+          }
+          args.signal?.addEventListener("abort", abort, { once: true });
+        });
+      }
       return { text: "Implement the requested change and verify it." };
     },
   };
@@ -57,8 +82,23 @@ vi.mock("@/chat/pi/traced-stream", () => ({
       observations.providerCalls += 1;
       observations.reasoningLevels.push(options?.reasoning ?? "unset");
       const call = observations.providerCalls;
+      const routerForcedHandoff =
+        call === 1 && observations.routedModelProfile === "handoff";
       if (call === 1) {
         observations.initialModelId = model.id;
+        observations.initialImagePart = (
+          (context.messages ?? []) as Array<{
+            content?: Array<{
+              type?: unknown;
+              data?: unknown;
+              mimeType?: unknown;
+            }>;
+          }>
+        )
+          .flatMap((message) => message.content ?? [])
+          .find((part) => part.type === "image") as
+          | { type: unknown; data: unknown; mimeType: unknown }
+          | undefined;
         observations.initialToolNames = (context.tools ?? []).map(
           (tool: { name: string }) => tool.name,
         );
@@ -70,8 +110,9 @@ vi.mock("@/chat/pi/traced-stream", () => ({
         );
       }
 
-      const text =
-        call === 1
+      const text = routerForcedHandoff
+        ? "Handoff model completed it."
+        : call === 1
           ? observations.progressTool
             ? "Let me do that now."
             : "The standard model started an answer that must be hidden."
@@ -79,7 +120,7 @@ vi.mock("@/chat/pi/traced-stream", () => ({
             ? "Standard model recovered safely."
             : "Handoff model completed it.";
       const content: Array<Record<string, unknown>> = [{ type: "text", text }];
-      if (call === 1) {
+      if (call === 1 && !routerForcedHandoff) {
         content.push({
           type: "toolCall",
           id: observations.progressTool ? "progress-call-1" : "handoff-call-1",
@@ -102,7 +143,7 @@ vi.mock("@/chat/pi/traced-stream", () => ({
       const message = {
         role: "assistant",
         content,
-        stopReason: call === 1 ? "toolUse" : "stop",
+        stopReason: call === 1 && !routerForcedHandoff ? "toolUse" : "stop",
         api: "test",
         provider: "test",
         model: model.id,
@@ -183,14 +224,19 @@ describe("executeAgentRun model handoff", () => {
     observations.afterHandoffMessages = [];
     observations.afterHandoffToolNames = [];
     observations.initialModelId = "";
+    observations.initialImagePart = undefined;
     observations.initialToolNames = [];
     observations.mixedBatch = false;
     observations.progressTool = false;
     observations.providerCalls = 0;
-    observations.requestedProfile = undefined;
+    observations.routerCalls = 0;
+    observations.requestedProfile = "handoff";
+    observations.routedModelProfile = "standard";
     observations.routedReasoningLevel = "high";
     observations.reasoningLevels = [];
     observations.summaryCalls = 0;
+    observations.summaryAborted = false;
+    observations.summaryPending = false;
     observations.handoffStatusBeforeSummary = false;
     observations.statuses = [];
     await disconnectStateAdapter();
@@ -205,8 +251,84 @@ describe("executeAgentRun model handoff", () => {
     }
   });
 
+  it("routes requested execution profiles through handoff before the first provider request", async () => {
+    observations.routedModelProfile = "handoff";
+    const conversationId = "local:test:router-model-handoff";
+    const outcome = await executeAgentRun({
+      conversationId,
+      runId: "run-router-model-handoff",
+      turnId: "turn-router-model-handoff",
+      input: {
+        messageText: "Recommend the architecture and test strategy.",
+        userAttachments: [
+          {
+            data: Buffer.from("architecture-diagram"),
+            filename: "architecture.png",
+            mediaType: "image/png",
+          },
+        ],
+      },
+      routing: {
+        destination: { platform: "local", conversationId },
+        source: createLocalSource(conversationId),
+      },
+    });
+
+    expect(outcome.status).toBe("completed");
+    if (outcome.status !== "completed") return;
+    expect(outcome.result.text).toBe("Handoff model completed it.");
+    expect(outcome.result.diagnostics.modelId).toBe("openai/gpt-5.6-sol");
+    expect(observations.providerCalls).toBe(1);
+    expect(observations.routerCalls).toBe(1);
+    expect(observations.initialModelId).toBe("openai/gpt-5.6-sol");
+    expect(observations.initialToolNames).toContain("handoff");
+    expect(observations.initialImagePart).toEqual({
+      type: "image",
+      data: Buffer.from("architecture-diagram").toString("base64"),
+      mimeType: "image/png",
+    });
+    expect(observations.reasoningLevels).toEqual(["xhigh"]);
+    expect(observations.summaryCalls).toBe(1);
+    expect(
+      (await loadConversationProjection({ conversationId })).modelProfile,
+    ).toBe("handoff");
+    expect(
+      (await getConversationEventStore().loadHistory(conversationId))
+        .map((event) => event.data)
+        .filter((entry) => entry.type === "handoff"),
+    ).toEqual([
+      {
+        type: "handoff",
+        modelProfile: "handoff",
+        modelId: "openai/gpt-5.6-sol",
+        replacementHistory: expectedHandoffReplacementHistory(),
+      },
+    ]);
+  });
+
+  it("applies the turn deadline while preparing a router-requested handoff", async () => {
+    observations.routedModelProfile = "handoff";
+    observations.summaryPending = true;
+    const conversationId = "local:test:router-model-handoff-timeout";
+    const outcome = await executeAgentRun({
+      conversationId,
+      runId: "run-router-model-handoff-timeout",
+      turnId: "turn-router-model-handoff-timeout",
+      input: { messageText: "Recommend the architecture." },
+      policy: { turnDeadlineAtMs: Date.now() + 50 },
+      routing: {
+        destination: { platform: "local", conversationId },
+        source: createLocalSource(conversationId),
+      },
+    });
+
+    expect(outcome.status).toBe("suspended");
+    expect(observations.summaryAborted).toBe(true);
+    expect(observations.providerCalls).toBe(0);
+  });
+
   it("compacts and upgrades the same conversation before continuing the turn", async () => {
-    observations.requestedProfile = null;
+    observations.requestedProfile = "handoff";
     const conversationId = "local:test:model-handoff";
     const outcome = await executeAgentRun({
       conversationId,
@@ -236,10 +358,10 @@ describe("executeAgentRun model handoff", () => {
       observations.afterHandoffModelId,
     );
     expect(observations.afterHandoffModelId).toBe("openai/gpt-5.6-sol");
-    expect(observations.reasoningLevels.slice(0, 2)).toEqual(["high", "high"]);
-    expect(observations.afterHandoffToolNames).not.toContain("handoff");
+    expect(observations.reasoningLevels.slice(0, 2)).toEqual(["high", "xhigh"]);
+    expect(observations.afterHandoffToolNames).toContain("handoff");
     expect(observations.afterHandoffToolNames).toEqual(
-      observations.initialToolNames.filter((name) => name !== "handoff"),
+      observations.initialToolNames,
     );
     expect(observations.summaryCalls).toBe(1);
     expect(observations.handoffStatusBeforeSummary).toBe(true);
@@ -298,8 +420,9 @@ describe("executeAgentRun model handoff", () => {
     if (followUp.status !== "completed") return;
     expect(followUp.result.diagnostics.modelId).toBe("openai/gpt-5.6-sol");
     expect(observations.providerCalls).toBe(3);
+    expect(observations.routerCalls).toBe(1);
     expect(observations.afterHandoffModelId).toBe("openai/gpt-5.6-sol");
-    expect(observations.afterHandoffToolNames).not.toContain("handoff");
+    expect(observations.afterHandoffToolNames).toContain("handoff");
     expect(observations.summaryCalls).toBe(1);
   });
 
@@ -357,8 +480,8 @@ describe("executeAgentRun model handoff", () => {
     expect(observations.statuses).toContain("Checking details");
   });
 
-  it("preserves explicit agent reasoning across handoff without routing", async () => {
-    observations.requestedProfile = null;
+  it("preserves explicit agent reasoning across handoff", async () => {
+    observations.requestedProfile = "handoff";
     observations.routedReasoningLevel = "low";
     const conversationId = "local:test:model-handoff-explicit-reasoning";
     const outcome = await executeAgentRun({
@@ -375,11 +498,12 @@ describe("executeAgentRun model handoff", () => {
     expect(outcome.status).toBe("completed");
     if (outcome.status !== "completed") return;
     expect(outcome.result.diagnostics.reasoningLevel).toBe("xhigh");
+    expect(observations.providerCalls).toBe(2);
     expect(observations.reasoningLevels).toEqual(["xhigh", "xhigh"]);
   });
 
   it("keeps handoff independent from status observer failures", async () => {
-    observations.requestedProfile = null;
+    observations.requestedProfile = "handoff";
     const conversationId = "local:test:model-handoff-status-failure";
     const outcome = await executeAgentRun({
       conversationId,
@@ -449,7 +573,8 @@ describe("executeAgentRun model handoff", () => {
     expect(followUp.status).toBe("completed");
     if (followUp.status !== "completed") return;
     expect(followUp.result.diagnostics.modelId).toBe("openai/gpt-5.4");
-    expect(observations.afterHandoffToolNames).not.toContain("handoff");
+    expect(observations.routerCalls).toBe(1);
+    expect(observations.afterHandoffToolNames).toContain("handoff");
     expect(observations.summaryCalls).toBe(1);
   });
 
@@ -495,7 +620,7 @@ describe("executeAgentRun model handoff", () => {
     expect(outcome.status).toBe("completed");
     if (outcome.status !== "completed") return;
     expect(outcome.result.diagnostics.modelId).toBe("openai/gpt-5.6-sol");
-    expect(observations.afterHandoffToolNames).not.toContain("handoff");
+    expect(observations.afterHandoffToolNames).toContain("handoff");
     expect(
       (await loadConversationProjection({ conversationId })).modelProfile,
     ).toBe("handoff");

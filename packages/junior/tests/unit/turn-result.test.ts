@@ -7,7 +7,8 @@ import {
   getAssistantMessageText,
 } from "@/chat/services/turn-result";
 
-const reasoningSelection = {
+const executionProfile = {
+  profile: "standard",
   reasoningLevel: "medium" as const,
   reason: "test",
 };
@@ -127,7 +128,7 @@ describe("buildTurnResult", () => {
       shouldTrace: false,
       spanContext: {},
       modelId: "test-model",
-      reasoningSelection,
+      executionProfile,
     });
 
     expect(reply.text).toBe("");
@@ -160,7 +161,7 @@ describe("buildTurnResult", () => {
       shouldTrace: false,
       spanContext: {},
       modelId: "test-model",
-      reasoningSelection,
+      executionProfile,
     });
 
     expect(reply.text).toBe("");
@@ -197,7 +198,7 @@ describe("buildTurnResult", () => {
       shouldTrace: false,
       spanContext: {},
       modelId: "test-model",
-      reasoningSelection,
+      executionProfile,
     });
 
     expect(reply.text).toBe("");
@@ -231,7 +232,7 @@ describe("buildTurnResult", () => {
       shouldTrace: false,
       spanContext: {},
       modelId: "test-model",
-      reasoningSelection,
+      executionProfile,
     });
 
     expect(reply.text).toBe("Here is the actual summary.");
@@ -268,7 +269,7 @@ describe("buildTurnResult", () => {
       shouldTrace: false,
       spanContext: {},
       modelId: "test-model",
-      reasoningSelection,
+      executionProfile,
     });
 
     expect(reply.text).toBe("Updated answer.");
@@ -307,7 +308,7 @@ describe("buildTurnResult", () => {
       shouldTrace: false,
       spanContext: {},
       modelId: "test-model",
-      reasoningSelection,
+      executionProfile,
     });
 
     expect(reply.text).toBe(
@@ -346,7 +347,7 @@ describe("buildTurnResult", () => {
       shouldTrace: false,
       spanContext: {},
       modelId: "test-model",
-      reasoningSelection,
+      executionProfile,
     });
 
     expect(reply.text).toBe("");
@@ -379,7 +380,7 @@ describe("buildTurnResult", () => {
       shouldTrace: false,
       spanContext: {},
       modelId: "test-model",
-      reasoningSelection,
+      executionProfile,
     });
 
     expect(reply.text).toBe("Handled it.");
@@ -418,7 +419,7 @@ describe("buildTurnResult", () => {
       shouldTrace: false,
       spanContext: {},
       modelId: "test-model",
-      reasoningSelection,
+      executionProfile,
     });
 
     expect(reply.text).toBe("");
@@ -442,7 +443,7 @@ describe("buildTurnResult", () => {
       shouldTrace: false,
       spanContext: {},
       modelId: "test-model",
-      reasoningSelection,
+      executionProfile,
     });
 
     expect(reply.text).toBe("");
@@ -466,7 +467,7 @@ describe("buildTurnResult", () => {
       shouldTrace: false,
       spanContext: {},
       modelId: "test-model",
-      reasoningSelection,
+      executionProfile,
     });
 
     expect(reply.text).toBe("");
@@ -495,7 +496,7 @@ describe("buildTurnResult", () => {
       shouldTrace: false,
       spanContext: {},
       modelId: "test-model",
-      reasoningSelection,
+      executionProfile,
     });
 
     expect(reply.text).toBe("");
@@ -531,7 +532,7 @@ describe("buildTurnResult", () => {
       shouldTrace: false,
       spanContext: {},
       modelId: "test-model",
-      reasoningSelection,
+      executionProfile,
     });
 
     expect(reply.text).toBe("Here's the image.");
@@ -555,7 +556,7 @@ describe("buildTurnResult", () => {
       shouldTrace: false,
       spanContext: {},
       modelId: "test-model",
-      reasoningSelection,
+      executionProfile,
       usage: {
         inputTokens: 321,
         outputTokens: 144,

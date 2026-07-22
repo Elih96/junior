@@ -111,7 +111,10 @@ vi.mock("@/chat/config", () => ({
   botConfig: {
     fastModelId: "test-fast-model",
     modelId: "test-model",
-    modelProfiles: { handoff: "test-handoff-model" },
+    profiles: {
+      standard: { modelId: "test-model" },
+      handoff: { modelId: "test-handoff-model", reasoningLevel: "xhigh" },
+    },
     turnTimeoutMs: 1000,
     userName: "junior",
   },
@@ -132,6 +135,7 @@ vi.mock("@/chat/pi/client", () => ({
       return {
         object: {
           reasoning_level: "high",
+          profile: "standard",
           confidence: 1,
           reason: "attachment stack trace",
         },
@@ -141,6 +145,7 @@ vi.mock("@/chat/pi/client", () => ({
       return {
         object: {
           reasoning_level: "none",
+          profile: "standard",
           confidence: 1,
           reason: "ack",
         },
@@ -150,6 +155,7 @@ vi.mock("@/chat/pi/client", () => ({
       return {
         object: {
           reasoning_level: "high",
+          profile: "standard",
           confidence: 1,
           reason: "code change request",
         },
@@ -158,6 +164,7 @@ vi.mock("@/chat/pi/client", () => ({
     return {
       object: {
         reasoning_level: "medium",
+        profile: "standard",
         confidence: 1,
         reason: "test-router",
       },
