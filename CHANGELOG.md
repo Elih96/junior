@@ -1,4 +1,10 @@
 # Changelog
+## 0.107.1
+
+### Bug Fixes 🐛
+
+- (migrations) Preserve history without compaction summary by @dcramer in [#982](https://github.com/getsentry/junior/pull/982)
+
 ## 0.107.0
 
 ### Breaking Changes 🛠
