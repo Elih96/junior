@@ -91,7 +91,7 @@ describe("chat config", () => {
       standard: { modelId: "xai/grok-4.5" },
       handoff: {
         modelId: "openai/gpt-5.6-sol",
-        reasoningLevel: "xhigh",
+        reasoningLevel: "high",
       },
     });
   });
@@ -102,7 +102,7 @@ describe("chat config", () => {
     const { botConfig } = await loadConfig();
     expect(botConfig.profiles.handoff).toEqual({
       modelId: "openai/gpt-5.4",
-      reasoningLevel: "xhigh",
+      reasoningLevel: "high",
     });
   });
 
@@ -117,7 +117,7 @@ describe("chat config", () => {
       standard: { modelId: "xai/grok-4.5" },
       handoff: {
         modelId: "openai/gpt-5.6-sol",
-        reasoningLevel: "xhigh",
+        reasoningLevel: "high",
       },
       coding: { modelId: "openai/gpt-5.4" },
       research: { modelId: "anthropic/claude-opus-4.6" },

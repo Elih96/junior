@@ -193,7 +193,7 @@ function parseProfiles(
     [STANDARD_MODEL_PROFILE]: { modelId: standardModelId },
     [DEFAULT_HANDOFF_MODEL_PROFILE]: {
       modelId: handoffModelId,
-      reasoningLevel: "xhigh",
+      reasoningLevel: "high",
     },
   };
   const trimmed = toOptionalTrimmed(rawValue);
