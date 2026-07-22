@@ -29,6 +29,9 @@ import {
   readGrantPermissions,
 } from "./permissions.js";
 import { createGitHubTools } from "./tools.js";
+import { createGitHubWebhookRoute } from "./webhooks/handler.js";
+import { buildGitHubOutcomeReport } from "./pull-request-outcomes/report.js";
+import type { GitHubDb } from "./pull-request-outcomes/store.js";
 
 export type { GitHubAppPermissionLevel } from "./permissions.js";
 
@@ -1787,6 +1790,22 @@ export function githubPlugin(
       ],
     },
     hooks: {
+      routes(ctx) {
+        return [
+          createGitHubWebhookRoute({
+            botEmail: () => readEnv(botEmailEnv),
+            db: ctx.db as GitHubDb,
+            resourceEvents: ctx.resourceEvents,
+            webhookSecret: () => readEnv("GITHUB_WEBHOOK_SECRET"),
+          }),
+        ];
+      },
+      async operationalReport(ctx) {
+        return await buildGitHubOutcomeReport({
+          db: ctx.db as GitHubDb,
+          nowMs: ctx.nowMs,
+        });
+      },
       tools(ctx) {
         return createGitHubTools(ctx);
       },

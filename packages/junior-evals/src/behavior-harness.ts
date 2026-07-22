@@ -105,7 +105,7 @@ import {
 import { createSlackDestination } from "@/chat/destination";
 import { createSlackConversationWorker } from "@/chat/task-execution/slack-work";
 import { processConversationQueueMessage } from "@/chat/task-execution/vercel-callback";
-import { normalizeGitHubResourceEvents } from "@/handlers/github-webhook";
+import { normalizeGitHubResourceEvents } from "@sentry/junior-github/testing";
 import { createMockImageGenerateDeps } from "./fixtures/image-generate";
 import { parseSlackMrkdwnLinkUrl } from "./slack-link";
 import { loadEvalPluginFixtures } from "./eval-plugin-fixtures";
@@ -1209,7 +1209,8 @@ function configureCredentialProviderEnv(
     process.env.GITHUB_INSTALLATION_ID = "67890";
     process.env.GITHUB_APP_PRIVATE_KEY = DUMMY_GITHUB_APP_PRIVATE_KEY;
     process.env.GITHUB_APP_BOT_NAME = "junior-eval";
-    process.env.GITHUB_APP_BOT_EMAIL = "junior-eval@example.com";
+    process.env.GITHUB_APP_BOT_EMAIL =
+      "12345+junior-eval[bot]@users.noreply.github.com";
   }
   if (providers.has("sentry")) {
     process.env.SENTRY_CLIENT_ID = "eval-sentry-client-id";
