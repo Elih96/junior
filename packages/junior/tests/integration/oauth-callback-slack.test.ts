@@ -19,6 +19,7 @@ import {
   coerceThreadConversationState,
   type ConversationMessage,
 } from "@/chat/state/conversation";
+
 /**
  * Mirror a just-seeded thread-state transcript into SQL, the durable transcript
  * authority the resume handlers now read from. Takes the connected adapter so it
@@ -159,103 +160,6 @@ describe("oauth callback slack integration", () => {
     ]);
   }, 20_000);
 
-  it("resumes a pending OAuth request with persisted thread context", async () => {
-    const storedSource = createSlackSource({
-      teamId: "T123",
-      channelId: "C123",
-      messageTs: "1700000000.oauth-source",
-      threadTs: "1700000000.001",
-
-      type: "priv",
-    });
-    await stateAdapterModule
-      .getStateAdapter()
-      .set("oauth-state:eval-oauth-resume-state", {
-        userId: "U123",
-        provider: "eval-oauth",
-        channelId: "C123",
-        destination: SLACK_DESTINATION,
-        source: storedSource,
-        threadTs: "1700000000.001",
-        pendingMessage: "list my sentry issues",
-      });
-    await stateAdapterModule
-      .getStateAdapter()
-      .set("thread-state:slack:C123:1700000000.001", {
-        conversation: {
-          messages: [
-            {
-              id: "assistant-1",
-              role: "assistant",
-              text: "You need the budget by Friday.",
-              createdAtMs: 1,
-              author: {
-                userName: "junior",
-                isBot: true,
-              },
-            },
-            {
-              id: "user-1",
-              role: "user",
-              text: "list my sentry issues",
-              createdAtMs: 2,
-              author: {
-                userId: "U123",
-                userName: "dcramer",
-              },
-            },
-          ],
-        },
-      });
-    await seedVisibleTranscriptFromThreadState(
-      stateAdapterModule.getStateAdapter(),
-      "slack:C123:1700000000.001",
-    );
-
-    const response = await oauthCallbackHarnessModule.runOauthCallbackRoute({
-      provider: "eval-oauth",
-      state: "eval-oauth-resume-state",
-      code: "eval-oauth-code",
-      agentRunner: testAgentRunner,
-    });
-
-    expect(response.status).toBe(200);
-    expect(executeAgentRunMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        conversationId: "slack:C123:1700000000.001",
-        turnId: "turn_user-1",
-        input: expect.objectContaining({
-          messageText: "list my sentry issues",
-          conversationContext: expect.stringContaining(
-            "You need the budget by Friday.",
-          ),
-        }),
-        routing: expect.objectContaining({
-          destination: SLACK_DESTINATION,
-          source: storedSource,
-        }),
-      }),
-    );
-    const resumeContext = executeAgentRunMock.mock.calls[0]?.[0] as {
-      input?: { conversationContext?: string };
-    };
-    expect(resumeContext.input?.conversationContext).not.toContain(
-      "list my sentry issues",
-    );
-
-    expect(getCapturedSlackApiCalls("chat.postMessage")).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          params: expect.objectContaining({
-            channel: "C123",
-            thread_ts: "1700000000.001",
-            text: "Here are your Sentry issues.",
-          }),
-        }),
-      ]),
-    );
-  }, 20_000);
-
   it("resumes a session-recorded OAuth turn with persisted thread state", async () => {
     const conversationId = "slack:C123:1700000000.009";
     const sessionId = "turn_msg_9";
@@ -304,7 +208,6 @@ describe("oauth callback slack integration", () => {
         destination: SLACK_DESTINATION,
         source: slackSource("1700000000.009"),
         threadTs: "1700000000.009",
-        pendingMessage: "list my sentry issues",
         resumeConversationId: conversationId,
         resumeSessionId: sessionId,
         scope: "read",
@@ -538,7 +441,6 @@ describe("oauth callback slack integration", () => {
         destination: SLACK_DESTINATION,
         source: slackSource("1700000000.012"),
         threadTs: "1700000000.012",
-        pendingMessage: "list my sentry issues",
         resumeConversationId: conversationId,
         resumeSessionId: sessionId,
         scope: "read",
@@ -705,7 +607,6 @@ describe("oauth callback slack integration", () => {
         destination: SLACK_DESTINATION,
         source: slackSource("1700000000.011"),
         threadTs: "1700000000.011",
-        pendingMessage: "list my sentry issues",
         resumeConversationId: conversationId,
         resumeSessionId: sessionId,
       });
@@ -828,7 +729,6 @@ describe("oauth callback slack integration", () => {
         destination: SLACK_DESTINATION,
         source: slackSource("1700000000.012"),
         threadTs: "1700000000.012",
-        pendingMessage: "old request",
         resumeConversationId: conversationId,
         resumeSessionId: oldSessionId,
       });
@@ -933,7 +833,6 @@ describe("oauth callback slack integration", () => {
         destination: SLACK_DESTINATION,
         source: slackSource("1700000000.010"),
         threadTs: "1700000000.010",
-        pendingMessage: "list my sentry issues",
         resumeConversationId: conversationId,
         resumeSessionId: sessionId,
       });

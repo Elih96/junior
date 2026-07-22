@@ -29,9 +29,15 @@ import {
   type PlannedSlackReplyStage,
 } from "@/chat/slack/reply";
 import { buildSlackOutputMessage } from "@/chat/slack/output";
-import { getSlackErrorObservabilityAttributes } from "@/chat/slack/errors";
+import {
+  getSlackErrorObservabilityAttributes,
+  isRetryableSlackPostError,
+} from "@/chat/slack/errors";
 import { buildSteeringPiMessage } from "@/chat/agent/prompt";
-import type { AgentRunSteeringMessage } from "@/chat/agent/request";
+import {
+  RetryableDeliveryError,
+  type AgentRunSteeringMessage,
+} from "@/chat/agent/request";
 import type { AgentRunner } from "@/chat/runtime/agent-runner";
 import type { CredentialContext } from "@/chat/credentials/context";
 import { shouldEmitDevAgentTrace } from "@/chat/runtime/dev-agent-trace";
@@ -997,6 +1003,9 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
           try {
             return await thread.post(payload);
           } catch (error) {
+            if (isRetryableSlackPostError(error)) {
+              throw new RetryableDeliveryError(error);
+            }
             const eventId = logException(
               error,
               "slack_thread_post_failed",

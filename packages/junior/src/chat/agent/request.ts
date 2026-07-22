@@ -150,6 +150,14 @@ export interface AgentRunDelivery {
   onAssistantMessage: (message: AgentAssistantMessage) => void | Promise<void>;
 }
 
+/** Resume the agent turn after a transient or ambiguous delivery failure. */
+export class RetryableDeliveryError extends Error {
+  constructor(cause: unknown) {
+    super("Assistant delivery was transient or ambiguous", { cause });
+    this.name = "RetryableDeliveryError";
+  }
+}
+
 /** Carries durable-worker ports that commit or update resumable run state. */
 export interface AgentRunDurability {
   onInputCommitted?: () => void | Promise<void>;

@@ -21,15 +21,18 @@ import type { Actor } from "@/chat/actor";
 import {
   loadTurnSessionRecord,
   persistAuthPauseSessionRecord,
+  persistContinuationSessionRecord,
   persistRunningSessionRecord,
-  persistTimeoutSessionRecord,
   persistYieldSessionRecord,
 } from "@/chat/services/turn-session-record";
 import { AuthorizationPauseError } from "@/chat/services/auth-pause";
 import { hasAgentTurnUsage, type AgentTurnUsage } from "@/chat/usage";
 import { extractGenAiUsageSummary } from "@/chat/logging";
 import { isAssistantMessage } from "@/chat/pi/transcript";
-import type { AgentRunDurability } from "@/chat/agent/request";
+import {
+  RetryableDeliveryError,
+  type AgentRunDurability,
+} from "@/chat/agent/request";
 import { TurnSliceLimitExceededError } from "@/chat/services/turn-limit";
 
 type LoadedSessionRecordState = Awaited<
@@ -225,22 +228,35 @@ export function createResumeState(args: ResumeStateArgs) {
         };
       }
 
-      if (timedOut) {
+      const resumeReason =
+        error instanceof RetryableDeliveryError
+          ? "retry"
+          : timedOut
+            ? "timeout"
+            : undefined;
+      if (resumeReason) {
+        if (resumeReason === "retry") {
+          // The failed assistant message was never saved. Regenerate it from
+          // the latest saved agent history; an ambiguous provider write may
+          // therefore produce a duplicate reply.
+          resumeMessages = [...latestSafeBoundaryMessages];
+        }
         const usage =
           args2.currentUsage ??
           extractSliceUsage(resumeMessages, beforeMessageCount);
         await args.recordActiveMcpProviders();
-        const sessionRecord = await persistTimeoutSessionRecord({
+        const sessionRecord = await persistContinuationSessionRecord({
           ...sessionRecordBase(),
           currentSliceId,
           currentDurationMs: currentDurationMs(),
           currentUsage: usage,
           messages: resumeMessages,
           errorMessage: error instanceof Error ? error.message : String(error),
+          resumeReason,
         });
         if (!sessionRecord) {
           throw new Error(
-            `Failed to persist timeout continuation for conversation=${args.conversationId} turn=${args.turnId}`,
+            `Failed to persist continuation for conversation=${args.conversationId} turn=${args.turnId}`,
           );
         }
         if (sessionRecord.state === "awaiting_resume") {
