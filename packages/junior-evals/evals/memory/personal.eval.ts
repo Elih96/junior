@@ -6,7 +6,9 @@ import {
   evalMemoryModel,
   expectActorMemorySemantics,
   memoryPluginOverrides,
+  readActiveMemories,
   readMemories,
+  seedMemory,
   visibleAssistantText,
 } from "./helpers";
 import { createMemoryAgent } from "../../../junior-memory/src/agent";
@@ -135,7 +137,51 @@ describeEval("Personal Memory", slackEvals, (it) => {
     });
   });
 
-  it("when adjudicating preference supersession, distinguish replacement from additive preferences", async () => {
+  const explicitDuplicateThread = {
+    id: "thread-memory-explicit-duplicate",
+    channel_id: "CMEMORYEXPLICITDUPLICATE",
+    thread_ts: "17000000.000004",
+  };
+
+  it("when explicitly asked to remember an existing preference, acknowledge the existing memory", async ({
+    run,
+  }) => {
+    await clearMemories();
+    await seedMemory({
+      content: "Prefers PR summaries with risks first.",
+      idempotencyKey: "eval-memory-explicit-duplicate",
+      thread: explicitDuplicateThread,
+    });
+
+    await run({
+      overrides: memoryPluginOverrides,
+      initialEvents: [
+        mention(
+          "Please remember that I want risk notes at the start of PR summaries.",
+          { thread: explicitDuplicateThread },
+        ),
+      ],
+      criteria: rubric({
+        pass: [
+          "The assistant confirms that the preference is already remembered or remains remembered.",
+          "The assistant does not imply that a second or additional memory was created.",
+        ],
+        fail: [
+          "Do not claim that a new or additional memory was created when the preference was already remembered.",
+          "Do not expose hidden memory ids, scope keys, actor ids, or Slack ids.",
+        ],
+      }),
+    });
+
+    await expect(readActiveMemories(explicitDuplicateThread)).resolves.toEqual([
+      expect.objectContaining({
+        content: "Prefers PR summaries with risks first.",
+        scope: "personal",
+      }),
+    ]);
+  });
+
+  it("when adjudicating preferences, distinguish duplicates, replacements, and additive preferences", async () => {
     const agent = createMemoryAgent(evalMemoryModel);
     const runtimeContext = {
       conversationId: "slack:CMEMORYSUPERSESSION:17000000.000003",
@@ -172,6 +218,24 @@ describeEval("Personal Memory", slackEvals, (it) => {
       supersededIds: ["memory-old-language"],
     });
 
+    const duplicate = await agent.adjudicateSupersession({
+      candidate: {
+        content: "Wants meeting reminders 24 hours in advance.",
+        kind: "preference",
+      },
+      existingMemories: [
+        {
+          content: "Prefers calendar reminders one day before meetings.",
+          id: "memory-existing-reminder-timing",
+        },
+      ],
+      runtimeContext,
+    });
+    expect(duplicate).toEqual({
+      decision: "duplicate",
+      duplicateId: "memory-existing-reminder-timing",
+    });
+
     const additive = await agent.adjudicateSupersession({
       candidate: {
         content: "Prefers Slack updates in the morning.",
@@ -185,6 +249,21 @@ describeEval("Personal Memory", slackEvals, (it) => {
       ],
       runtimeContext,
     });
-    expect(additive.decision).not.toBe("supersedes_old");
+    expect(additive).toEqual({ decision: "distinct" });
+
+    const sameTopicAdditive = await agent.adjudicateSupersession({
+      candidate: {
+        content: "Prefers PR summaries to name an owner for every risk.",
+        kind: "preference",
+      },
+      existingMemories: [
+        {
+          content: "Prefers PR summaries with risks first.",
+          id: "memory-existing-summary-order",
+        },
+      ],
+      runtimeContext,
+    });
+    expect(sameTopicAdditive).toEqual({ decision: "distinct" });
   }, 120_000);
 });

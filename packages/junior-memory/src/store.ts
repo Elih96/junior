@@ -50,24 +50,14 @@ const DEFAULT_LIST_LIMIT = 50;
 const DEFAULT_SEARCH_LIMIT = 10;
 const DEFAULT_EXPIRED_ARCHIVE_LIMIT = 100;
 const HIGH_CONFIDENCE_DUPLICATE_DISTANCE = 0.015;
-const SUPERSESSION_CANDIDATE_LIMIT = 10;
+const PREFERENCE_ADJUDICATION_CANDIDATE_LIMIT = 10;
+const PREFERENCE_ADJUDICATION_VECTOR_LIMIT = 5;
 const VECTOR_SEARCH_OVERFETCH = 4;
 const MAX_MEMORY_CONTENT_CHARS = 4_000;
 const EMBEDDING_METRIC = "cosine";
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 const RELEVANCE_NEAR_TIE_DELTA = 0.01;
 const SOURCE_CHANNEL_BOOST = 0.05;
-const SUPERSESSION_STOP_TERMS = new Set([
-  "and",
-  "for",
-  "prefer",
-  "prefers",
-  "preference",
-  "the",
-  "use",
-  "uses",
-  "with",
-]);
 
 export type MemoryDb = PgDatabase<PgQueryResultHKT, typeof memorySqlSchema>;
 
@@ -206,6 +196,61 @@ const embeddingResultSchema = z
     vectors: z.array(embeddingVectorSchema),
   })
   .strict();
+const memorySupersessionCandidateSchema = z
+  .object({
+    content: z.string().min(1),
+    id: z.string().min(1),
+  })
+  .strict();
+const memorySupersessionCandidatesSchema = z
+  .array(memorySupersessionCandidateSchema)
+  .min(1)
+  .max(PREFERENCE_ADJUDICATION_CANDIDATE_LIMIT);
+const supersededIdsSchema = z
+  .array(z.string().min(1))
+  .min(1)
+  .max(PREFERENCE_ADJUDICATION_CANDIDATE_LIMIT);
+
+/** Validated preference comparison input supplied to a supersession decider. */
+export const memorySupersessionInputSchema = z
+  .object({
+    candidate: z
+      .object({
+        content: z.string().min(1),
+        kind: z.literal("preference"),
+      })
+      .strict(),
+    existingMemories: memorySupersessionCandidatesSchema,
+    runtimeContext: memoryRuntimeContextSchema,
+  })
+  .strict();
+
+/**
+ * Validated preference decision whose referenced ids must come from the
+ * supplied existing memories.
+ */
+export const memorySupersessionDecisionSchema = z.discriminatedUnion(
+  "decision",
+  [
+    z
+      .object({
+        decision: z.literal("duplicate"),
+        duplicateId: z.string().min(1),
+      })
+      .strict(),
+    z
+      .object({
+        decision: z.literal("supersedes_old"),
+        supersededIds: supersededIdsSchema,
+      })
+      .strict(),
+    z
+      .object({
+        decision: z.enum(["distinct", "uncertain"]),
+      })
+      .strict(),
+  ],
+);
 
 export type MemoryRecord = z.output<typeof memoryRecordSchema>;
 export type CreateMemoryInput = z.output<typeof createMemoryInputSchema>;
@@ -240,35 +285,16 @@ export interface MemoryEmbeddingProvider {
   }>;
 }
 
-export interface MemorySupersessionInput {
-  candidate: {
-    content: string;
-    kind: "preference";
-  };
-  existingMemories: [
-    {
-      content: string;
-      id: string;
-    },
-    ...Array<{
-      content: string;
-      id: string;
-    }>,
-  ];
-  runtimeContext: MemoryRuntimeContext;
-}
+export type MemorySupersessionInput = z.output<
+  typeof memorySupersessionInputSchema
+>;
 
-export type MemorySupersessionDecision =
-  | {
-      decision: "supersedes_old";
-      supersededIds: [string, ...string[]];
-    }
-  | {
-      decision: "distinct" | "uncertain";
-    };
+export type MemorySupersessionDecision = z.output<
+  typeof memorySupersessionDecisionSchema
+>;
 
 export interface MemorySupersessionDecider {
-  /** Decide whether a new preference clearly replaces active old preferences. */
+  /** Classify a new preference against related active preferences. */
   adjudicateSupersession(
     input: MemorySupersessionInput,
   ): Promise<MemorySupersessionDecision> | MemorySupersessionDecision;
@@ -792,74 +818,52 @@ async function rememberDuplicateIdempotency(args: {
     .onConflictDoNothing();
 }
 
-async function listSupersessionCandidates(args: {
-  content: string;
+/** Select semantic preferences, then fill the window by recency for unembedded records. */
+async function listPreferenceAdjudicationCandidates(args: {
   db: MemoryDb;
   embedding?: MemoryEmbedding;
-  kind: MemoryRecord["kind"];
   nowMs: number;
   scope: ResolvedMemoryScope;
   subject: ResolvedMemorySubject;
 }): Promise<MemoryRecord[]> {
-  const predicate = activeScopedSubjectPredicate(args);
-  const terms = searchTerms(args.content).filter(
-    (term) => !SUPERSESSION_STOP_TERMS.has(term),
-  );
-  const lexicalRows =
-    terms.length > 0
-      ? await args.db
-          .select()
-          .from(juniorMemoryMemories)
-          .where(
-            and(
-              predicate,
-              or(
-                ...terms.map((term) =>
-                  ilike(juniorMemoryMemories.content, `%${term}%`),
-                ),
-              ),
-            ),
-          )
-      : [];
-  const lexicalCandidates = lexicalRows
-    .map(parseMemoryRow)
-    .map((memory) => ({
-      memory,
-      score: searchScore(memory, terms),
-    }))
-    .filter((candidate) => candidate.score > 1)
-    .sort(
-      (left, right) =>
-        right.score - left.score ||
-        right.memory.createdAtMs - left.memory.createdAtMs ||
-        left.memory.id.localeCompare(right.memory.id),
-    )
-    .map((candidate) => candidate.memory);
-
   const vectorCandidates = args.embedding
-    ? await listVectorSupersessionCandidates({
+    ? await listVectorPreferenceAdjudicationCandidates({
         db: args.db,
         embedding: args.embedding,
-        kind: args.kind,
         nowMs: args.nowMs,
         scope: args.scope,
         subject: args.subject,
       })
     : [];
-  const byId = new Map<string, MemoryRecord>();
-  for (const memory of [...lexicalCandidates, ...vectorCandidates]) {
-    if (byId.size >= SUPERSESSION_CANDIDATE_LIMIT) {
-      break;
-    }
-    byId.set(memory.id, memory);
-  }
-  return [...byId.values()];
+  const recentCandidates = (
+    await args.db
+      .select()
+      .from(juniorMemoryMemories)
+      .where(
+        activeScopedSubjectPredicate({
+          ...args,
+          kind: "preference",
+        }),
+      )
+      .orderBy(
+        desc(juniorMemoryMemories.createdAtMs),
+        asc(juniorMemoryMemories.id),
+      )
+      .limit(PREFERENCE_ADJUDICATION_CANDIDATE_LIMIT)
+  ).map(parseMemoryRow);
+  return [
+    ...new Map(
+      [...vectorCandidates, ...recentCandidates].map((memory) => [
+        memory.id,
+        memory,
+      ]),
+    ).values(),
+  ].slice(0, PREFERENCE_ADJUDICATION_CANDIDATE_LIMIT);
 }
 
-async function listVectorSupersessionCandidates(args: {
+async function listVectorPreferenceAdjudicationCandidates(args: {
   db: MemoryDb;
   embedding: MemoryEmbedding;
-  kind: MemoryRecord["kind"];
   nowMs: number;
   scope: ResolvedMemoryScope;
   subject: ResolvedMemorySubject;
@@ -881,7 +885,7 @@ async function listVectorSupersessionCandidates(args: {
     )
     .where(
       and(
-        activeScopedSubjectPredicate(args),
+        activeScopedSubjectPredicate({ ...args, kind: "preference" }),
         eq(juniorMemoryEmbeddings.provider, args.embedding.provider),
         eq(juniorMemoryEmbeddings.model, args.embedding.model),
         eq(juniorMemoryEmbeddings.dimensions, MEMORY_EMBEDDING_DIMENSIONS),
@@ -893,7 +897,7 @@ async function listVectorSupersessionCandidates(args: {
       desc(juniorMemoryMemories.createdAtMs),
       asc(juniorMemoryMemories.id),
     )
-    .limit(SUPERSESSION_CANDIDATE_LIMIT);
+    .limit(PREFERENCE_ADJUDICATION_VECTOR_LIMIT);
   return rows.flatMap((row) => {
     if (hashEmbeddedContent(row.memory.content) !== row.contentHash) {
       return [];
@@ -902,26 +906,32 @@ async function listVectorSupersessionCandidates(args: {
   });
 }
 
-async function decideSupersededIds(args: {
+type PreferenceAdjudicationResult =
+  | { decision: "create" }
+  | { decision: "duplicate"; memory: MemoryRecord }
+  | { decision: "supersede"; ids: [string, ...string[]] };
+
+/**
+ * Normalize a preference decision to known duplicate or supersession targets.
+ * Uncertainty, invalid ids, and model failure leave existing memories active.
+ */
+async function adjudicatePreferenceCandidate(args: {
   candidates: MemoryRecord[];
   content: string;
-  decider: MemorySupersessionDecider | undefined;
-  kind: MemoryRecord["kind"];
+  decider: MemorySupersessionDecider;
   runtimeContext: MemoryRuntimeContext;
-}): Promise<string[]> {
-  // Supersession is conservative: model uncertainty or decider failure leaves
-  // both memories active rather than hiding a possibly valid old preference.
-  if (
-    args.kind !== "preference" ||
-    !args.decider ||
-    args.candidates.length === 0
-  ) {
-    return [];
+}): Promise<PreferenceAdjudicationResult> {
+  const [firstCandidate, ...remainingCandidates] = args.candidates;
+  if (!firstCandidate) {
+    return { decision: "create" };
   }
-  const existingMemories = args.candidates.map((memory) => ({
-    content: memory.content,
-    id: memory.id,
-  })) as MemorySupersessionInput["existingMemories"];
+  const existingMemories = [
+    { content: firstCandidate.content, id: firstCandidate.id },
+    ...remainingCandidates.map((memory) => ({
+      content: memory.content,
+      id: memory.id,
+    })),
+  ];
   const candidateIds = new Set(args.candidates.map((memory) => memory.id));
   try {
     const decision = await args.decider.adjudicateSupersession({
@@ -932,12 +942,24 @@ async function decideSupersededIds(args: {
       existingMemories,
       runtimeContext: args.runtimeContext,
     });
-    if (decision.decision !== "supersedes_old") {
-      return [];
+    if (decision.decision === "duplicate") {
+      const memory = args.candidates.find(
+        (candidate) => candidate.id === decision.duplicateId,
+      );
+      return memory
+        ? { decision: "duplicate", memory }
+        : { decision: "create" };
     }
-    return decision.supersededIds.filter((id) => candidateIds.has(id));
+    if (decision.decision === "supersedes_old") {
+      const ids = decision.supersededIds.filter((id) => candidateIds.has(id));
+      const [firstId, ...remainingIds] = ids;
+      return firstId
+        ? { decision: "supersede", ids: [firstId, ...remainingIds] }
+        : { decision: "create" };
+    }
+    return { decision: "create" };
   } catch {
-    return [];
+    return { decision: "create" };
   }
 }
 
@@ -1176,6 +1198,29 @@ export function createMemoryStore(
     });
   }
 
+  async function reuseDuplicateMemory(args: {
+    content: string;
+    duplicate: MemoryRecord;
+    idempotencyKey?: string;
+    nowMs: number;
+    scope: ResolvedMemoryScope;
+    subject: ResolvedMemorySubject;
+  }): Promise<CreateMemoryResult> {
+    await rememberDuplicateIdempotency({
+      ...args,
+      db,
+      runtimeContext,
+    });
+    await storeEmbedding({
+      content: args.duplicate.content,
+      db,
+      embedder,
+      memoryId: args.duplicate.id,
+      nowMs: args.nowMs,
+    });
+    return { created: false, memory: args.duplicate };
+  }
+
   /** Persist a memory under the plugin-derived scope and subject. */
   async function createScopedMemory(
     rawInput: CreateMemoryInput,
@@ -1229,24 +1274,14 @@ export function createMemoryStore(
       subject,
     });
     if (exactDuplicate) {
-      await rememberDuplicateIdempotency({
+      return await reuseDuplicateMemory({
         content,
-        db,
         duplicate: exactDuplicate,
         idempotencyKey: input.idempotencyKey,
         nowMs,
-        runtimeContext,
         scope,
         subject,
       });
-      await storeEmbedding({
-        content: exactDuplicate.content,
-        db,
-        embedder,
-        memoryId: exactDuplicate.id,
-        nowMs,
-      });
-      return { created: false, memory: exactDuplicate };
     }
 
     let candidateEmbedding: MemoryEmbedding | undefined;
@@ -1268,24 +1303,14 @@ export function createMemoryStore(
         })
       : undefined;
     if (vectorDuplicate) {
-      await rememberDuplicateIdempotency({
+      return await reuseDuplicateMemory({
         content,
-        db,
         duplicate: vectorDuplicate,
         idempotencyKey: input.idempotencyKey,
         nowMs,
-        runtimeContext,
         scope,
         subject,
       });
-      await storeEmbedding({
-        content: vectorDuplicate.content,
-        db,
-        embedder,
-        memoryId: vectorDuplicate.id,
-        nowMs,
-      });
-      return { created: false, memory: vectorDuplicate };
     }
 
     let supersededIds: string[] = [];
@@ -1295,22 +1320,32 @@ export function createMemoryStore(
       supersessionDecider &&
       (input.expiresAtMs === undefined || input.expiresAtMs > nowMs)
     ) {
-      const supersessionCandidates = await listSupersessionCandidates({
-        content,
+      const preferenceCandidates = await listPreferenceAdjudicationCandidates({
         db,
         ...(candidateEmbedding ? { embedding: candidateEmbedding } : {}),
-        kind: input.kind,
         nowMs,
         scope,
         subject,
       });
-      supersededIds = await decideSupersededIds({
-        candidates: supersessionCandidates,
+      const adjudication = await adjudicatePreferenceCandidate({
+        candidates: preferenceCandidates,
         content,
         decider: supersessionDecider,
-        kind: input.kind,
         runtimeContext,
       });
+      if (adjudication.decision === "duplicate") {
+        return await reuseDuplicateMemory({
+          content,
+          duplicate: adjudication.memory,
+          idempotencyKey: input.idempotencyKey,
+          nowMs,
+          scope,
+          subject,
+        });
+      }
+      if (adjudication.decision === "supersede") {
+        supersededIds = adjudication.ids;
+      }
     }
 
     const id = randomUUID();
