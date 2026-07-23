@@ -1,6 +1,6 @@
 # @sentry/junior-vercel
 
-`@sentry/junior-vercel` adds read-only Vercel deployment and log investigation workflows to Junior through the Vercel CLI.
+`@sentry/junior-vercel` adds read-only Vercel deployment and log investigation workflows through the Vercel CLI. Signed Vercel webhooks can also notify an existing Junior conversation when a deployment succeeds, fails, or is canceled.
 
 ## Install
 
@@ -10,12 +10,13 @@ pnpm add @sentry/junior @sentry/junior-vercel
 
 ## Configure
 
-Add the package name to the plugin set exported from `plugins.ts`:
+Add the plugin factory to the plugin set exported from `plugins.ts`:
 
 ```ts
 import { defineJuniorPlugins } from "@sentry/junior";
+import { vercelPlugin } from "@sentry/junior-vercel";
 
-export const plugins = defineJuniorPlugins(["@sentry/junior-vercel"]);
+export const plugins = defineJuniorPlugins([vercelPlugin()]);
 ```
 
 Point `juniorNitro()` at that plugin module:
@@ -32,11 +33,25 @@ JUNIOR_VERCEL_TOKEN=...
 
 Use a Vercel service account or token with the smallest project/team access that covers the deployments users need to inspect.
 
+## Optional deployment webhooks
+
+In **Vercel Team Settings → Webhooks**, create a project-scoped [account webhook](https://vercel.com/docs/webhooks#account-webhooks). Account webhooks are available for Pro and Enterprise teams.
+
+```text
+https://<junior-host>/api/webhooks/vercel
+```
+
+The endpoint must be publicly reachable. Subscribe it to `deployment.succeeded`, `deployment.error`, and `deployment.canceled`, select the projects Junior should monitor, and save the one-time secret as a sensitive `VERCEL_WEBHOOK_SECRET` value in Junior's Production environment. Redeploy Junior after adding it.
+
+Deployment watches use Vercel's canonical `prj_...` ID. Junior resolves that ID from the project name or ID and optional team slug or ID through Vercel's authenticated project API.
+
+Create the conversation watch before the terminal deployment event. A valid webhook delivery does not create a watch by itself, and unmatched deliveries are not replayed later.
+
 ## Auth model
 
 - This package uses a deployment-level Vercel token, not per-user OAuth.
 - Junior keeps the real `JUNIOR_VERCEL_TOKEN` host-side.
-- Matching Vercel API requests from the CLI receive a host-managed `Authorization` header.
+- Matching Vercel API requests from the CLI and plugin tools receive a host-managed `Authorization` header.
 - The sandbox receives only a non-secret placeholder `VERCEL_TOKEN` so the Vercel CLI can run normally before making API requests.
 
 ## Optional channel defaults
