@@ -17,8 +17,9 @@ runtime orchestration.
 
 - Post each completed tool-free assistant message in the originating
   conversation context, preserving destination-visible model message
-  boundaries. Tool-bearing assistant text remains agent history; explicit
-  progress uses the status surface.
+  boundaries. Attach the compact conversation footer on the last chunk of
+  each visible assistant message. Tool-bearing assistant text remains agent
+  history; explicit progress uses the status surface.
 - Translate Junior Markdown to Slack `mrkdwn` only at the outbound boundary.
 - Continue oversized replies without splitting code fences into invalid
   fragments.
@@ -31,9 +32,11 @@ runtime orchestration.
   resume the agent from its latest saved history; a reply may be
   duplicated if Slack accepted it before the failure became visible.
 
-`outbound.ts` owns Slack API calls and immediate transport retries. `errors.ts`
-owns reply-failure classification. `mrkdwn.ts` owns format conversion.
-`assistant-thread/` owns assistant-thread lifecycle and status rendering.
+`reply.ts` owns destination-visible reply chunking, conversation footers, and
+the `sendSlackReply` helper. `outbound.ts` owns Slack API calls and immediate
+transport retries. `errors.ts` owns reply-failure classification. `mrkdwn.ts`
+owns format conversion. `assistant-thread/` owns assistant-thread lifecycle and
+status rendering.
 
 ## Boundaries
 

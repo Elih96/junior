@@ -397,9 +397,7 @@ describe("Slack behavior: durable turn steering", () => {
       expect.objectContaining({
         channel: CHANNEL_ID,
         thread_ts: THREAD_TS,
-        markdown_text: expect.stringContaining(
-          "Steered: include the rollback owner",
-        ),
+        text: expect.stringContaining("Steered: include the rollback owner"),
       }),
     );
 
@@ -425,9 +423,7 @@ describe("Slack behavior: durable turn steering", () => {
     ]);
     const deliveredMessages = slackApiOutbox.messages();
     expect(deliveredMessages).toHaveLength(2);
-    expect(
-      deliveredMessages.map((message) => message.params.markdown_text),
-    ).toEqual([
+    expect(deliveredMessages.map((message) => message.params.text)).toEqual([
       "Handled initial: start the incident summary\n\nSteered: include the rollback owner",
       `Handled initial: ${agentCalls[1]?.prompt}\n\nSteered:`,
     ]);
