@@ -246,6 +246,11 @@ export function projectConversationReportEvents(args: {
     } else if (event.data.type === "handoff") {
       data = {
         type: "handoff",
+        modelProfile: event.data.modelProfile,
+        modelId: event.data.modelId,
+        ...(event.data.reasoningLevel
+          ? { reasoningLevel: event.data.reasoningLevel }
+          : {}),
         ...(event.data.triggeringToolCallId
           ? { triggeringToolCallId: event.data.triggeringToolCallId }
           : {}),

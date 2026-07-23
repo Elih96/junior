@@ -157,7 +157,12 @@ export function entryMatchesSearch(
   if (entry.kind === "context") {
     const event = entry.part.event;
     return event.type === "handoff"
-      ? textContains("model handoff", normalizedQuery)
+      ? [
+          "model handoff",
+          event.modelProfile,
+          event.modelId,
+          event.reasoningLevel,
+        ].some((value) => textContains(value, normalizedQuery))
       : textContains("context compacted", normalizedQuery);
   }
 

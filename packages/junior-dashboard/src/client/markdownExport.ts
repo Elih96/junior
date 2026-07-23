@@ -173,6 +173,11 @@ function appendContextEvent(
     event.type === "handoff" ? "### Model handoff" : "### Context compacted",
   );
   addEventMeta(lines, conversationTranscript, timestamp);
+  if (event.type === "handoff") {
+    addMetaLine(lines, "Profile", event.modelProfile);
+    addMetaLine(lines, "Model", event.modelId);
+    addMetaLine(lines, "Reasoning", event.reasoningLevel);
+  }
 }
 
 function appendResourceEvent(

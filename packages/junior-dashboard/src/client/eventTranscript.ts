@@ -159,7 +159,18 @@ export function conversationTranscriptMessages(
         eventMessage(event, "system", [
           {
             type: "context_event",
-            event: { type: data.type, createdAt: event.createdAt },
+            event:
+              data.type === "handoff"
+                ? {
+                    type: data.type,
+                    createdAt: event.createdAt,
+                    modelId: data.modelId,
+                    modelProfile: data.modelProfile,
+                    ...(data.reasoningLevel
+                      ? { reasoningLevel: data.reasoningLevel }
+                      : {}),
+                  }
+                : { type: data.type, createdAt: event.createdAt },
           },
         ]),
       );
