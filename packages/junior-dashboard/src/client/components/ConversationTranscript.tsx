@@ -2,6 +2,7 @@ import { Fragment, type ClipboardEventHandler, type ReactNode } from "react";
 import {
   Bot,
   CircleAlert,
+  Diff,
   Minimize2,
   Send,
   type LucideIcon,
@@ -57,7 +58,11 @@ import {
   transcriptEmptyClass,
   mutedTranscriptMetaClass,
 } from "./transcriptStyles";
-import { entryMatchesSearch, useTranscriptSearch } from "./transcriptSearch";
+import {
+  entryMatchesSearch,
+  HighlightText,
+  useTranscriptSearch,
+} from "./transcriptSearch";
 
 type TranscriptEntry = ReturnType<typeof groupTranscriptMessages>[number];
 type TranscriptContextEntry = Extract<TranscriptEntry, { kind: "context" }>;
@@ -305,14 +310,23 @@ function VisibleTranscriptEntries(props: {
           timestamp={entry.timestamp}
         />
       )}
-      renderMessage={(entry, index) => (
-        <TranscriptMessageView
-          key={`${props.conversation.conversationId}:${index}`}
-          message={entry.message}
-          conversation={props.conversation}
-          view={props.view}
-        />
-      )}
+      renderMessage={(entry, index) =>
+        entry.message.eventType ? (
+          <TranscriptRailEvent
+            key={`${props.conversation.conversationId}:event:${index}`}
+            kind="resource_event"
+          >
+            <TranscriptResourceEventView message={entry.message} />
+          </TranscriptRailEvent>
+        ) : (
+          <TranscriptMessageView
+            key={`${props.conversation.conversationId}:${index}`}
+            message={entry.message}
+            conversation={props.conversation}
+            view={props.view}
+          />
+        )
+      }
       renderSubagent={(entry, index) => (
         <TranscriptRailEvent
           key={`${props.conversation.conversationId}:subagent:${index}`}
@@ -446,7 +460,11 @@ function TranscriptFailureView(props: {
   );
 }
 
-type TranscriptRailEventKind = "compaction" | "handoff" | "subagent";
+type TranscriptRailEventKind =
+  | "compaction"
+  | "handoff"
+  | "resource_event"
+  | "subagent";
 
 /** Anchor noteworthy transcript events to the same visual rail as turn markers. */
 function TranscriptRailEvent(props: {
@@ -461,7 +479,8 @@ function TranscriptRailEvent(props: {
       <span
         aria-hidden="true"
         className={cn(
-          "absolute -left-[1.95rem] top-1 z-[1] grid size-6 place-items-center rounded border bg-[#071012] shadow-[0_0_0_3px_#050507,0_8px_20px_rgba(0,0,0,0.3)]",
+          "absolute -left-[1.95rem] z-[1] grid size-6 place-items-center rounded border bg-[#071012] shadow-[0_0_0_3px_#050507,0_8px_20px_rgba(0,0,0,0.3)]",
+          props.kind === "resource_event" ? "top-2" : "top-1",
           marker.className,
         )}
       >
@@ -476,6 +495,12 @@ function transcriptRailMarker(kind: TranscriptRailEventKind): {
   className: string;
   icon: LucideIcon;
 } {
+  if (kind === "resource_event") {
+    return {
+      className: "border-violet-300/35 text-violet-200",
+      icon: Diff,
+    };
+  }
   if (kind === "subagent") {
     return {
       className: "border-cyan-300/35 text-cyan-200",
@@ -525,13 +550,22 @@ function RedactedTranscriptView(props: {
           timestamp={entry.timestamp}
         />
       )}
-      renderMessage={(entry, index) => (
-        <RedactedMessageView
-          key={`${props.conversation.conversationId}:redacted:${index}`}
-          message={entry.message}
-          conversation={props.conversation}
-        />
-      )}
+      renderMessage={(entry, index) =>
+        entry.message.eventType ? (
+          <TranscriptRailEvent
+            key={`${props.conversation.conversationId}:redacted:event:${index}`}
+            kind="resource_event"
+          >
+            <TranscriptResourceEventView message={entry.message} />
+          </TranscriptRailEvent>
+        ) : (
+          <RedactedMessageView
+            key={`${props.conversation.conversationId}:redacted:${index}`}
+            message={entry.message}
+            conversation={props.conversation}
+          />
+        )
+      }
       renderSubagent={(entry, index) => (
         <TranscriptRailEvent
           key={`${props.conversation.conversationId}:redacted:subagent:${index}`}
@@ -682,6 +716,31 @@ function transcriptMeta(
   ];
 
   return items.filter((item): item is MetricListItem => Boolean(item));
+}
+
+function TranscriptResourceEventView(props: {
+  message: TranscriptMessageEntry["message"];
+}) {
+  const text = messageRawText(props.message);
+  const redacted = props.message.parts.some(
+    (part) => part.type === "text" && part.redacted,
+  );
+  return (
+    <details className="min-w-0 rounded-lg border border-violet-300/10 bg-violet-300/[0.035] px-3 py-2">
+      <summary className="cursor-pointer list-none font-display text-[0.88rem] font-semibold text-violet-100 [&::-webkit-details-marker]:hidden">
+        <HighlightText text={props.message.eventType ?? ""} />
+      </summary>
+      {text ? (
+        <div className="mt-2 whitespace-pre-wrap text-[0.8rem] leading-relaxed text-white/55">
+          <HighlightText text={text} />
+        </div>
+      ) : redacted ? (
+        <div className="mt-2">
+          <RedactedMarker />
+        </div>
+      ) : null}
+    </details>
+  );
 }
 
 function TranscriptMessageView(props: {

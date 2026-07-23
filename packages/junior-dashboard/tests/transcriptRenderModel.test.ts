@@ -88,6 +88,29 @@ describe("canonical event transcript reduction", () => {
     expect(messages[1]?.parts).toEqual([{ type: "text", redacted: true }]);
   });
 
+  it("preserves resource event type for special rendering", () => {
+    const [message] = conversationTranscriptMessages(
+      conversation([
+        event(0, "2026-01-01T00:00:00.000Z", {
+          type: "message",
+          messageId: "event-1",
+          role: "user",
+          eventType: "pull_request.merged",
+          text: "line one\nline two",
+        }),
+      ]),
+    );
+
+    expect(message).toMatchObject({
+      eventType: "pull_request.merged",
+      parts: [{ type: "text", text: "line one\nline two" }],
+    });
+    const [entry] = groupTranscriptMessages(message ? [message] : []);
+    expect(entry && entryMatchesSearch(entry, "pull_request.merged")).toBe(
+      true,
+    );
+  });
+
   it("renders a tool start as one running invocation", () => {
     const [message] = conversationTranscriptMessages(
       conversation([
