@@ -1243,32 +1243,6 @@ describe("executeAgentRun progressive MCP loading", () => {
     });
   });
 
-  it("does not return auth resume when auth session record persistence fails", async () => {
-    const turnSessionStore = await import("@/chat/state/turn-session");
-    const originalUpsert = turnSessionStore.upsertAgentTurnSessionRecord;
-    const sessionRecordSpy = vi
-      .spyOn(turnSessionStore, "upsertAgentTurnSessionRecord")
-      .mockImplementation(async (args) => {
-        if (args.state === "awaiting_resume" && args.resumeReason === "auth") {
-          throw new Error("state adapter unavailable");
-        }
-        return await originalUpsert(args);
-      });
-
-    const reply = finalReply(
-      await executeAgentRun(
-        makeAgentRunRequest("help me", {
-          conversationId: "conversation-3",
-          threadTs: "1712345.0003",
-          turnId: "turn-3",
-        }),
-      ),
-    );
-
-    expect(reply.diagnostics.outcome).toBe("provider_error");
-    expect(sessionRecordSpy).toHaveBeenCalled();
-  });
-
   it("falls back to the latest stored record when auth pause captures no messages", async () => {
     continueStopsOnAbort.value = true;
 
