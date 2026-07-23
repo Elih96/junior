@@ -74,6 +74,9 @@ let registeredPlugins: PluginRegistration[] = [];
 const PLUGIN_NAME_RE = /^[a-z][a-z0-9-]*$/;
 const PLUGIN_TOOL_NAME_RE = /^[a-z][A-Za-z0-9]*$/;
 const OPERATIONAL_REPORT_MAX_METRICS = 8;
+const OPERATIONAL_REPORT_MAX_WIDGETS = 12;
+const OPERATIONAL_REPORT_MAX_CHART_SERIES = 8;
+const OPERATIONAL_REPORT_MAX_CHART_CATEGORIES = 100;
 const OPERATIONAL_REPORT_MAX_RECORD_SETS = 8;
 const OPERATIONAL_REPORT_MAX_FIELDS = 8;
 const OPERATIONAL_REPORT_MAX_RECORDS = 25;
@@ -808,6 +811,101 @@ function sanitizeOperationalReport(args: {
     .filter((recordSet): recordSet is NonNullable<typeof recordSet> =>
       Boolean(recordSet),
     );
+  const widgets = args.report.widgets
+    ?.slice(0, OPERATIONAL_REPORT_MAX_WIDGETS)
+    .map((widget, widgetIndex) => {
+      const id =
+        operationalReportText(widget.id, OPERATIONAL_REPORT_MAX_LABEL_LENGTH) ??
+        String(widgetIndex);
+      const title = operationalReportText(
+        widget.title,
+        OPERATIONAL_REPORT_MAX_LABEL_LENGTH,
+      );
+      if (!title) {
+        return undefined;
+      }
+      const seriesEntries = widget.series
+        .slice(0, OPERATIONAL_REPORT_MAX_CHART_SERIES)
+        .map((item) => {
+          const key = operationalReportText(
+            item.key,
+            OPERATIONAL_REPORT_MAX_LABEL_LENGTH,
+          );
+          const label = operationalReportText(
+            item.label,
+            OPERATIONAL_REPORT_MAX_LABEL_LENGTH,
+          );
+          if (!key || !label) {
+            return undefined;
+          }
+          const sanitizedSeries: NonNullable<
+            PluginOperationalReport["widgets"]
+          >[number]["series"][number] = { key, label };
+          const tone = operationalReportTone(item.tone);
+          if (tone) {
+            sanitizedSeries.tone = tone;
+          }
+          return { sanitizedSeries, sourceKey: item.key };
+        })
+        .filter((item): item is NonNullable<typeof item> => Boolean(item));
+      if (!seriesEntries.length) {
+        return undefined;
+      }
+      const series = seriesEntries.map((item) => item.sanitizedSeries);
+      const categories = widget.categories
+        .slice(-OPERATIONAL_REPORT_MAX_CHART_CATEGORIES)
+        .map((category, categoryIndex) => ({
+          id:
+            operationalReportText(
+              category.id,
+              OPERATIONAL_REPORT_MAX_LABEL_LENGTH,
+            ) ?? `${widgetIndex}:${categoryIndex}`,
+          label:
+            operationalReportText(
+              category.label,
+              OPERATIONAL_REPORT_MAX_LABEL_LENGTH,
+            ) ?? String(categoryIndex + 1),
+          values: Object.fromEntries(
+            seriesEntries.map(({ sanitizedSeries, sourceKey }) => [
+              sanitizedSeries.key,
+              Number.isFinite(category.values[sourceKey])
+                ? category.values[sourceKey]
+                : 0,
+            ]),
+          ),
+        }));
+      const sanitizedWidget: NonNullable<
+        PluginOperationalReport["widgets"]
+      >[number] = {
+        categories,
+        id,
+        series,
+        title,
+        type: "bar_chart",
+      };
+      const description = operationalReportText(
+        widget.description,
+        OPERATIONAL_REPORT_MAX_VALUE_LENGTH,
+      );
+      if (description) {
+        sanitizedWidget.description = description;
+      }
+      const emptyText = operationalReportText(
+        widget.emptyText,
+        OPERATIONAL_REPORT_MAX_VALUE_LENGTH,
+      );
+      if (emptyText) {
+        sanitizedWidget.emptyText = emptyText;
+      }
+      const timeRangeDays = widget.timeRangeDays?.filter(
+        (days): days is 7 | 30 | 90 => days === 7 || days === 30 || days === 90,
+      );
+      if (timeRangeDays?.length) {
+        sanitizedWidget.timeRangeDays = [...new Set(timeRangeDays)];
+      }
+      return sanitizedWidget;
+    })
+    .filter((widget): widget is NonNullable<typeof widget> => Boolean(widget));
 
   const sanitized: PluginOperationalReport = {
     pluginName: args.pluginName,
@@ -824,6 +922,9 @@ function sanitizeOperationalReport(args: {
   }
   if (metrics?.length) {
     sanitized.metrics = metrics;
+  }
+  if (widgets?.length) {
+    sanitized.widgets = widgets;
   }
   const title = operationalReportText(
     args.report.title,

@@ -65,6 +65,26 @@ const issueStatsSchema = z
     medianCloseTimeMs: row.medianCloseTimeMs ?? undefined,
   }));
 
+const pullRequestDaySchema = z
+  .object({
+    closed: z.number().int().nonnegative(),
+    created: z.number().int().nonnegative(),
+    date: z.string().date(),
+    merged: z.number().int().nonnegative(),
+  })
+  .strict();
+
+const issueDaySchema = z
+  .object({
+    closedCompleted: z.number().int().nonnegative(),
+    closedDuplicate: z.number().int().nonnegative(),
+    closedNotPlanned: z.number().int().nonnegative(),
+    closedUnknown: z.number().int().nonnegative(),
+    created: z.number().int().nonnegative(),
+    date: z.string().date(),
+  })
+  .strict();
+
 const issueRepositoryStatsSchema = z
   .object({
     closedCompleted: z.number().int().nonnegative(),
@@ -82,6 +102,8 @@ type PullRequestRepositoryStats = z.output<
 >;
 type IssueStats = z.output<typeof issueStatsSchema>;
 type IssueRepositoryStats = z.output<typeof issueRepositoryStatsSchema>;
+type PullRequestDay = z.output<typeof pullRequestDaySchema>;
+type IssueDay = z.output<typeof issueDaySchema>;
 
 function queryRows(result: unknown): unknown[] {
   if (
@@ -174,6 +196,59 @@ async function aggregatePullRequestWindows(args: {
     ORDER BY windows.days
   `);
   return z.array(pullRequestStatsSchema).parse(queryRows(result));
+}
+
+async function aggregatePullRequestDays(args: {
+  db: GitHubDb;
+  nowMs: number;
+}): Promise<PullRequestDay[]> {
+  const end = new Date(args.nowMs);
+  const start = startOfUtcDay(args.nowMs - (WINDOWS.at(-1)! - 1) * DAY_MS);
+  const table = juniorGitHubPullRequests;
+  const result = await args.db.execute(sql`
+    WITH days AS (
+      SELECT generate_series(
+        date_trunc('day', ${start}::timestamptz AT TIME ZONE 'UTC'),
+        date_trunc('day', ${end}::timestamptz AT TIME ZONE 'UTC'),
+        interval '1 day'
+      ) AS day
+    ), events AS (
+      SELECT
+        date_trunc('day', ${table.openedAt} AT TIME ZONE 'UTC') AS day,
+        'created' AS kind
+      FROM ${table}
+      WHERE ${table.openedAt} >= ${start}
+      UNION ALL
+      SELECT
+        date_trunc('day', ${table.mergedAt} AT TIME ZONE 'UTC') AS day,
+        'merged' AS kind
+      FROM ${table}
+      WHERE ${table.state} = 'merged' AND ${table.mergedAt} >= ${start}
+      UNION ALL
+      SELECT
+        date_trunc('day', ${table.closedAt} AT TIME ZONE 'UTC') AS day,
+        'closed' AS kind
+      FROM ${table}
+      WHERE ${table.state} = 'closed_unmerged' AND ${table.closedAt} >= ${start}
+    ), daily AS (
+      SELECT
+        events.day,
+        count(*) FILTER (WHERE events.kind = 'created')::integer AS created,
+        count(*) FILTER (WHERE events.kind = 'merged')::integer AS merged,
+        count(*) FILTER (WHERE events.kind = 'closed')::integer AS closed
+      FROM events
+      GROUP BY events.day
+    )
+    SELECT
+      to_char(days.day, 'YYYY-MM-DD') AS "date",
+      coalesce(daily.created, 0)::integer AS "created",
+      coalesce(daily.merged, 0)::integer AS "merged",
+      coalesce(daily.closed, 0)::integer AS "closed"
+    FROM days
+    LEFT JOIN daily ON daily.day = days.day
+    ORDER BY days.day
+  `);
+  return z.array(pullRequestDaySchema).parse(queryRows(result));
 }
 
 async function aggregatePullRequestRepositories(args: {
@@ -293,6 +368,61 @@ async function aggregateIssueWindows(args: {
   return z.array(issueStatsSchema).parse(queryRows(result));
 }
 
+async function aggregateIssueDays(args: {
+  db: GitHubDb;
+  nowMs: number;
+}): Promise<IssueDay[]> {
+  const end = new Date(args.nowMs);
+  const start = startOfUtcDay(args.nowMs - (WINDOWS.at(-1)! - 1) * DAY_MS);
+  const table = juniorGitHubIssues;
+  const result = await args.db.execute(sql`
+    WITH days AS (
+      SELECT generate_series(
+        date_trunc('day', ${start}::timestamptz AT TIME ZONE 'UTC'),
+        date_trunc('day', ${end}::timestamptz AT TIME ZONE 'UTC'),
+        interval '1 day'
+      ) AS day
+    ), events AS (
+      SELECT
+        date_trunc('day', ${table.openedAt} AT TIME ZONE 'UTC') AS day,
+        'created' AS kind
+      FROM ${table}
+      WHERE ${table.openedAt} >= ${start}
+      UNION ALL
+      SELECT
+        date_trunc('day', ${table.closedAt} AT TIME ZONE 'UTC') AS day,
+        coalesce(${table.stateReason}, 'unknown') AS kind
+      FROM ${table}
+      WHERE ${table.state} = 'closed' AND ${table.closedAt} >= ${start}
+    ), daily AS (
+      SELECT
+        events.day,
+        count(*) FILTER (WHERE events.kind = 'created')::integer AS created,
+        count(*) FILTER (WHERE events.kind = 'completed')::integer
+          AS closed_completed,
+        count(*) FILTER (WHERE events.kind = 'duplicate')::integer
+          AS closed_duplicate,
+        count(*) FILTER (WHERE events.kind = 'not_planned')::integer
+          AS closed_not_planned,
+        count(*) FILTER (WHERE events.kind = 'unknown')::integer
+          AS closed_unknown
+      FROM events
+      GROUP BY events.day
+    )
+    SELECT
+      to_char(days.day, 'YYYY-MM-DD') AS "date",
+      coalesce(daily.created, 0)::integer AS "created",
+      coalesce(daily.closed_completed, 0)::integer AS "closedCompleted",
+      coalesce(daily.closed_duplicate, 0)::integer AS "closedDuplicate",
+      coalesce(daily.closed_not_planned, 0)::integer AS "closedNotPlanned",
+      coalesce(daily.closed_unknown, 0)::integer AS "closedUnknown"
+    FROM days
+    LEFT JOIN daily ON daily.day = days.day
+    ORDER BY days.day
+  `);
+  return z.array(issueDaySchema).parse(queryRows(result));
+}
+
 async function aggregateIssueRepositories(args: {
   db: GitHubDb;
   nowMs: number;
@@ -354,18 +484,32 @@ function formatCommitComposition(stats: {
   return `${stats.juniorOnly} Junior-only · ${stats.mixed} mixed · ${stats.compositionUnknown} unknown`;
 }
 
+function startOfUtcDay(timestampMs: number): Date {
+  const date = new Date(timestampMs);
+  date.setUTCHours(0, 0, 0, 0);
+  return date;
+}
+
 /** Build the generic dashboard report for Junior-owned GitHub work outcomes. */
 export async function buildGitHubOutcomeReport(args: {
   db: GitHubDb;
   nowMs: number;
 }): Promise<PluginOperationalReportContent> {
-  const [windows, repositories, issueWindows, issueRepositories] =
-    await Promise.all([
-      aggregatePullRequestWindows(args),
-      aggregatePullRequestRepositories(args),
-      aggregateIssueWindows(args),
-      aggregateIssueRepositories(args),
-    ]);
+  const [
+    windows,
+    pullRequestDays,
+    repositories,
+    issueWindows,
+    issueDays,
+    issueRepositories,
+  ] = await Promise.all([
+    aggregatePullRequestWindows(args),
+    aggregatePullRequestDays(args),
+    aggregatePullRequestRepositories(args),
+    aggregateIssueWindows(args),
+    aggregateIssueDays(args),
+    aggregateIssueRepositories(args),
+  ]);
   const thirtyDays = windows.find((window) => window.days === 30)!;
   const issueThirtyDays = issueWindows.find((window) => window.days === 30)!;
 
@@ -373,19 +517,9 @@ export async function buildGitHubOutcomeReport(args: {
     generatedAt: new Date(args.nowMs).toISOString(),
     title: "GitHub work delivered",
     metrics: [
-      { label: "PRs created · 30d", value: String(thirtyDays.created) },
-      {
-        label: "PRs merged · 30d",
-        tone: thirtyDays.merged > 0 ? "good" : "neutral",
-        value: String(thirtyDays.merged),
-      },
       {
         label: "Junior-only merge rate · 30d",
         value: formatPercent(thirtyDays.juniorOnlyRate),
-      },
-      {
-        label: "PRs closed unmerged · 30d",
-        value: String(thirtyDays.closed),
       },
       {
         label: "PR merge rate · 30d",
@@ -395,46 +529,60 @@ export async function buildGitHubOutcomeReport(args: {
         label: "median PR merge time · 30d",
         value: formatDuration(thirtyDays.medianMergeTimeMs),
       },
-      { label: "issues created · 30d", value: String(issueThirtyDays.created) },
       {
-        label: "issues completed · 30d",
-        tone: issueThirtyDays.closedCompleted > 0 ? "good" : "neutral",
-        value: String(issueThirtyDays.closedCompleted),
-      },
-      {
-        label: "issues closed as duplicate · 30d",
-        value: String(issueThirtyDays.closedDuplicate),
-      },
-      {
-        label: "issues closed as not planned · 30d",
-        value: String(issueThirtyDays.closedNotPlanned),
+        label: "median issue close time · 30d",
+        value: formatDuration(issueThirtyDays.medianCloseTimeMs),
       },
     ],
-    recordSets: [
+    widgets: [
       {
-        title: "Pull request outcome windows",
-        fields: [
-          { key: "window", label: "Window" },
+        id: "pull-request-outcomes",
+        type: "bar_chart",
+        title: "Pull request outcomes",
+        description: "Daily outcomes",
+        timeRangeDays: [...WINDOWS],
+        series: [
           { key: "created", label: "Created" },
-          { key: "merged", label: "Merged" },
-          { key: "closed", label: "Closed unmerged" },
-          { key: "commitComposition", label: "Merged commit composition" },
-          { key: "mergeRate", label: "Merge rate" },
-          { key: "mergeTime", label: "Median merge time" },
+          { key: "merged", label: "Merged", tone: "good" },
+          { key: "closed", label: "Closed unmerged", tone: "danger" },
         ],
-        records: windows.map((stats) => ({
-          id: `${stats.days}d`,
+        categories: pullRequestDays.map((stats) => ({
+          id: stats.date,
+          label: stats.date,
           values: {
-            window: `${stats.days} days`,
-            created: String(stats.created),
-            merged: String(stats.merged),
-            closed: String(stats.closed),
-            commitComposition: formatCommitComposition(stats),
-            mergeRate: formatPercent(stats.mergeRate),
-            mergeTime: formatDuration(stats.medianMergeTimeMs),
+            created: stats.created,
+            merged: stats.merged,
+            closed: stats.closed,
           },
         })),
       },
+      {
+        id: "issue-outcomes",
+        type: "bar_chart",
+        title: "Issue outcomes",
+        description: "Daily outcomes",
+        timeRangeDays: [...WINDOWS],
+        series: [
+          { key: "created", label: "Created" },
+          { key: "completed", label: "Completed", tone: "good" },
+          { key: "duplicate", label: "Duplicate", tone: "warning" },
+          { key: "notPlanned", label: "Not planned", tone: "danger" },
+          { key: "unknown", label: "Unknown" },
+        ],
+        categories: issueDays.map((stats) => ({
+          id: stats.date,
+          label: stats.date,
+          values: {
+            created: stats.created,
+            completed: stats.closedCompleted,
+            duplicate: stats.closedDuplicate,
+            notPlanned: stats.closedNotPlanned,
+            unknown: stats.closedUnknown,
+          },
+        })),
+      },
+    ],
+    recordSets: [
       {
         title: "Pull request repositories · 30d",
         emptyText: "No Junior-owned pull request activity yet.",
@@ -455,30 +603,6 @@ export async function buildGitHubOutcomeReport(args: {
             closed: String(stats.closed),
             commitComposition: formatCommitComposition(stats),
             mergeRate: formatPercent(stats.mergeRate),
-          },
-        })),
-      },
-      {
-        title: "Issue outcome windows",
-        fields: [
-          { key: "window", label: "Window" },
-          { key: "created", label: "Created" },
-          { key: "completed", label: "Completed" },
-          { key: "duplicate", label: "Duplicate" },
-          { key: "notPlanned", label: "Not planned" },
-          { key: "unknown", label: "Unknown reason" },
-          { key: "closeTime", label: "Median close time" },
-        ],
-        records: issueWindows.map((stats) => ({
-          id: `${stats.days}d`,
-          values: {
-            window: `${stats.days} days`,
-            created: String(stats.created),
-            completed: String(stats.closedCompleted),
-            duplicate: String(stats.closedDuplicate),
-            notPlanned: String(stats.closedNotPlanned),
-            unknown: String(stats.closedUnknown),
-            closeTime: formatDuration(stats.medianCloseTimeMs),
           },
         })),
       },

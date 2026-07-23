@@ -973,7 +973,7 @@ describe("GitHub-owned pull request outcomes", () => {
     }
   });
 
-  it("reports open, merged, and unmerged outcomes across 7/30/90 days", async () => {
+  it("reports daily outcomes with 7/30/90-day chart ranges", async () => {
     const fixture = await createGitHubFixture();
     try {
       const route = webhookRoute(
@@ -1113,56 +1113,24 @@ describe("GitHub-owned pull request outcomes", () => {
       });
       expect(report.title).toBe("GitHub work delivered");
       expect(report.metrics).toEqual([
-        { label: "PRs created · 30d", value: "2" },
-        { label: "PRs merged · 30d", tone: "good", value: "1" },
         { label: "Junior-only merge rate · 30d", value: "100%" },
-        { label: "PRs closed unmerged · 30d", value: "1" },
         { label: "PR merge rate · 30d", value: "50%" },
         { label: "median PR merge time · 30d", value: "90d" },
-        { label: "issues created · 30d", value: "2" },
-        { label: "issues completed · 30d", tone: "neutral", value: "0" },
-        { label: "issues closed as duplicate · 30d", value: "0" },
-        { label: "issues closed as not planned · 30d", value: "1" },
+        { label: "median issue close time · 30d", value: "71d" },
       ]);
-      expect(report.recordSets?.[0]?.records).toEqual([
-        {
-          id: "7d",
-          values: {
-            closed: "0",
-            commitComposition: "1 Junior-only · 0 mixed · 0 unknown",
-            created: "1",
-            merged: "1",
-            mergeRate: "100%",
-            mergeTime: "90d",
-            window: "7 days",
-          },
-        },
-        {
-          id: "30d",
-          values: {
-            closed: "1",
-            commitComposition: "1 Junior-only · 0 mixed · 0 unknown",
-            created: "2",
-            merged: "1",
-            mergeRate: "50%",
-            mergeTime: "90d",
-            window: "30 days",
-          },
-        },
-        {
-          id: "90d",
-          values: {
-            closed: "1",
-            commitComposition: "1 Junior-only · 0 mixed · 0 unknown",
-            created: "3",
-            merged: "1",
-            mergeRate: "50%",
-            mergeTime: "90d",
-            window: "90 days",
-          },
-        },
-      ]);
-      expect(report.recordSets?.[1]?.records?.[0]?.values).toEqual({
+      expect(report.widgets?.[0]?.timeRangeDays).toEqual([7, 30, 90]);
+      expect(report.widgets?.[0]?.categories).toHaveLength(90);
+      expect(report.widgets?.[0]?.categories.at(-3)).toEqual({
+        id: "2026-07-29",
+        label: "2026-07-29",
+        values: { closed: 0, created: 1, merged: 0 },
+      });
+      expect(report.widgets?.[0]?.categories.at(-2)).toEqual({
+        id: "2026-07-30",
+        label: "2026-07-30",
+        values: { closed: 0, created: 0, merged: 1 },
+      });
+      expect(report.recordSets?.[0]?.records?.[0]?.values).toEqual({
         closed: "1",
         commitComposition: "1 Junior-only · 0 mixed · 0 unknown",
         created: "2",
@@ -1170,45 +1138,20 @@ describe("GitHub-owned pull request outcomes", () => {
         mergeRate: "50%",
         repository: "getsentry/junior",
       });
-      expect(report.recordSets?.[2]?.records).toEqual([
-        {
-          id: "7d",
-          values: {
-            closeTime: "—",
-            completed: "0",
-            created: "1",
-            duplicate: "0",
-            notPlanned: "0",
-            unknown: "0",
-            window: "7 days",
-          },
+      expect(report.widgets?.[1]?.timeRangeDays).toEqual([7, 30, 90]);
+      expect(report.widgets?.[1]?.categories).toHaveLength(90);
+      expect(report.widgets?.[1]?.categories.at(-12)).toEqual({
+        id: "2026-07-20",
+        label: "2026-07-20",
+        values: {
+          completed: 0,
+          created: 0,
+          duplicate: 0,
+          notPlanned: 1,
+          unknown: 0,
         },
-        {
-          id: "30d",
-          values: {
-            closeTime: "71d",
-            completed: "0",
-            created: "2",
-            duplicate: "0",
-            notPlanned: "1",
-            unknown: "0",
-            window: "30 days",
-          },
-        },
-        {
-          id: "90d",
-          values: {
-            closeTime: "71d",
-            completed: "0",
-            created: "3",
-            duplicate: "0",
-            notPlanned: "1",
-            unknown: "0",
-            window: "90 days",
-          },
-        },
-      ]);
-      expect(report.recordSets?.[3]?.records?.[0]?.values).toEqual({
+      });
+      expect(report.recordSets?.[1]?.records?.[0]?.values).toEqual({
         completed: "0",
         created: "2",
         duplicate: "0",
@@ -1277,8 +1220,7 @@ describe("GitHub-owned pull request outcomes", () => {
         value: "50%",
       });
       expect(
-        report.recordSets?.[0]?.records?.find((record) => record.id === "30d")
-          ?.values.commitComposition,
+        report.recordSets?.[0]?.records?.[0]?.values.commitComposition,
       ).toBe("1 Junior-only · 1 mixed · 1 unknown");
     } finally {
       await fixture.close();
@@ -1294,19 +1236,13 @@ describe("GitHub-owned pull request outcomes", () => {
       });
 
       expect(report.metrics).toEqual([
-        { label: "PRs created · 30d", value: "0" },
-        { label: "PRs merged · 30d", tone: "neutral", value: "0" },
         { label: "Junior-only merge rate · 30d", value: "—" },
-        { label: "PRs closed unmerged · 30d", value: "0" },
         { label: "PR merge rate · 30d", value: "—" },
         { label: "median PR merge time · 30d", value: "—" },
-        { label: "issues created · 30d", value: "0" },
-        { label: "issues completed · 30d", tone: "neutral", value: "0" },
-        { label: "issues closed as duplicate · 30d", value: "0" },
-        { label: "issues closed as not planned · 30d", value: "0" },
+        { label: "median issue close time · 30d", value: "—" },
       ]);
+      expect(report.recordSets?.[0]?.records).toEqual([]);
       expect(report.recordSets?.[1]?.records).toEqual([]);
-      expect(report.recordSets?.[3]?.records).toEqual([]);
     } finally {
       await fixture.close();
     }

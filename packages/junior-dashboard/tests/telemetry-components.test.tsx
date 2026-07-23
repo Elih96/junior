@@ -887,6 +887,9 @@ describe("dashboard canonical-event components", () => {
     expect(systemHtml).toContain("Token usage");
     expect(systemHtml).toContain("Model spend");
     expect(systemHtml).toContain("Runtime");
+    expect(
+      systemHtml.match(/aria-label="Reporting period"/g) ?? [],
+    ).toHaveLength(1);
     expect(systemHtml).toContain('role="tablist"');
     expect(systemHtml).toContain('aria-selected="true"');
     expect(systemHtml).toContain(">Plugins<");
@@ -899,6 +902,191 @@ describe("dashboard canonical-event components", () => {
     );
     expect(skillsHtml).toContain(">github<");
     expect(skillsHtml).toContain(">triage<");
+  });
+
+  it("renders plugin chart widgets with accessible values", () => {
+    const html = renderToStaticMarkup(
+      <PluginReports
+        reports={[
+          {
+            pluginName: "github",
+            widgets: [
+              {
+                categories: [
+                  {
+                    id: "30d",
+                    label: "30d",
+                    values: { created: 4.5, merged: -1.25 },
+                  },
+                ],
+                id: "pull-request-outcomes",
+                series: [
+                  { key: "created", label: "Created" },
+                  { key: "merged", label: "Merged", tone: "good" },
+                ],
+                title: "Pull request outcomes",
+                type: "bar_chart",
+              },
+            ],
+          },
+        ]}
+      />,
+    );
+    expect(html).toContain("Pull request outcomes");
+    expect(html).toContain('aria-label="30d, Created: 4.5"');
+    expect(html).toContain('aria-label="30d, Merged: -1.25"');
+  });
+
+  it("formats fractional chart ticks without floating-point noise", () => {
+    const html = renderToStaticMarkup(
+      <PluginReports
+        reports={[
+          {
+            pluginName: "github",
+            widgets: [
+              {
+                categories: [
+                  { id: "7d", label: "7d", values: { created: 0.1 } },
+                  { id: "30d", label: "30d", values: { created: 0.2 } },
+                ],
+                id: "fractional-outcomes",
+                series: [{ key: "created", label: "Created" }],
+                title: "Pull request outcomes",
+                type: "bar_chart",
+              },
+            ],
+          },
+        ]}
+      />,
+    );
+    expect(html).toContain(">0.1</text>");
+    expect(html).not.toContain("0.10000000000000002");
+  });
+
+  it("keeps dense chart bars within their allocated slots", () => {
+    const categories = Array.from({ length: 24 }, (_, index) => ({
+      id: String(index),
+      label: String(index),
+      values: Object.fromEntries(
+        Array.from({ length: 8 }, (__, seriesIndex) => [
+          `series-${seriesIndex}`,
+          seriesIndex + 1,
+        ]),
+      ),
+    }));
+    const series = Array.from({ length: 8 }, (_, index) => ({
+      key: `series-${index}`,
+      label: `Series ${index}`,
+    }));
+    const html = renderToStaticMarkup(
+      <PluginReports
+        reports={[
+          {
+            pluginName: "github",
+            widgets: [
+              {
+                categories,
+                id: "dense-outcomes",
+                series,
+                title: "Dense outcomes",
+                type: "bar_chart",
+              },
+            ],
+          },
+        ]}
+      />,
+    );
+    expect(html).not.toContain('width="2"');
+  });
+
+  it("renders daily chart ranges from the shared page selection", () => {
+    const categories = Array.from({ length: 90 }, (_, index) => {
+      const date = new Date("2026-05-03T00:00:00.000Z");
+      date.setUTCDate(date.getUTCDate() + index);
+      const label = date.toISOString().slice(0, 10);
+      return {
+        id: label,
+        label,
+        values: { created: index },
+      };
+    });
+    const html = renderToStaticMarkup(
+      <PluginReports
+        range={7}
+        reports={[
+          {
+            pluginName: "github",
+            widgets: [
+              {
+                categories,
+                id: "daily-outcomes",
+                series: [{ key: "created", label: "Created" }],
+                timeRangeDays: [7, 30, 90],
+                title: "Pull request outcomes",
+                type: "bar_chart",
+              },
+            ],
+          },
+        ]}
+      />,
+    );
+    expect(html).toContain('aria-label="2026-07-31, Created: 89"');
+    expect(html).toContain('aria-label="2026-07-25, Created: 83"');
+    expect(html).not.toContain('aria-label="2026-07-24, Created: 82"');
+    expect(html).not.toContain('aria-label="Reporting period"');
+  });
+
+  it("renders an all-zero chart with a stable zero scale", () => {
+    const html = renderToStaticMarkup(
+      <PluginReports
+        reports={[
+          {
+            pluginName: "github",
+            widgets: [
+              {
+                categories: [
+                  { id: "7d", label: "7d", values: { created: 0 } },
+                  { id: "30d", label: "30d", values: { created: 0 } },
+                ],
+                id: "zero-outcomes",
+                series: [{ key: "created", label: "Created" }],
+                title: "Pull request outcomes",
+                type: "bar_chart",
+              },
+            ],
+          },
+        ]}
+      />,
+    );
+    expect(html).toContain(">1</text>");
+    expect(html).toContain(">0.5</text>");
+    expect(html).toContain(">0</text>");
+  });
+
+  it("keeps chart chrome visible for empty widget data", () => {
+    const html = renderToStaticMarkup(
+      <PluginReports
+        reports={[
+          {
+            pluginName: "github",
+            widgets: [
+              {
+                categories: [],
+                description: "Rolling outcomes",
+                emptyText: "No outcomes yet.",
+                id: "empty-outcomes",
+                series: [{ key: "created", label: "Created" }],
+                title: "Pull request outcomes",
+                type: "bar_chart",
+              },
+            ],
+          },
+        ]}
+      />,
+    );
+    expect(html).toContain("Pull request outcomes");
+    expect(html).toContain("Rolling outcomes");
+    expect(html).toContain("No outcomes yet.");
   });
 
   it("renders plugin records without declared fields safely", () => {
