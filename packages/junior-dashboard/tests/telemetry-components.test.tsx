@@ -23,6 +23,7 @@ import {
 } from "../src/client/components/SubagentTranscriptDrawer";
 import { Transcript } from "../src/client/components/Transcript";
 import { TranscriptHeader } from "../src/client/components/TranscriptHeader";
+import { TranscriptMarkdown } from "../src/client/components/TranscriptMarkdown";
 import { TranscriptSearchProvider } from "../src/client/components/transcriptSearch";
 import { ConversationPage } from "../src/client/pages/ConversationPage";
 import { LocationDetailPageContent } from "../src/client/pages/locations/LocationDetailPage";
@@ -80,6 +81,7 @@ function systemData(): SystemData {
       authPath: "/api/auth",
       authRequired: false,
       basePath: "/",
+      componentGallery: false,
       sentryConversationLinks: false,
       timeZone: "UTC",
     },
@@ -121,6 +123,59 @@ function systemData(): SystemData {
 }
 
 describe("dashboard canonical-event components", () => {
+  it("renders transcript markdown with hard breaks and safe links", () => {
+    const html = renderToStaticMarkup(
+      <TranscriptSearchProvider query="line">
+        <TranscriptMarkdown text={"line one\nline two\n\n[docs](https://docs.sentry.io)"} />
+      </TranscriptSearchProvider>,
+    );
+
+    expect(html.match(/<br\/>/g)).toHaveLength(1);
+    expect(html).toContain('href="https://docs.sentry.io"');
+    expect(html).toContain('target="_blank"');
+    expect(html).toContain("<mark");
+  });
+
+  it("highlights a markdown link label when search matches its URL", () => {
+    const html = renderToStaticMarkup(
+      <TranscriptSearchProvider query="docs.sentry.io">
+        <TranscriptMarkdown text="[product docs](https://docs.sentry.io/platforms/)" />
+      </TranscriptSearchProvider>,
+    );
+
+    expect(html).toContain("<mark");
+    expect(html).toContain("product docs");
+    expect(html).toContain(
+      'title="Matched URL: https://docs.sentry.io/platforms/"',
+    );
+  });
+
+  it("preserves snake_case identifiers while rendering emphasis", () => {
+    const html = renderToStaticMarkup(
+      <TranscriptSearchProvider query="">
+        <TranscriptMarkdown text="some_var_name and *italic text*" />
+      </TranscriptSearchProvider>,
+    );
+
+    expect(html).toContain("some_var_name");
+    expect(html).not.toContain("some<em");
+    expect(html).toContain("<em");
+    expect(html).toContain("italic text");
+  });
+
+  it("renders labeled event sections followed by semantic lists", () => {
+    const html = renderToStaticMarkup(
+      <TranscriptSearchProvider query="">
+        <TranscriptMarkdown text={"Handling:\n- first item\n- second item"} />
+      </TranscriptSearchProvider>,
+    );
+
+    expect(html).toContain("<p");
+    expect(html).toContain("Handling:");
+    expect(html).toContain("<ul");
+    expect(html.match(/<li/g)).toHaveLength(2);
+  });
+
   it("keeps shared buttons out of form-submit mode", () => {
     expect(renderToStaticMarkup(<Button>Copy</Button>)).toContain(
       'type="button"',

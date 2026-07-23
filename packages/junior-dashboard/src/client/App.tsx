@@ -13,6 +13,7 @@ import { JuniorLogo } from "./components/JuniorLogo";
 import { ProfileMenu } from "./components/ProfileMenu";
 import { setDashboardTimeZone } from "./format";
 import { ConversationWorkspace } from "./pages/ConversationWorkspace";
+import { ComponentsPage } from "./pages/dev/ComponentsPage";
 import { LocationDetailPage } from "./pages/locations/LocationDetailPage";
 import { LocationsPage } from "./pages/locations/LocationsPage";
 import { PeoplePage } from "./pages/people/PeoplePage";
@@ -160,6 +161,22 @@ export function DashboardShell() {
           path="/conversations/:conversationId"
         />
         <Route element={<Navigate replace to="/" />} path="/conversations" />
+        <Route
+          element={
+            loading ? (
+              <LoadingView label="Loading components" />
+            ) : !data ? (
+              <LoadingView
+                label={query.error?.message ?? "Dashboard unavailable"}
+              />
+            ) : data.config.componentGallery ? (
+              <ComponentsPage />
+            ) : (
+              <Navigate replace to="/" />
+            )
+          }
+          path="/dev/*"
+        />
         <Route
           element={
             loading ? <LoadingView label="Loading system" /> : <SystemRoute />
