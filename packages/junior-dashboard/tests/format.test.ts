@@ -18,6 +18,7 @@ import {
   formatCompactNumber,
   formatConversationDuration,
   formatCostTotal,
+  formatElapsedDuration,
   formatRuntime,
   formatTranscriptDuration,
   formatUsageTotal,
@@ -99,6 +100,12 @@ describe("dashboard conversation formatting", () => {
     );
   });
 
+  it("formats elapsed transcript event durations", () => {
+    expect(formatElapsedDuration(1_000, 4_500)).toBe("3.5s");
+    expect(formatElapsedDuration(undefined, 4_500)).toBeUndefined();
+    expect(formatElapsedDuration(4_500, 1_000)).toBeUndefined();
+  });
+
   it("formats conversation duration from cumulative execution time", () => {
     const [conversation] = buildConversations([
       {
@@ -142,12 +149,16 @@ describe("dashboard conversation formatting", () => {
           role: "user",
           text: "run search",
         }),
-        event(1, { type: "tool_started", name: "search" }),
+        event(1, {
+          type: "tool_started",
+          toolCallId: "search-1",
+          name: "search",
+        }),
         event(2, {
           type: "subagent_started",
           childConversationId: "child-1",
           subagentKind: "advisor",
-          toolStartedSeq: 1,
+          parentToolCallId: "search-1",
         }),
         event(3, {
           type: "message",
