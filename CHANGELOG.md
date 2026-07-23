@@ -1,4 +1,46 @@
 # Changelog
+## 0.109.0
+
+### Breaking Changes 🛠
+
+- (upgrade) Use Drizzle migrations exclusively by @dcramer in [#1011](https://github.com/getsentry/junior/pull/1011)
+- (vercel) Add deployment webhook subscriptions by @dcramer in [#1008](https://github.com/getsentry/junior/pull/1008)
+
+### New Features ✨
+
+- (dashboard) Render resource events structurally by @sentry-junior in [#1003](https://github.com/getsentry/junior/pull/1003)
+- (docs) Add homepage customer logos by @sentry-junior in [#1001](https://github.com/getsentry/junior/pull/1001)
+- (telemetry) Report Junior package version by @sentry-junior in [#905](https://github.com/getsentry/junior/pull/905)
+
+### Bug Fixes 🐛
+
+#### Dashboard
+
+- Simplify and align conversation metrics by @sentry-junior in [#1013](https://github.com/getsentry/junior/pull/1013)
+- Render transcript markdown hard breaks by @sentry-junior in [#1006](https://github.com/getsentry/junior/pull/1006)
+- Render tool results in transcripts by @dcramer in [#999](https://github.com/getsentry/junior/pull/999)
+
+#### Github
+
+- Report work outcomes instead of open counts by @sentry-junior in [#1004](https://github.com/getsentry/junior/pull/1004)
+- Use user credentials for asset uploads by @sentry-junior in [#1002](https://github.com/getsentry/junior/pull/1002)
+
+#### Other
+
+- (agent) Trust event summaries and clarify GitHub auth by @dcramer in [#1005](https://github.com/getsentry/junior/pull/1005)
+- (mcp) Skip credentialless provider restoration by @dcramer in [#1009](https://github.com/getsentry/junior/pull/1009)
+- (slack) Restore conversation footers on assistant replies by @sentry-junior in [#986](https://github.com/getsentry/junior/pull/986)
+
+### Documentation 📚
+
+- (start-here) Restore agent onboarding runbook by @sentry-junior in [#996](https://github.com/getsentry/junior/pull/996)
+
+### Internal Changes 🔧
+
+- (docs) Bump starlight theme to 0.9.1 by @sentry-junior in [#1007](https://github.com/getsentry/junior/pull/1007)
+- (logging) Decouple async log context by @sentry-junior in [#970](https://github.com/getsentry/junior/pull/970)
+- (runtime) Simplify resumed turn commits by @dcramer in [#995](https://github.com/getsentry/junior/pull/995)
+
 ## 0.108.0
 
 ### New Features ✨
