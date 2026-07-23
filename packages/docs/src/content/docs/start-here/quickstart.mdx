@@ -10,7 +10,15 @@ related:
   - /extend/
 ---
 
+import CopyPrompt from "@sentry/starlight-theme/components/CopyPrompt.astro";
+
+import agentRunbook from "../../../prompts/junior-agent-runbook.txt?raw";
+
 Start here when you want a new Junior app that follows the supported Hono, Nitro, and Vercel shape.
+
+Want an AI coding agent to handle the setup? Copy the runbook below into Cursor, Claude Code, Copilot, or another agent with terminal access. It scaffolds and deploys the app, then pauses for the steps that require your Vercel and Slack accounts. Credentials stay in those services and should never be pasted into the agent chat.
+
+<CopyPrompt content={agentRunbook} copyLabel="Copy agent instructions" />
 
 For production setup, complete [Deploy to Vercel](/start-here/deploy-to-vercel/) and [Slack App Setup](/start-here/slack-app-setup/). Keep the manual Slack app creation step between the first live deployment and the deployment that adds Slack credentials.
 
