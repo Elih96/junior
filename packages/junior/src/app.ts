@@ -67,6 +67,7 @@ import type { WaitUntilFn } from "@/handlers/types";
 import { ingestResourceEvent } from "@/chat/resource-events/ingest";
 
 export { defineJuniorPlugins } from "./plugins";
+export { JUNIOR_VERSION } from "./version";
 export type {
   JuniorPluginInput,
   JuniorPluginSet,
