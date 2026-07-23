@@ -1,4 +1,32 @@
 # Changelog
+## 0.110.0
+
+### New Features ✨
+
+- (agent-browser) Add visual web QA skill by @dcramer in [#1020](https://github.com/getsentry/junior/pull/1020)
+- (api) Authorize private transcripts for participants by @sentry-junior in [#981](https://github.com/getsentry/junior/pull/981)
+- (reporting) Render plugin chart widgets by @sentry-junior in [#1010](https://github.com/getsentry/junior/pull/1010)
+
+### Bug Fixes 🐛
+
+#### Dashboard
+
+- Show model handoff details by @sentry-junior in [#1016](https://github.com/getsentry/junior/pull/1016)
+- Simplify plugin inventory by @sentry-junior in [#1018](https://github.com/getsentry/junior/pull/1018)
+
+#### Other
+
+- (auth) Catch authorization pauses inside agent spans by @sentry-junior in [#1015](https://github.com/getsentry/junior/pull/1015)
+- (github) Enforce authoritative commit coauthors by @sentry-junior in [#1021](https://github.com/getsentry/junior/pull/1021)
+
+### Documentation 📚
+
+- Clarify repository agent guidance by @dcramer in [#1026](https://github.com/getsentry/junior/pull/1026)
+
+### Internal Changes 🔧
+
+- (queue) Use conversation IDs in callbacks by @dcramer in [#1019](https://github.com/getsentry/junior/pull/1019)
+
 ## 0.109.0
 
 ### Breaking Changes 🛠
