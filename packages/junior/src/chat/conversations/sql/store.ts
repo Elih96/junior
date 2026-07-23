@@ -758,7 +758,14 @@ export class SqlStore implements ConversationStore {
           conversation.updatedAtMs,
         )
       : undefined;
-    await this.executor
+    const rootConversationId = conversation.lineage
+      ? sql<string | null>`(
+          select parent.root_conversation_id
+          from junior_conversations parent
+          where parent.conversation_id = ${conversation.lineage.parentConversationId}
+        )`
+      : conversation.conversationId;
+    const rows = await this.executor
       .db()
       .insert(juniorConversations)
       .values({
@@ -795,6 +802,7 @@ export class SqlStore implements ConversationStore {
             : dateFromMs(conversation.execution.lastEnqueuedAtMs),
         parentConversationId:
           conversation.lineage?.parentConversationId ?? null,
+        rootConversationId,
       })
       .onConflictDoUpdate({
         target: juniorConversations.conversationId,
@@ -817,8 +825,15 @@ export class SqlStore implements ConversationStore {
           runId: sql`case when ${incomingExecutionIsFresh} then excluded.run_id else ${juniorConversations.runId} end`,
           lastCheckpointAt: sql`case when ${incomingExecutionIsFresh} then coalesce(excluded.last_checkpoint_at, ${juniorConversations.lastCheckpointAt}) else ${juniorConversations.lastCheckpointAt} end`,
           lastEnqueuedAt: sql`case when ${incomingExecutionIsFresh} then coalesce(excluded.last_enqueued_at, ${juniorConversations.lastEnqueuedAt}) else ${juniorConversations.lastEnqueuedAt} end`,
+          rootConversationId: sql`coalesce(${juniorConversations.rootConversationId}, excluded.root_conversation_id)`,
         },
+      })
+      .returning({
+        rootConversationId: juniorConversations.rootConversationId,
       });
+    if (!rows[0]?.rootConversationId) {
+      throw new Error("Conversation parent is missing its persisted root");
+    }
   }
 
   private async upsertDestination(

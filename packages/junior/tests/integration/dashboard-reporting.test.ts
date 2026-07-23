@@ -1,7 +1,7 @@
 import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { readConversationDetail } from "@/api/conversations/detail";
-import { readConversationEventPrivacySnapshot } from "@/chat/conversations/sql/privacy";
+import { readConversationFeedFromSql } from "@/api/conversations/list";
 import { createSqlConversationEventStore } from "@/chat/conversations/sql/history";
 import { purgeConversation } from "@/chat/conversations/retention";
 import type { PiMessage } from "@/chat/pi/messages";
@@ -10,6 +10,7 @@ import {
   juniorConversationEvents,
   juniorConversations,
   juniorDestinations,
+  juniorIdentities,
 } from "@/db/schema";
 
 const ORIGINAL_ENV = { ...process.env };
@@ -24,6 +25,11 @@ if (!TEST_DATABASE_URL) {
 async function recordRoot(
   conversationId: string,
   visibility: "private" | "public",
+  actor?: {
+    email: string;
+    slackUserId: string;
+    teamId: string;
+  },
 ): Promise<void> {
   const { getConversationStore } = await import("@/chat/db");
   await getConversationStore().recordActivity({
@@ -34,6 +40,7 @@ async function recordRoot(
       channelId: `C-${conversationId}`,
     },
     nowMs: 1,
+    ...(actor ? { actor: { platform: "slack" as const, ...actor } } : {}),
     source: "slack",
     title: "Canonical event report",
     visibility,
@@ -204,9 +211,15 @@ async function createChild(args: {
 }): Promise<void> {
   const { getConversationEventStore, getDb } = await import("@/chat/db");
   const at = new Date(3);
+  const [parent] = await getDb()
+    .select({ rootConversationId: juniorConversations.rootConversationId })
+    .from(juniorConversations)
+    .where(eq(juniorConversations.conversationId, args.parentConversationId));
+  if (!parent?.rootConversationId) throw new Error("Missing conversation root");
   await getDb().insert(juniorConversations).values({
     conversationId: args.childConversationId,
     parentConversationId: args.parentConversationId,
+    rootConversationId: parent.rootConversationId,
     createdAt: at,
     lastActivityAt: at,
     updatedAt: at,
@@ -430,6 +443,81 @@ describe("dashboard canonical event reporting", () => {
     ]);
   });
 
+  it("rolls unprojected child usage into a root conversation", async () => {
+    const rootConversationId = "slack:C-reporting:tree-usage";
+    const childConversationId = "child:reporting-unprojected-usage";
+    await recordRoot(rootConversationId, "public");
+    await appendVisibleHistory(rootConversationId);
+    const { getDb } = await import("@/chat/db");
+    const childAt = new Date(3);
+    await getDb()
+      .insert(juniorConversations)
+      .values({
+        conversationId: childConversationId,
+        parentConversationId: rootConversationId,
+        rootConversationId,
+        createdAt: childAt,
+        lastActivityAt: childAt,
+        updatedAt: childAt,
+        durationMs: 700,
+        executionStatus: "idle",
+        usage: { totalTokens: 7, cost: { total: 0.002 } },
+      });
+    await getDb()
+      .update(juniorConversations)
+      .set({
+        durationMs: 300,
+        usage: {
+          inputTokens: 10,
+          totalTokens: 999,
+          cost: { total: 0.001 },
+        },
+      })
+      .where(eq(juniorConversations.conversationId, rootConversationId));
+    await appendVisibleHistory(childConversationId, "Unprojected child answer");
+
+    const rootSummary = (
+      await readConversationFeedFromSql()
+    ).conversations.find(
+      (conversation) => conversation.conversationId === rootConversationId,
+    );
+    expect(rootSummary?.cumulativeDurationMs).toBe(1_000);
+
+    const rootDetail = await requireDetail(rootConversationId);
+    expect(JSON.stringify(rootDetail.events)).not.toContain(
+      childConversationId,
+    );
+    expect(rootDetail.cumulativeDurationMs).toBe(1_000);
+    expect(rootDetail.cumulativeUsage).toEqual({
+      totalTokens: 17,
+      cost: { total: 0.003 },
+    });
+    expect(rootDetail.modelUsage).toEqual([
+      {
+        modelId: "openai/gpt-5",
+        usage: expect.objectContaining({
+          inputTokens: 20,
+          outputTokens: 4,
+          cachedInputTokens: 6,
+          totalTokens: 30,
+        }),
+      },
+    ]);
+
+    const childDetail = await requireDetail(childConversationId);
+    expect(childDetail.cumulativeDurationMs).toBe(700);
+    expect(childDetail.cumulativeUsage).toEqual({
+      totalTokens: 7,
+      cost: { total: 0.002 },
+    });
+    expect(childDetail.modelUsage).toEqual([
+      {
+        modelId: "openai/gpt-5",
+        usage: expect.objectContaining({ totalTokens: 15 }),
+      },
+    ]);
+  });
+
   it("redacts visible content for a private root while retaining structure", async () => {
     const conversationId = "slack:C-reporting:private-detail";
     await recordRoot(conversationId, "private");
@@ -459,6 +547,76 @@ describe("dashboard canonical event reporting", () => {
     expect(serialized).not.toContain('"matches":2');
   });
 
+  it("exposes a private root and child only to a verified participant", async () => {
+    const rootConversationId = "slack:C-reporting:private-owner-root";
+    const childConversationId = "child:reporting-private-owner";
+    await recordRoot(rootConversationId, "private", {
+      slackUserId: "U-owner",
+      teamId: "T-reporting",
+      email: "Owner@Example.com",
+    });
+    const { getDb } = await import("@/chat/db");
+    await appendVisibleHistory(rootConversationId, "Private owner answer");
+    await createChild({
+      childConversationId,
+      parentConversationId: rootConversationId,
+    });
+
+    await expect(requireDetail(rootConversationId)).resolves.toMatchObject({
+      eventHistory: { status: "redacted" },
+      isParticipant: false,
+    });
+    expect(
+      await readConversationDetail(rootConversationId, {
+        verifiedViewerEmail: "other@example.com",
+      }),
+    ).toMatchObject({
+      eventHistory: { status: "redacted" },
+      isParticipant: false,
+    });
+    const rootParticipantDetail = await readConversationDetail(
+      rootConversationId,
+      { verifiedViewerEmail: " owner@example.COM " },
+    );
+    expect(rootParticipantDetail).toMatchObject({
+      displayTitle: "Canonical event report",
+      isParticipant: true,
+    });
+    expect(rootParticipantDetail?.events[0]?.data).toMatchObject({
+      text: "Private owner answer",
+    });
+    const rootParticipantSummary = (
+      await readConversationFeedFromSql({
+        verifiedViewerEmail: "owner@example.com",
+      })
+    ).conversations.find(
+      (conversation) => conversation.conversationId === rootConversationId,
+    );
+    expect(rootParticipantSummary).toBeDefined();
+    expect(rootParticipantDetail).toMatchObject(rootParticipantSummary ?? {});
+    const childParticipantDetail = await readConversationDetail(
+      childConversationId,
+      { verifiedViewerEmail: "owner@example.com" },
+    );
+    expect(childParticipantDetail).toMatchObject({ isParticipant: true });
+    expect(childParticipantDetail?.events[0]?.data).toMatchObject({
+      text: "Child answer",
+    });
+
+    await getDb()
+      .update(juniorIdentities)
+      .set({ emailVerified: false })
+      .where(eq(juniorIdentities.providerSubjectId, "U-owner"));
+    expect(
+      await readConversationDetail(rootConversationId, {
+        verifiedViewerEmail: "owner@example.com",
+      }),
+    ).toMatchObject({
+      eventHistory: { status: "redacted" },
+      isParticipant: false,
+    });
+  });
+
   it("authorizes children from their persisted root and rejects forged or malformed lineage", async () => {
     const publicRoot = "slack:C-reporting:public-root";
     const publicChild = "child:reporting-public";
@@ -470,8 +628,7 @@ describe("dashboard canonical event reporting", () => {
     expect((await requireDetail(publicChild)).eventHistory).toEqual({
       status: "available",
     });
-    const { getConversationStore, getDb, getSqlExecutor } =
-      await import("@/chat/db");
+    const { getConversationStore, getDb } = await import("@/chat/db");
     const [rootRow] = await getDb()
       .select({ destinationId: juniorConversations.destinationId })
       .from(juniorConversations)
@@ -481,20 +638,6 @@ describe("dashboard canonical event reporting", () => {
       .update(juniorDestinations)
       .set({ visibility: "private" })
       .where(eq(juniorDestinations.id, rootRow.destinationId));
-    const privateSnapshot = await readConversationEventPrivacySnapshot(
-      getSqlExecutor(),
-      {
-        conversationId: publicChild,
-        eventTypes: ["message"],
-      },
-    );
-    expect(privateSnapshot).toMatchObject({
-      rootConversationId: publicRoot,
-      visibility: "private",
-    });
-    expect(privateSnapshot?.events.map((event) => event.type)).toEqual([
-      "message",
-    ]);
     expect((await requireDetail(publicChild)).eventHistory.status).toBe(
       "redacted",
     );
@@ -532,6 +675,98 @@ describe("dashboard canonical event reporting", () => {
     expect(JSON.stringify(privateChildDetail)).not.toContain(
       "forged-public-child-channel",
     );
+
+    const cyclicRoot = "slack:C-reporting:cyclic-private-root";
+    const cyclicChild = "child:reporting-cyclic-private";
+    await recordRoot(cyclicRoot, "private", {
+      slackUserId: "U-cyclic-owner",
+      teamId: "T-reporting",
+      email: "cyclic-owner@example.com",
+    });
+    await appendVisibleHistory(cyclicRoot, "Cyclic private answer");
+    await createChild({
+      childConversationId: cyclicChild,
+      parentConversationId: cyclicRoot,
+    });
+    await getDb()
+      .update(juniorConversations)
+      .set({ parentConversationId: cyclicChild })
+      .where(eq(juniorConversations.conversationId, cyclicRoot));
+
+    await expect(
+      readConversationDetail(cyclicRoot, {
+        verifiedViewerEmail: "cyclic-owner@example.com",
+      }),
+    ).resolves.toMatchObject({
+      eventHistory: { status: "redacted" },
+      isParticipant: false,
+    });
+
+    const destinationlessRoot = "slack:C-reporting:destinationless-root";
+    await recordRoot(destinationlessRoot, "private", {
+      slackUserId: "U-destinationless-owner",
+      teamId: "T-reporting",
+      email: "destinationless-owner@example.com",
+    });
+    await appendVisibleHistory(
+      destinationlessRoot,
+      "Destinationless private answer",
+    );
+    await getDb()
+      .update(juniorConversations)
+      .set({ destinationId: null })
+      .where(eq(juniorConversations.conversationId, destinationlessRoot));
+
+    await expect(
+      readConversationDetail(destinationlessRoot, {
+        verifiedViewerEmail: "destinationless-owner@example.com",
+      }),
+    ).resolves.toMatchObject({
+      eventHistory: { status: "available" },
+      isParticipant: true,
+    });
+    const destinationlessSummary = (
+      await readConversationFeedFromSql({
+        verifiedViewerEmail: "destinationless-owner@example.com",
+      })
+    ).conversations.find(
+      (conversation) => conversation.conversationId === destinationlessRoot,
+    );
+    expect(destinationlessSummary).toMatchObject({
+      displayTitle: "Canonical event report",
+      isParticipant: true,
+    });
+
+    const foreignRoot = "slack:C-reporting:foreign-private-root";
+    const malformedTopLevel = "slack:C-reporting:malformed-top-level";
+    await recordRoot(foreignRoot, "private", {
+      slackUserId: "U-foreign-owner",
+      teamId: "T-reporting",
+      email: "foreign-owner@example.com",
+    });
+    await recordRoot(malformedTopLevel, "private");
+    await appendVisibleHistory(malformedTopLevel, "Malformed private answer");
+    await getDb()
+      .update(juniorConversations)
+      .set({ rootConversationId: foreignRoot })
+      .where(eq(juniorConversations.conversationId, malformedTopLevel));
+
+    await expect(
+      readConversationDetail(malformedTopLevel, {
+        verifiedViewerEmail: "foreign-owner@example.com",
+      }),
+    ).resolves.toMatchObject({
+      eventHistory: { status: "redacted" },
+      isParticipant: false,
+    });
+    const malformedSummary = (
+      await readConversationFeedFromSql({
+        verifiedViewerEmail: "foreign-owner@example.com",
+      })
+    ).conversations.find(
+      (conversation) => conversation.conversationId === malformedTopLevel,
+    );
+    expect(malformedSummary).toMatchObject({ isParticipant: false });
   });
 
   it("lets requested-row expiry win and stamps both root and child purges", async () => {

@@ -1,0 +1,100 @@
+import { eq, inArray } from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
+import { canExposeConversationPayload } from "@/chat/conversation-privacy";
+import type { JuniorDatabase } from "@/db/db";
+import {
+  juniorConversations,
+  juniorDestinations,
+  juniorIdentities,
+} from "@/db/schema";
+import type { JuniorDestinationVisibility } from "@/db/schema/destinations";
+
+const rootConversation = alias(juniorConversations, "access_root_conversation");
+const rootDestination = alias(juniorDestinations, "access_root_destination");
+const rootIdentity = alias(juniorIdentities, "access_root_identity");
+
+export interface ConversationAccess {
+  canViewPrivateContent: boolean;
+  isParticipant: boolean;
+  visibility: JuniorDestinationVisibility | null;
+}
+
+/** Resolve viewer access for a bounded set of persisted conversations. */
+export async function readConversationAccessFromSql(
+  db: JuniorDatabase,
+  conversationIds: readonly string[],
+  verifiedViewerEmail?: string,
+): Promise<Map<string, ConversationAccess>> {
+  if (conversationIds.length === 0) return new Map();
+  const normalizedViewerEmail =
+    verifiedViewerEmail?.trim().toLowerCase() || undefined;
+
+  const rows = await db
+    .select({
+      conversationId: juniorConversations.conversationId,
+      parentConversationId: juniorConversations.parentConversationId,
+      storedRootConversationId: juniorConversations.rootConversationId,
+      rootConversationId: rootConversation.conversationId,
+      rootParentConversationId: rootConversation.parentConversationId,
+      rootRootConversationId: rootConversation.rootConversationId,
+      visibility: rootDestination.visibility,
+      rootEmailNormalized: rootIdentity.emailNormalized,
+      rootEmailVerified: rootIdentity.emailVerified,
+    })
+    .from(juniorConversations)
+    .leftJoin(
+      rootConversation,
+      eq(
+        rootConversation.conversationId,
+        juniorConversations.rootConversationId,
+      ),
+    )
+    .leftJoin(
+      rootDestination,
+      eq(rootDestination.id, rootConversation.destinationId),
+    )
+    .leftJoin(
+      rootIdentity,
+      eq(rootIdentity.id, rootConversation.actorIdentityId),
+    )
+    .where(inArray(juniorConversations.conversationId, [...conversationIds]));
+
+  return new Map(
+    rows.map((row) => {
+      const hasValidRoot =
+        row.rootConversationId !== null &&
+        row.rootConversationId === row.storedRootConversationId &&
+        row.rootRootConversationId === row.rootConversationId &&
+        row.rootParentConversationId === null &&
+        (row.parentConversationId !== null ||
+          row.storedRootConversationId === row.conversationId);
+      const validRootConversationId = hasValidRoot
+        ? (row.rootConversationId ?? undefined)
+        : undefined;
+      const visibility =
+        validRootConversationId === undefined ? null : row.visibility;
+      const isParticipant =
+        validRootConversationId !== undefined &&
+        normalizedViewerEmail !== undefined &&
+        row.rootEmailVerified === true &&
+        row.rootEmailNormalized === normalizedViewerEmail;
+      const canViewPrivateContent =
+        isParticipant ||
+        (validRootConversationId !== undefined &&
+          canExposeConversationPayload({
+            conversationId: validRootConversationId,
+            ...(visibility === "public" || visibility === "private"
+              ? { visibility }
+              : {}),
+          }));
+      return [
+        row.conversationId,
+        {
+          canViewPrivateContent,
+          isParticipant,
+          visibility,
+        },
+      ];
+    }),
+  );
+}

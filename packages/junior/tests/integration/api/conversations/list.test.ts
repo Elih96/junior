@@ -57,6 +57,13 @@ describe("conversation list API", () => {
         nowMs: 3_000,
         source: "slack",
       });
+      await fixture.sql
+        .db()
+        .update(juniorConversations)
+        .set({ rootConversationId: null, usage: { totalTokens: 9 } })
+        .where(
+          eq(juniorConversations.conversationId, "slack:C1:provider-name"),
+        );
 
       const feed = await readConversationFeedFromSql();
 
@@ -69,6 +76,7 @@ describe("conversation list API", () => {
             slackUserName: "workspace-alice",
           },
           conversationId: "slack:C1:provider-name",
+          cumulativeUsage: { totalTokens: 9 },
         }),
       );
       expect(feed.conversations).toContainEqual(
@@ -160,6 +168,7 @@ describe("conversation list API", () => {
 
       const feed = await readConversationFeedFromSql({
         actorEmail: "morgan@example.com",
+        verifiedViewerEmail: "MORGAN@example.com",
         limit: 1,
       });
 
@@ -169,6 +178,7 @@ describe("conversation list API", () => {
             email: "Morgan@Example.com",
           }),
           conversationId: "slack:C1:morgan-newest",
+          isParticipant: true,
         }),
       ]);
       await expect(
@@ -179,7 +189,7 @@ describe("conversation list API", () => {
     }
   });
 
-  test("excludes child conversations from the top-level feed", async () => {
+  test("excludes children from the feed and rolls their usage into the root", async () => {
     const fixture = createConfiguredJuniorSqlFixture();
     const store = createSqlStore(fixture.sql);
     try {
@@ -189,21 +199,84 @@ describe("conversation list API", () => {
         nowMs: 1_000,
         source: "slack",
       });
+      await fixture.sql
+        .db()
+        .update(juniorConversations)
+        .set({ usage: { inputTokens: 10 } })
+        .where(eq(juniorConversations.conversationId, "slack:C1:root"));
       const childAt = new Date(2_000);
-      await fixture.sql.db().insert(juniorConversations).values({
-        conversationId: "advisor:child",
-        parentConversationId: "slack:C1:root",
-        createdAt: childAt,
-        lastActivityAt: childAt,
-        updatedAt: childAt,
-        executionStatus: "idle",
-      });
+      await fixture.sql
+        .db()
+        .insert(juniorConversations)
+        .values({
+          conversationId: "advisor:child",
+          parentConversationId: "slack:C1:root",
+          rootConversationId: "slack:C1:root",
+          createdAt: childAt,
+          lastActivityAt: childAt,
+          updatedAt: childAt,
+          executionStatus: "idle",
+          usage: { outputTokens: 5 },
+        });
 
       const feed = await readConversationFeedFromSql();
 
       expect(feed.conversations.map((item) => item.conversationId)).toEqual([
         "slack:C1:root",
       ]);
+      expect(feed.conversations[0]?.cumulativeUsage).toEqual({
+        inputTokens: 10,
+        outputTokens: 5,
+      });
+    } finally {
+      await fixture.close();
+    }
+  });
+
+  test("does not return partial tree metrics for an invalid root", async () => {
+    const fixture = createConfiguredJuniorSqlFixture();
+    const store = createSqlStore(fixture.sql);
+    try {
+      await migrateSchema(fixture.sql);
+      await store.recordActivity({
+        conversationId: "slack:C1:invalid-root",
+        nowMs: 1_000,
+        source: "slack",
+      });
+      await fixture.sql
+        .db()
+        .update(juniorConversations)
+        .set({
+          durationMs: 100,
+          rootConversationId: null,
+          usage: { inputTokens: 10 },
+        })
+        .where(eq(juniorConversations.conversationId, "slack:C1:invalid-root"));
+      const childAt = new Date(2_000);
+      await fixture.sql
+        .db()
+        .insert(juniorConversations)
+        .values({
+          conversationId: "advisor:invalid-root-child",
+          parentConversationId: "slack:C1:invalid-root",
+          rootConversationId: "slack:C1:invalid-root",
+          createdAt: childAt,
+          lastActivityAt: childAt,
+          updatedAt: childAt,
+          executionStatus: "idle",
+          durationMs: 500,
+          usage: { outputTokens: 50 },
+        });
+
+      const feed = await readConversationFeedFromSql();
+
+      expect(feed.conversations).toContainEqual(
+        expect.objectContaining({
+          conversationId: "slack:C1:invalid-root",
+          cumulativeDurationMs: 100,
+          cumulativeUsage: { inputTokens: 10 },
+        }),
+      );
     } finally {
       await fixture.close();
     }

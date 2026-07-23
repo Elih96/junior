@@ -31,6 +31,47 @@ import {
 } from "../fixtures/sql";
 
 describe("conversation SQL store", () => {
+  it("rejects updates to a child whose parent has no persisted root", async () => {
+    const fixture = await createLocalJuniorSqlFixture();
+
+    try {
+      const store = createSqlStore(fixture.sql);
+      await migrateSchema(fixture.sql);
+      const at = new Date(1);
+      await fixture.sql.db().insert(juniorConversations).values({
+        conversationId: "parent-without-root",
+        createdAt: at,
+        lastActivityAt: at,
+        updatedAt: at,
+        executionStatus: "idle",
+      });
+      await fixture.sql.db().insert(juniorConversations).values({
+        conversationId: "child:missing-parent",
+        parentConversationId: "parent-without-root",
+        createdAt: at,
+        lastActivityAt: at,
+        updatedAt: at,
+        executionStatus: "idle",
+      });
+
+      await expect(
+        store.recordActivity({
+          conversationId: "child:missing-parent",
+          nowMs: 2,
+        }),
+      ).rejects.toThrow("Conversation parent is missing its persisted root");
+      await expect(
+        store.get({ conversationId: "child:missing-parent" }),
+      ).resolves.toMatchObject({
+        conversationId: "child:missing-parent",
+        lastActivityAtMs: 1,
+        lineage: { parentConversationId: "parent-without-root" },
+      });
+    } finally {
+      await fixture.close();
+    }
+  });
+
   it("persists queryable conversation records and linked identities", async () => {
     const fixture = await createLocalJuniorSqlFixture();
 

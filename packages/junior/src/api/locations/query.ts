@@ -1,4 +1,5 @@
 import { and, asc, desc, eq, gte, isNull, sql } from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
 import { getDb } from "@/chat/db";
 import type { JuniorDatabase } from "@/db/db";
 import {
@@ -12,18 +13,28 @@ import {
   conversationAggregateColumns,
   conversationRangeColumns,
 } from "../conversations/aggregate";
-import type { ActorIdentity } from "../conversations/schema";
+import type { ActorIdentity } from "../schema/conversation";
+import { readConversationAccessFromSql } from "../conversations/access";
 import { summaryFromRow } from "../conversations/reporting";
+import { readRootConversationMetricsFromSql } from "../conversations/usage";
 import type {
   LocationActorSummaryReport,
   LocationActivityDayReport,
   LocationDetailReport,
   LocationDirectoryReport,
   LocationSummaryReport,
-} from "./schema";
+} from "../schema/location";
 
 const RECENT_LIMIT = 25;
 const ACTIVITY_DAYS = 90;
+const treeConversation = alias(
+  juniorConversations,
+  "location_tree_conversation",
+);
+const treeAggregateColumns = conversationAggregateColumns({
+  metrics: treeConversation,
+  roots: juniorConversations,
+});
 
 type AggregateMetrics = Pick<
   LocationSummaryReport,
@@ -170,10 +181,17 @@ async function directoryRows(db: JuniorDatabase) {
   return db
     .select({
       ...locationColumns(),
-      ...conversationAggregateColumns(),
+      ...treeAggregateColumns,
       ...conversationRangeColumns(),
     })
     .from(juniorConversations)
+    .innerJoin(
+      treeConversation,
+      eq(
+        treeConversation.rootConversationId,
+        juniorConversations.conversationId,
+      ),
+    )
     .leftJoin(
       juniorDestinations,
       eq(juniorDestinations.id, juniorConversations.destinationId),
@@ -293,7 +311,6 @@ async function recentLocationRows(db: JuniorDatabase, locationId: string) {
       conversationId: juniorConversations.conversationId,
       createdAt: juniorConversations.createdAt,
       destinationId: juniorDestinations.id,
-      destinationVisibility: juniorDestinations.visibility,
       durationMs: juniorConversations.durationMs,
       email: sql<string | null>`COALESCE(
         ${juniorUsers.primaryEmailNormalized},
@@ -340,6 +357,7 @@ async function recentLocationRows(db: JuniorDatabase, locationId: string) {
 /** Load one public location's complete activity while bounding only recent conversations. */
 export async function readLocationDetailFromSql(
   locationId: string,
+  options: { verifiedViewerEmail?: string } = {},
 ): Promise<LocationDetailReport | undefined> {
   const nowMs = Date.now();
   const end = new Date(nowMs);
@@ -356,10 +374,17 @@ export async function readLocationDetailFromSql(
     getDb()
       .select({
         ...locationColumns(),
-        ...conversationAggregateColumns(),
+        ...treeAggregateColumns,
         ...conversationRangeColumns(),
       })
       .from(juniorConversations)
+      .innerJoin(
+        treeConversation,
+        eq(
+          treeConversation.rootConversationId,
+          juniorConversations.conversationId,
+        ),
+      )
       .innerJoin(
         juniorDestinations,
         eq(juniorDestinations.id, juniorConversations.destinationId),
@@ -367,8 +392,18 @@ export async function readLocationDetailFromSql(
       .where(where)
       .groupBy(...locationGroupBy()),
     getDb()
-      .select({ date: activityDate, ...conversationAggregateColumns() })
+      .select({
+        date: activityDate,
+        ...treeAggregateColumns,
+      })
       .from(juniorConversations)
+      .innerJoin(
+        treeConversation,
+        eq(
+          treeConversation.rootConversationId,
+          juniorConversations.conversationId,
+        ),
+      )
       .innerJoin(
         juniorDestinations,
         eq(juniorDestinations.id, juniorConversations.destinationId),
@@ -384,9 +419,16 @@ export async function readLocationDetailFromSql(
         identityEmail: juniorIdentities.email,
         identityProvider: juniorIdentities.provider,
         providerSubjectId: juniorIdentities.providerSubjectId,
-        ...conversationAggregateColumns(),
+        ...treeAggregateColumns,
       })
       .from(juniorConversations)
+      .innerJoin(
+        treeConversation,
+        eq(
+          treeConversation.rootConversationId,
+          juniorConversations.conversationId,
+        ),
+      )
       .innerJoin(
         juniorDestinations,
         eq(juniorDestinations.id, juniorConversations.destinationId),
@@ -444,6 +486,15 @@ export async function readLocationDetailFromSql(
   }
 
   const activity = activityDays(days, nowMs, ACTIVITY_DAYS);
+  const recentConversationIds = recentRows.map((row) => row.conversationId);
+  const [accessByConversation, metricsByRoot] = await Promise.all([
+    readConversationAccessFromSql(
+      getDb(),
+      recentConversationIds,
+      options.verifiedViewerEmail,
+    ),
+    readRootConversationMetricsFromSql(getDb(), recentConversationIds),
+  ]);
   return {
     ...location,
     activityDays: activity,
@@ -453,7 +504,12 @@ export async function readLocationDetailFromSql(
         left.label.localeCompare(right.label),
     ),
     generatedAt: new Date(nowMs).toISOString(),
-    recentConversations: recentRows.map(summaryFromRow),
+    recentConversations: recentRows.map((row) =>
+      summaryFromRow(row, {
+        access: accessByConversation.get(row.conversationId),
+        metrics: metricsByRoot.get(row.conversationId),
+      }),
+    ),
     source: "conversation_index",
     windowEnd: end.toISOString(),
     windowStart: activity[0]

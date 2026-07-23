@@ -6,26 +6,28 @@ import {
   juniorIdentities,
   juniorUsers,
 } from "@/db/schema";
-import {
-  conversationActiveDaysColumn,
-  conversationAggregateColumns,
-} from "../conversations/aggregate";
+import { conversationActiveDaysColumn } from "../conversations/aggregate";
 import {
   slackLocationLabel,
   summaryFromRow,
   surfaceLabel,
 } from "../conversations/reporting";
+import { readConversationAccessFromSql } from "../conversations/access";
+import { readRootConversationMetricsFromSql } from "../conversations/usage";
 import type {
   ConversationStatsItem,
   ActorActivityDayReport,
   ActorIdentity,
   ActorProfileReport,
-} from "./schema";
+} from "../schema/person";
 import {
   ACTIVITY_DAYS,
   activityDays,
   emptyTotals,
   normalizeEmail,
+  peopleTreeAggregateColumns,
+  peopleTreeConversation,
+  peopleTreeMetricsJoin,
   recentActorRows,
   statsItems,
   verifiedActorWhere,
@@ -109,6 +111,7 @@ function locationLabel(row: {
 /** Load one complete person profile while bounding only its recent-conversation list. */
 export async function readPeopleProfileFromSql(
   email: string,
+  options: { verifiedViewerEmail?: string } = {},
 ): Promise<ActorProfileReport> {
   const nowMs = Date.now();
   const normalizedEmail = normalizeEmail(email);
@@ -119,6 +122,7 @@ export async function readPeopleProfileFromSql(
   const start = new Date(end);
   start.setUTCDate(start.getUTCDate() - (ACTIVITY_DAYS - 1));
   const where = verifiedActorWhere(normalizedEmail);
+  const metricsJoin = peopleTreeMetricsJoin();
   const surface = surfaceExpression();
   const activityDate = sql<string>`TO_CHAR(
     ${juniorConversations.lastActivityAt} AT TIME ZONE 'UTC',
@@ -137,7 +141,7 @@ export async function readPeopleProfileFromSql(
           >`MAX(${juniorIdentities.providerSubjectId})`,
           slackUserName: sql<string | null>`MAX(${juniorIdentities.handle})`,
           activeDays: conversationActiveDaysColumn(),
-          ...conversationAggregateColumns(),
+          ...peopleTreeAggregateColumns,
         })
         .from(juniorConversations)
         .innerJoin(
@@ -145,12 +149,13 @@ export async function readPeopleProfileFromSql(
           eq(juniorIdentities.id, juniorConversations.actorIdentityId),
         )
         .innerJoin(juniorUsers, eq(juniorUsers.id, juniorIdentities.userId))
+        .leftJoin(peopleTreeConversation, metricsJoin)
         .where(where)
         .groupBy(juniorUsers.primaryEmailNormalized, juniorUsers.displayName),
       getDb()
         .select({
           date: activityDate,
-          ...conversationAggregateColumns(),
+          ...peopleTreeAggregateColumns,
         })
         .from(juniorConversations)
         .innerJoin(
@@ -158,6 +163,7 @@ export async function readPeopleProfileFromSql(
           eq(juniorIdentities.id, juniorConversations.actorIdentityId),
         )
         .innerJoin(juniorUsers, eq(juniorUsers.id, juniorIdentities.userId))
+        .leftJoin(peopleTreeConversation, metricsJoin)
         .where(and(where, gte(juniorConversations.lastActivityAt, start)))
         .groupBy(activityDate),
       getDb()
@@ -166,7 +172,7 @@ export async function readPeopleProfileFromSql(
           channelName: juniorConversations.channelName,
           destinationVisibility: juniorDestinations.visibility,
           surface,
-          ...conversationAggregateColumns(),
+          ...peopleTreeAggregateColumns,
         })
         .from(juniorConversations)
         .innerJoin(
@@ -174,6 +180,7 @@ export async function readPeopleProfileFromSql(
           eq(juniorIdentities.id, juniorConversations.actorIdentityId),
         )
         .innerJoin(juniorUsers, eq(juniorUsers.id, juniorIdentities.userId))
+        .leftJoin(peopleTreeConversation, metricsJoin)
         .leftJoin(
           juniorDestinations,
           eq(juniorDestinations.id, juniorConversations.destinationId),
@@ -186,13 +193,14 @@ export async function readPeopleProfileFromSql(
           surface,
         ),
       getDb()
-        .select({ surface, ...conversationAggregateColumns() })
+        .select({ surface, ...peopleTreeAggregateColumns })
         .from(juniorConversations)
         .innerJoin(
           juniorIdentities,
           eq(juniorIdentities.id, juniorConversations.actorIdentityId),
         )
         .innerJoin(juniorUsers, eq(juniorUsers.id, juniorIdentities.userId))
+        .leftJoin(peopleTreeConversation, metricsJoin)
         .where(where)
         .groupBy(surface),
       recentActorRows(normalizedEmail),
@@ -232,12 +240,26 @@ export async function readPeopleProfileFromSql(
       row,
     );
   }
+  const recentConversationIds = recentRows.map((row) => row.conversationId);
+  const [accessByConversation, metricsByRoot] = await Promise.all([
+    readConversationAccessFromSql(
+      getDb(),
+      recentConversationIds,
+      options.verifiedViewerEmail,
+    ),
+    readRootConversationMetricsFromSql(getDb(), recentConversationIds),
+  ]);
 
   return {
     activityDays: activityDays(days, nowMs),
     generatedAt: new Date(nowMs).toISOString(),
     locations: statsItems(locations),
-    recentConversations: recentRows.map(summaryFromRow),
+    recentConversations: recentRows.map((row) =>
+      summaryFromRow(row, {
+        access: accessByConversation.get(row.conversationId),
+        metrics: metricsByRoot.get(row.conversationId),
+      }),
+    ),
     actor,
     source: "conversation_index",
     surfaces: statsItems(surfaces),

@@ -804,6 +804,28 @@ describe("dashboard routes", () => {
     });
   });
 
+  it("does not authorize a synthetic participant when auth is disabled", async () => {
+    const pluginApp = new Hono<{
+      Variables: { verifiedViewerEmail?: string };
+    }>();
+    pluginApp.get("/viewer", (c) =>
+      c.json({ verifiedViewerEmail: c.get("verifiedViewerEmail") ?? null }),
+    );
+    const app = createDashboardApp({
+      authRequired: false,
+      allowedGoogleDomains: [],
+      pluginRoutes: [{ app: pluginApp, pluginName: "viewer" }],
+    });
+
+    const response = await app.fetch(
+      new Request("http://localhost/api/plugins/viewer/viewer"),
+    );
+
+    await expect(response.json()).resolves.toEqual({
+      verifiedViewerEmail: null,
+    });
+  });
+
   it("resolves auth policy from env when dashboard options omit allowlists", async () => {
     process.env.JUNIOR_DASHBOARD_GOOGLE_DOMAINS = "sentry.io, example.com";
     process.env.JUNIOR_DASHBOARD_ALLOWED_EMAILS = JSON.stringify([

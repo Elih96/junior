@@ -1,6 +1,8 @@
 import { describe, expect, test, vi } from "vitest";
+import { eq } from "drizzle-orm";
 import { readPeopleListFromSql } from "@/api/people/list.query";
 import { readPeopleProfileFromSql } from "@/api/people/profile.query";
+import { readConversationDetail } from "@/api/conversations/detail";
 import { migrateSchema } from "@/chat/conversations/sql/migrations";
 import { createSqlStore } from "@/chat/conversations/sql/store";
 import { juniorConversations, juniorIdentities } from "@/db/schema";
@@ -11,6 +13,213 @@ import {
 import { seedDisplayNameBackfill, seedPeople } from "./fixture";
 
 describe("people profile API", () => {
+  test("derives child participation and visibility from its root", async () => {
+    const fixture = createConfiguredJuniorSqlFixture();
+    const store = createSqlStore(fixture.sql);
+    const rootConversationId = "slack:G-private:root";
+    const childConversationId = "slack:C-public:child";
+    const ownerChildConversationId = "slack:C-public:owner-child";
+
+    try {
+      await migrateSchema(fixture.sql);
+      await store.recordActivity({
+        conversationId: rootConversationId,
+        actor: {
+          email: "owner@example.com",
+          platform: "slack",
+          slackUserId: "U-owner",
+          teamId: "T1",
+        },
+        destination: {
+          channelId: "G-private",
+          platform: "slack",
+          teamId: "T1",
+        },
+        title: "Private root title",
+        visibility: "private",
+      });
+      await store.recordActivity({
+        conversationId: childConversationId,
+        actor: {
+          email: "child@example.com",
+          platform: "slack",
+          slackUserId: "U-child",
+          teamId: "T1",
+        },
+        destination: {
+          channelId: "C-public",
+          platform: "slack",
+          teamId: "T1",
+        },
+        title: "Child participant title",
+        visibility: "public",
+      });
+      await store.recordActivity({
+        conversationId: ownerChildConversationId,
+        actor: {
+          email: "owner@example.com",
+          platform: "slack",
+          slackUserId: "U-owner",
+          teamId: "T1",
+        },
+        destination: {
+          channelId: "C-public",
+          platform: "slack",
+          teamId: "T1",
+        },
+        title: "Owner child title",
+        visibility: "public",
+      });
+      await fixture.sql
+        .db()
+        .update(juniorConversations)
+        .set({
+          parentConversationId: rootConversationId,
+          rootConversationId,
+        })
+        .where(eq(juniorConversations.conversationId, childConversationId));
+      await fixture.sql
+        .db()
+        .update(juniorConversations)
+        .set({
+          parentConversationId: rootConversationId,
+          rootConversationId,
+        })
+        .where(
+          eq(juniorConversations.conversationId, ownerChildConversationId),
+        );
+      await fixture.sql
+        .db()
+        .update(juniorConversations)
+        .set({ durationMs: 300, usage: { totalTokens: 3 } })
+        .where(eq(juniorConversations.conversationId, rootConversationId));
+      await fixture.sql
+        .db()
+        .update(juniorConversations)
+        .set({ durationMs: 700, usage: { totalTokens: 7 } })
+        .where(eq(juniorConversations.conversationId, childConversationId));
+      await fixture.sql
+        .db()
+        .update(juniorConversations)
+        .set({ durationMs: 500, usage: { totalTokens: 5 } })
+        .where(
+          eq(juniorConversations.conversationId, ownerChildConversationId),
+        );
+
+      const rootReport = await readPeopleProfileFromSql("owner@example.com", {
+        verifiedViewerEmail: "owner@example.com",
+      });
+      expect(rootReport.recentConversations).toHaveLength(2);
+      expect(rootReport.recentConversations).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            conversationId: rootConversationId,
+            cumulativeDurationMs: 1_500,
+            cumulativeUsage: { totalTokens: 15 },
+          }),
+          expect.objectContaining({
+            conversationId: ownerChildConversationId,
+            cumulativeDurationMs: 500,
+            cumulativeUsage: { totalTokens: 5 },
+          }),
+        ]),
+      );
+      expect(rootReport).toMatchObject({
+        locations: expect.arrayContaining([
+          expect.objectContaining({ durationMs: 1_500, tokens: 15 }),
+        ]),
+        surfaces: [
+          expect.objectContaining({
+            conversations: 2,
+            durationMs: 1_500,
+            tokens: 15,
+          }),
+        ],
+        totals: {
+          conversations: 2,
+          durationMs: 1_500,
+          tokens: 15,
+        },
+      });
+      expect(rootReport.activityDays).toContainEqual(
+        expect.objectContaining({
+          conversations: 2,
+          durationMs: 1_500,
+          tokens: 15,
+        }),
+      );
+      const directory = await readPeopleListFromSql();
+      expect(
+        directory.people.find(
+          (person) => person.actor.email === "owner@example.com",
+        ),
+      ).toMatchObject({
+        conversations: 2,
+        durationMs: 1_500,
+        tokens: 15,
+      });
+
+      const report = await readPeopleProfileFromSql("child@example.com", {
+        verifiedViewerEmail: "OWNER@example.com",
+      });
+
+      expect(report.recentConversations).toEqual([
+        expect.objectContaining({
+          conversationId: childConversationId,
+          displayTitle: "Child participant title",
+          isParticipant: true,
+        }),
+      ]);
+      expect(report.totals).toMatchObject({
+        conversations: 1,
+        durationMs: 700,
+        tokens: 7,
+      });
+      expect(report.recentConversations[0]).not.toHaveProperty("locationId");
+      const detail = await readConversationDetail(childConversationId, {
+        verifiedViewerEmail: "owner@example.com",
+      });
+      expect(detail).toMatchObject(report.recentConversations[0] ?? {});
+
+      const malformedConversationId = "slack:C-public:malformed-root";
+      await store.recordActivity({
+        conversationId: malformedConversationId,
+        actor: {
+          email: "malformed@example.com",
+          platform: "slack",
+          slackUserId: "U-malformed",
+          teamId: "T1",
+        },
+        destination: {
+          channelId: "C-public",
+          platform: "slack",
+          teamId: "T1",
+        },
+        title: "Malformed title must stay private",
+        visibility: "public",
+      });
+      await fixture.sql
+        .db()
+        .update(juniorConversations)
+        .set({ rootConversationId })
+        .where(eq(juniorConversations.conversationId, malformedConversationId));
+
+      const malformed = await readPeopleProfileFromSql(
+        "malformed@example.com",
+        { verifiedViewerEmail: "owner@example.com" },
+      );
+      expect(malformed.recentConversations).toEqual([
+        expect.objectContaining({
+          conversationId: malformedConversationId,
+          displayTitle: "Private Conversation",
+          isParticipant: false,
+        }),
+      ]);
+    } finally {
+      await fixture.close();
+    }
+  });
+
   test("reads profiles case-insensitively from shared verified identity", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-06-15T12:00:00.000Z"));

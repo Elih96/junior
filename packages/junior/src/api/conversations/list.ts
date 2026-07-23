@@ -9,11 +9,13 @@ import {
   juniorUsers,
 } from "@/db/schema";
 import { conversationSummaryFromStoredConversation } from "./projection";
-import { conversationFeedSchema } from "./schema";
-import type { ConversationFeed } from "./schema";
-import type { ApiRoute } from "../route";
+import { readConversationAccessFromSql } from "./access";
+import { conversationFeedSchema } from "../schema/conversation";
+import type { ConversationFeed } from "../schema/conversation";
+import { readRootConversationMetricsFromSql } from "./usage";
+import { defineApiRoute } from "../route";
 import { parseQuery } from "../http";
-import { conversationFeedQuerySchema } from "../schema";
+import { conversationFeedQuerySchema } from "../schema/conversation";
 
 const CONVERSATION_FEED_LIMIT = 50;
 
@@ -106,12 +108,6 @@ function conversationFromRow(row: ConversationRow): Conversation {
     ...(value.transcriptPurgedAt
       ? { transcriptPurgedAtMs: value.transcriptPurgedAt.getTime() }
       : {}),
-    ...(row.destinationVisibility
-      ? {
-          visibility:
-            row.destinationVisibility === "public" ? "public" : "private",
-        }
-      : {}),
   };
 }
 
@@ -124,6 +120,7 @@ export async function readConversationRecordFromSql(
       durationMs: number;
       locationId?: string;
       usage: ConversationRow["conversation"]["usage"];
+      rootConversationId: string | null;
     }
   | undefined
 > {
@@ -162,6 +159,7 @@ export async function readConversationRecordFromSql(
           ? { locationId: row.destinationId }
           : {}),
         usage: row.conversation.usage,
+        rootConversationId: row.conversation.rootConversationId,
       }
     : undefined;
 }
@@ -171,25 +169,41 @@ export async function readConversationRecordFromSql(
  * before the limit when one is provided.
  */
 export async function readConversationFeedFromSql(
-  options: { actorEmail?: string; limit?: number } = {},
+  options: {
+    actorEmail?: string;
+    limit?: number;
+    verifiedViewerEmail?: string;
+  } = {},
 ): Promise<ConversationFeed> {
   const nowMs = Date.now();
+  const db = getDb();
   const rows = await conversationRows(
-    getDb(),
+    db,
     options.limit ?? CONVERSATION_FEED_LIMIT,
     options.actorEmail,
   );
+  const conversationIds = rows.map((row) => row.conversation.conversationId);
+  const [accessByConversation, metricsByRoot] = await Promise.all([
+    readConversationAccessFromSql(
+      db,
+      conversationIds,
+      options.verifiedViewerEmail,
+    ),
+    readRootConversationMetricsFromSql(db, conversationIds),
+  ]);
   return {
-    conversations: rows.map((row) =>
-      conversationSummaryFromStoredConversation({
+    conversations: rows.map((row) => {
+      const metrics = metricsByRoot.get(row.conversation.conversationId);
+      return conversationSummaryFromStoredConversation({
         conversation: conversationFromRow(row),
-        durationMs: row.conversation.durationMs,
+        access: accessByConversation.get(row.conversation.conversationId),
+        durationMs: metrics?.durationMs ?? row.conversation.durationMs,
         ...(row.destinationVisibility === "public" && row.destinationId
           ? { locationId: row.destinationId }
           : {}),
-        usage: row.conversation.usage ?? undefined,
-      }),
-    ),
+        usage: metrics?.usage ?? row.conversation.usage ?? undefined,
+      });
+    }),
     generatedAt: new Date(nowMs).toISOString(),
     source: "conversation_index",
   };
@@ -200,22 +214,27 @@ export async function readConversationFeedFromSql(
  * filter. This filter is not an authorization boundary.
  */
 export async function readConversationFeed(
-  options: { actorEmail?: string } = {},
+  options: { actorEmail?: string; verifiedViewerEmail?: string } = {},
 ): Promise<ConversationFeed> {
   return conversationFeedSchema.parse(
-    await readConversationFeedFromSql({ actorEmail: options.actorEmail }),
+    await readConversationFeedFromSql(options),
   );
 }
 
 /** Serve the conversation feed endpoint. */
-export default {
+export default defineApiRoute({
   method: "get",
   path: "/",
+  responseSchema: conversationFeedSchema,
   handler: async (c) => {
     const { actorEmail } = parseQuery(
       conversationFeedQuerySchema,
       c.req.query(),
     );
-    return Response.json(await readConversationFeed({ actorEmail }));
+    const verifiedViewerEmail = c.get("verifiedViewerEmail");
+    return readConversationFeed({
+      ...(actorEmail ? { actorEmail } : {}),
+      ...(verifiedViewerEmail ? { verifiedViewerEmail } : {}),
+    });
   },
-} satisfies ApiRoute;
+});

@@ -73,9 +73,18 @@ export function buildJuniorSqlConversation(
   overrides: Partial<JuniorSqlConversationInsert> = {},
 ): JuniorSqlConversationInsert {
   const now = new Date("2026-06-11T12:00:00.000Z");
+  const conversationId =
+    overrides.conversationId ?? "slack:C123:1718123456.000000";
+  if (
+    overrides.parentConversationId &&
+    overrides.rootConversationId === undefined
+  ) {
+    throw new Error("Child conversation fixtures require rootConversationId");
+  }
 
   return {
-    conversationId: "slack:C123:1718123456.000000",
+    conversationId,
+    rootConversationId: conversationId,
     source: "slack",
     destination: {
       channelId: "C123",

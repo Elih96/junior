@@ -40,22 +40,28 @@ describe("locations API", () => {
       expect(destination).toBeDefined();
 
       const now = new Date(nowMs);
-      await fixture.sql
-        .db()
-        .insert(juniorConversations)
-        .values(
-          Array.from({ length: 5_000 }, (_, index) =>
-            buildJuniorSqlConversation({
-              conversationId: `slack:C1:aggregate:${index}`,
-              destinationId: destination?.id,
-              durationMs: 2,
-              createdAt: now,
-              lastActivityAt: now,
-              updatedAt: now,
-              usage: { totalTokens: 3 },
-            }),
-          ),
-        );
+      const aggregateNow = new Date(nowMs - 1_000);
+      const aggregateConversations = Array.from({ length: 5_000 }, (_, index) =>
+        buildJuniorSqlConversation({
+          conversationId: `slack:C1:aggregate:${index}`,
+          destinationId: destination?.id,
+          durationMs: 2,
+          createdAt: aggregateNow,
+          lastActivityAt: aggregateNow,
+          updatedAt: aggregateNow,
+          usage: { totalTokens: 3 },
+        }),
+      );
+      for (
+        let index = 0;
+        index < aggregateConversations.length;
+        index += 1_000
+      ) {
+        await fixture.sql
+          .db()
+          .insert(juniorConversations)
+          .values(aggregateConversations.slice(index, index + 1_000));
+      }
       await fixture.sql
         .db()
         .insert(juniorConversations)
@@ -70,14 +76,29 @@ describe("locations API", () => {
             updatedAt: now,
           }),
         );
+      await fixture.sql
+        .db()
+        .insert(juniorConversations)
+        .values(
+          buildJuniorSqlConversation({
+            conversationId: "child:location-usage",
+            parentConversationId: "slack:C1:seed",
+            rootConversationId: "slack:C1:seed",
+            durationMs: 4,
+            usage: { totalTokens: 7 },
+            createdAt: now,
+            lastActivityAt: now,
+            updatedAt: now,
+          }),
+        );
 
       const directory = await readLocationDirectoryFromSql();
       expect(directory.locations).toHaveLength(1);
       expect(directory.locations[0]).toMatchObject({
         conversations: 5_001,
-        durationMs: 10_000,
+        durationMs: 10_004,
         label: "#proj-alpha",
-        tokens: 15_000,
+        tokens: 15_007,
       });
       expect(directory.privateActivity.conversations).toBe(1);
       expect(directory.activityDays).toHaveLength(90);
@@ -94,17 +115,22 @@ describe("locations API", () => {
       const detail = await readLocationDetailFromSql(destination?.id ?? "");
       expect(detail).toMatchObject({
         conversations: 5_001,
-        durationMs: 10_000,
-        tokens: 15_000,
+        durationMs: 10_004,
+        tokens: 15_007,
       });
       expect(detail?.recentConversations).toHaveLength(25);
+      expect(detail?.recentConversations[0]).toMatchObject({
+        conversationId: "slack:C1:seed",
+        cumulativeDurationMs: 4,
+        cumulativeUsage: { totalTokens: 7 },
+      });
       expect(detail?.activityDays).toHaveLength(90);
       expect(
         detail?.activityDays.find((day) => day.date === "2026-06-15"),
       ).toMatchObject({
         conversations: 5_001,
-        durationMs: 10_000,
-        tokens: 15_000,
+        durationMs: 10_004,
+        tokens: 15_007,
       });
     } finally {
       vi.useRealTimers();

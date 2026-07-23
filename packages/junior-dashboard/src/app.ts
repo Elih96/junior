@@ -1,7 +1,12 @@
 import { Hono, type Context, type Next } from "hono";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { createJuniorApi } from "@sentry/junior/api";
+import {
+  createJuniorApi,
+  jsonResponse,
+  type JuniorApiVariables,
+} from "@sentry/junior/api";
+import { apiErrorSchema } from "@sentry/junior/api/schema";
 import { initSentry } from "@sentry/junior/instrumentation";
 import type {
   PluginApiRouteRequestContext,
@@ -55,7 +60,7 @@ interface DashboardPluginRoute {
   pluginName: string;
 }
 
-type Variables = {
+type Variables = JuniorApiVariables & {
   authSession: DashboardSession;
 };
 
@@ -291,7 +296,11 @@ function unauthorized(
   options: { componentGallery?: boolean } = {},
 ): Response {
   if (isJsonRoute(new URL(request.url).pathname)) {
-    return Response.json({ error: "unauthenticated" }, { status: 401 });
+    return jsonResponse(
+      apiErrorSchema,
+      { error: "unauthenticated" },
+      { status: 401 },
+    );
   }
   return Response.redirect(
     dashboardLoginUrl(request, basePath, canonicalBaseURL, options),
@@ -330,7 +339,7 @@ function forbidden(request: Request): Response {
       },
     );
   }
-  return Response.json({ error: "forbidden" }, { status: 403 });
+  return jsonResponse(apiErrorSchema, { error: "forbidden" }, { status: 403 });
 }
 
 function localAuthBypassSession(
@@ -342,6 +351,12 @@ function localAuthBypassSession(
       emailVerified: true,
     },
   };
+}
+
+function verifiedViewerEmail(session: DashboardSession): string | undefined {
+  return session.user.emailVerified === true
+    ? session.user.email.trim().toLowerCase()
+    : undefined;
 }
 
 function readAssetUrl(url: URL): string {
@@ -634,12 +649,10 @@ export function createDashboardApp(
     next: Next,
   ) => {
     if (!authRequired) {
-      c.set(
-        "authSession",
-        localAuthBypassSession(
-          options.mockConversations ? "morgan@sentry.io" : undefined,
-        ),
+      const session = localAuthBypassSession(
+        options.mockConversations ? "morgan@sentry.io" : undefined,
       );
+      c.set("authSession", session);
       await next();
       return;
     }
@@ -658,7 +671,9 @@ export function createDashboardApp(
     if (!isAuthorized(session, allowedDomains, allowedEmails)) {
       return forbidden(c.req.raw);
     }
-    c.set("authSession", sanitizeDashboardSession(session));
+    const sanitizedSession = sanitizeDashboardSession(session);
+    c.set("authSession", sanitizedSession);
+    c.set("verifiedViewerEmail", verifiedViewerEmail(sanitizedSession));
     await next();
   };
 
@@ -689,21 +704,19 @@ export function createDashboardApp(
   }
   app.route("/", createJuniorApi());
   app.get("/api/config", () => {
-    return Response.json(
-      dashboardConfigSchema.parse({
-        allowedEmailCount: allowedEmails.length,
-        allowedGoogleDomainCount: allowedDomains.length,
-        authRequired,
-        authPath,
-        basePath,
-        componentGallery: options.componentGallery === true,
-        sentryConversationLinks: hasSentryConversationLinks(),
-        timeZone: dashboardTimeZone(),
-      }),
-    );
+    return jsonResponse(dashboardConfigSchema, {
+      allowedEmailCount: allowedEmails.length,
+      allowedGoogleDomainCount: allowedDomains.length,
+      authRequired,
+      authPath,
+      basePath,
+      componentGallery: options.componentGallery === true,
+      sentryConversationLinks: hasSentryConversationLinks(),
+      timeZone: dashboardTimeZone(),
+    });
   });
   app.get("/api/me", (c) => {
-    return Response.json(dashboardIdentitySchema.parse(c.get("authSession")));
+    return jsonResponse(dashboardIdentitySchema, c.get("authSession"));
   });
   app.get(DASHBOARD_CLIENT_PATH, () => {
     return new Response(readDashboardClient(), {
@@ -721,6 +734,15 @@ export function createDashboardApp(
       },
     });
   });
+  app.notFound((c) =>
+    isJsonRoute(new URL(c.req.url).pathname)
+      ? jsonResponse(
+          apiErrorSchema,
+          { error: "Resource not found." },
+          { status: 404 },
+        )
+      : c.text("Not Found", 404),
+  );
 
   return app;
 }

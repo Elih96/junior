@@ -93,7 +93,7 @@ ORDER BY indexname ASC
           "junior_conversations_last_activity_idx",
           "junior_conversations_origin_idx",
           "junior_conversations_pkey",
-          "junior_conversations_actor_activity_idx",
+          "junior_conversations_root_idx",
           "junior_conversation_events_message_search_idx",
           "junior_destinations_pkey",
           "junior_destinations_provider_destination_uidx",
@@ -134,6 +134,71 @@ ORDER BY table_name ASC, constraint_name ASC
           (row) => row.table_name === "junior_conversation_inbound_messages",
         ),
       ).toBe(false);
+    } finally {
+      await fixture.close();
+    }
+  });
+
+  it("backfills the owning root for existing conversation trees", async () => {
+    const fixture = await createLocalJuniorSqlFixture();
+
+    try {
+      await fixture.sql.execute(`
+CREATE TABLE junior_conversations (
+  conversation_id text PRIMARY KEY,
+  parent_conversation_id text,
+  created_at timestamptz NOT NULL,
+  last_activity_at timestamptz NOT NULL,
+  updated_at timestamptz NOT NULL,
+  execution_status text NOT NULL
+)
+`);
+      await fixture.sql.execute(`
+INSERT INTO junior_conversations (
+  conversation_id,
+  parent_conversation_id,
+  created_at,
+  last_activity_at,
+  updated_at,
+  execution_status
+) VALUES
+  ('root', NULL, now(), now(), now(), 'idle'),
+  ('child', 'root', now(), now(), now(), 'idle'),
+  ('grandchild', 'child', now(), now(), now(), 'idle'),
+  ('cycle-a', NULL, now(), now(), now(), 'idle'),
+  ('cycle-b', 'cycle-a', now(), now(), now(), 'idle')
+`);
+      await fixture.sql.execute(
+        "UPDATE junior_conversations SET parent_conversation_id = 'cycle-b' WHERE conversation_id = 'cycle-a'",
+      );
+
+      const rootMigration = coreMigrations.find((migration) =>
+        migration.sql.some((statement) =>
+          statement.includes('ADD COLUMN "root_conversation_id"'),
+        ),
+      );
+      if (!rootMigration) throw new Error("Root migration not found");
+      for (const statement of rootMigration.sql) {
+        await fixture.sql.execute(statement);
+      }
+
+      const rows = await fixture.sql.query<{
+        conversationId: string;
+        rootConversationId: string | null;
+      }>(`
+SELECT
+  conversation_id AS "conversationId",
+  root_conversation_id AS "rootConversationId"
+FROM junior_conversations
+ORDER BY conversation_id
+`);
+      expect(rows).toEqual([
+        { conversationId: "child", rootConversationId: "root" },
+        { conversationId: "cycle-a", rootConversationId: null },
+        { conversationId: "cycle-b", rootConversationId: null },
+        { conversationId: "grandchild", rootConversationId: "root" },
+        { conversationId: "root", rootConversationId: "root" },
+      ]);
     } finally {
       await fixture.close();
     }

@@ -18,6 +18,29 @@ export const conversationCostSchema = usageCostSchema;
 
 export const conversationUsageSchema = usageSchema;
 
+export const conversationParamsSchema = z
+  .object({ conversationId: z.string().min(1) })
+  .strict();
+
+export const conversationFeedQuerySchema = z
+  .object({
+    actorEmail: z
+      .string()
+      .trim()
+      .email()
+      .transform((value) => value.toLowerCase())
+      .optional(),
+  })
+  .strict();
+
+export const archiveConversationBodySchema = z
+  .object({ archived: z.boolean(), lastSeenAt: z.string().datetime() })
+  .strict();
+
+export const archiveConversationResponseSchema = z
+  .object({ archived: z.boolean() })
+  .strict();
+
 export const actorIdentitySchema = z
   .object({
     email: z.string().optional(),
@@ -33,6 +56,7 @@ export const conversationSummaryReportSchema = z
     cumulativeDurationMs: z.number(),
     cumulativeUsage: conversationUsageSchema.optional(),
     conversationId: z.string(),
+    isParticipant: z.boolean(),
     status: conversationReportStatusSchema,
     startedAt: z.string(),
     lastSeenAt: z.string(),
@@ -354,4 +378,11 @@ export type ConversationStatsItem = z.infer<typeof conversationStatsItemSchema>;
 export type ConversationMetricDay = z.infer<typeof conversationMetricDaySchema>;
 export type ConversationStatsReport = z.infer<
   typeof conversationStatsReportSchema
+>;
+export type ConversationParams = z.infer<typeof conversationParamsSchema>;
+export type ArchiveConversationBody = z.infer<
+  typeof archiveConversationBodySchema
+>;
+export type ArchiveConversationResponse = z.infer<
+  typeof archiveConversationResponseSchema
 >;

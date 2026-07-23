@@ -1,24 +1,31 @@
-import { locationDetailReportSchema } from "./schema";
+import { locationDetailReportSchema } from "../schema/location";
 import { readLocationDetailFromSql } from "./query";
-import type { ApiRoute } from "../route";
-import { parseParams } from "../http";
-import { locationParamsSchema } from "../schema";
+import { defineApiRoute } from "../route";
+import { parseParams, throwApiError } from "../http";
+import { locationParamsSchema } from "../schema/location";
 
 /** Expose operational detail for one persisted public conversation location. */
-export async function readLocationDetail(locationId: string) {
-  const report = await readLocationDetailFromSql(locationId);
+export async function readLocationDetail(
+  locationId: string,
+  options: { verifiedViewerEmail?: string } = {},
+) {
+  const report = await readLocationDetailFromSql(locationId, options);
   return report ? locationDetailReportSchema.parse(report) : undefined;
 }
 
 /** Serve one public location detail endpoint. */
-export default {
+export default defineApiRoute({
   method: "get",
   path: "/:locationId",
+  responseSchema: locationDetailReportSchema,
   handler: async (c) => {
     const { locationId } = parseParams(locationParamsSchema, c.req.param());
-    const report = await readLocationDetail(locationId);
-    return report
-      ? Response.json(report)
-      : Response.json({ error: "Location not found." }, { status: 404 });
+    const verifiedViewerEmail = c.get("verifiedViewerEmail");
+    const report = await readLocationDetail(
+      locationId,
+      verifiedViewerEmail ? { verifiedViewerEmail } : {},
+    );
+    if (!report) throwApiError(404, "Location not found.");
+    return report;
   },
-} satisfies ApiRoute;
+});
