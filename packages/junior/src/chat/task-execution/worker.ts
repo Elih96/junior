@@ -81,6 +81,14 @@ function now(options: ProcessConversationWorkOptions): number {
   return options.nowMs?.() ?? Date.now();
 }
 
+/** Prioritize the interrupt batch; otherwise process the deferred batch. */
+function selectAttemptMessages(messages: InboundMessage[]): InboundMessage[] {
+  const interrupts = messages.filter(
+    (message) => message.delivery === "interrupt",
+  );
+  return interrupts.length > 0 ? interrupts : messages;
+}
+
 function nudgeIdempotencyKey(
   reason: string,
   conversationId: string,
@@ -315,7 +323,9 @@ export async function processConversationWork(
     conversationId,
     state: options.state,
   });
-  const attemptMessages = leasedWork?.messages ?? initial.messages;
+  const attemptMessages = selectAttemptMessages(
+    leasedWork?.messages ?? initial.messages,
+  );
   const attemptMessageIds = attemptMessages.map(
     (message) => message.inboundMessageId,
   );
@@ -339,14 +349,25 @@ export async function processConversationWork(
     "Conversation work lease acquired",
   );
 
-  const drainInbox = (
+  const drain = (
     handle: (messages: InboundMessage[]) => Promise<readonly string[] | void>,
   ) =>
     drainConversationMailbox({
       conversationId,
       leaseToken: lease.leaseToken,
       conversationStore: options.conversationStore,
-      handle,
+      handle: async (messages) => {
+        const candidates = messages.filter(
+          (message) => message.delivery === "interrupt",
+        );
+        if (candidates.length === 0) {
+          return [];
+        }
+        return (
+          (await handle(candidates)) ??
+          candidates.map((message) => message.inboundMessageId)
+        );
+      },
       nowMs: now(options),
       state: options.state,
     });
@@ -373,7 +394,7 @@ export async function processConversationWork(
       ack,
       conversationId,
       destination,
-      drain: drainInbox,
+      drain,
       isFinalAttempt: attemptMessages.some((message) =>
         isFinalAttempt(message),
       ),

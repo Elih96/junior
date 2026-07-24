@@ -22,6 +22,7 @@ export {
   type ConversationWorkState,
   type ExecutionStatus,
   type InboundMessage,
+  type InboundMessageDelivery,
   type Lease,
   type RequestConversationWorkResult,
   type Source,
@@ -370,10 +371,10 @@ export async function drainConversationMailbox(
   },
 ) {
   const result = await workState.drainConversationMailbox(args);
-  if (result.length > 0) {
+  if (result.changed) {
     await recordExecutionMetadata(args);
   }
-  return result;
+  return result.messages;
 }
 
 /** Acknowledge leased mailbox entries after the handler accepts responsibility. */

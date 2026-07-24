@@ -231,9 +231,95 @@ describe("conversation work execution", () => {
     );
   });
 
+  it("migrates schema-v1 Slack mailbox messages for classification", async () => {
+    const state = getStateAdapter();
+    await state.connect();
+    await appendInboundMessage({
+      message: inboundMessage("legacy-delivery"),
+      nowMs: 1_000,
+      state,
+    });
+    const raw = (await state.get(CONVERSATION_WORK_STATE_KEY)) as {
+      execution: { pendingMessages: Array<Record<string, unknown>> };
+      schemaVersion: number;
+    };
+    raw.schemaVersion = 1;
+    delete raw.execution.pendingMessages[0]?.delivery;
+    await state.set(CONVERSATION_WORK_STATE_KEY, raw);
+    const observed: string[] = [];
+
+    await expect(
+      processConversationWork(conversationQueueMessage(), {
+        queue: createConversationWorkQueueTestAdapter(),
+        run: async (context) => {
+          observed.push(
+            ...context.attempt.messages.map((message) => message.delivery),
+          );
+          await context.attempt.ack();
+          return { status: "completed" };
+        },
+        state,
+      }),
+    ).resolves.toEqual({ status: "completed" });
+
+    expect(observed).toEqual(["defer"]);
+  });
+
+  it("rejects unknown mailbox delivery without dropping pending work", async () => {
+    const state = getStateAdapter();
+    await state.connect();
+    await appendInboundMessage({
+      message: inboundMessage("unknown-delivery"),
+      nowMs: 1_000,
+      state,
+    });
+    const raw = (await state.get(CONVERSATION_WORK_STATE_KEY)) as {
+      execution: { pendingMessages: Array<Record<string, unknown>> };
+    };
+    raw.execution.pendingMessages[0]!.delivery = "future-mode";
+    await state.set(CONVERSATION_WORK_STATE_KEY, raw);
+
+    await expect(
+      getConversationWorkState({ conversationId: CONVERSATION_ID, state }),
+    ).rejects.toThrow(`Conversation record is invalid for ${CONVERSATION_ID}`);
+    await expect(state.get(CONVERSATION_WORK_STATE_KEY)).resolves.toEqual(raw);
+  });
+
+  it("ignores legacy injected markers without blocking pending work", async () => {
+    const state = getStateAdapter();
+    await state.connect();
+    await appendInboundMessage({
+      message: inboundMessage("injected"),
+      nowMs: 1_000,
+      state,
+    });
+    await appendInboundMessage({
+      message: inboundMessage("pending", {
+        createdAtMs: 2_000,
+        receivedAtMs: 2_100,
+      }),
+      nowMs: 2_100,
+      state,
+    });
+    const raw = (await state.get(CONVERSATION_WORK_STATE_KEY)) as {
+      execution: { pendingMessages: Array<Record<string, unknown>> };
+    };
+    raw.execution.pendingMessages[0]!.injectedAtMs = 1_500;
+    await state.set(CONVERSATION_WORK_STATE_KEY, raw);
+
+    await expect(
+      getConversationWorkState({ conversationId: CONVERSATION_ID, state }),
+    ).resolves.toMatchObject({
+      messages: [expect.objectContaining({ inboundMessageId: "pending" })],
+    });
+  });
+
   it("repairs duplicate inbound work when no queue marker was recorded", async () => {
     const queue = createConversationWorkQueueTestAdapter();
-    await appendInboundMessage({ message: inboundMessage("m1"), nowMs: 1_000 });
+    await appendInboundMessage({
+      message: inboundMessage("m1", { delivery: "defer" }),
+      nowMs: 1_000,
+    });
 
     await expect(
       appendAndEnqueueInboundMessage({
@@ -259,6 +345,7 @@ describe("conversation work execution", () => {
     await appendInboundMessage({ message: inboundMessage("m1"), nowMs: 1_000 });
 
     const twinWithFiles = inboundMessage("m1", {
+      delivery: "interrupt",
       receivedAtMs: 2_000,
       input: {
         text: "message m1",
@@ -276,6 +363,7 @@ describe("conversation work execution", () => {
     });
     expect(work?.messages).toEqual([
       expect.objectContaining({
+        delivery: "interrupt",
         inboundMessageId: "m1",
         receivedAtMs: 1_100,
         input: expect.objectContaining({
@@ -293,6 +381,45 @@ describe("conversation work execution", () => {
       conversationId: CONVERSATION_ID,
     });
     expect(work?.messages[0]?.input.attachments).toEqual([{ id: "F123" }]);
+  });
+
+  it("promotes duplicate mention metadata without dropping attachments", async () => {
+    await appendInboundMessage({
+      message: inboundMessage("m1", {
+        delivery: "defer",
+        input: {
+          attachments: [{ id: "F123" }],
+          authorId: "U123",
+          metadata: { platform: "slack", route: "subscribed" },
+          text: "message m1",
+        },
+      }),
+      nowMs: 1_000,
+    });
+    await expect(
+      appendInboundMessage({
+        message: inboundMessage("m1", {
+          delivery: "interrupt",
+          input: {
+            authorId: "U123",
+            metadata: { platform: "slack", route: "mention" },
+            text: "message m1",
+          },
+        }),
+        nowMs: 2_000,
+      }),
+    ).resolves.toEqual({ status: "duplicate" });
+
+    const work = await getConversationWorkState({
+      conversationId: CONVERSATION_ID,
+    });
+    expect(work?.messages[0]).toMatchObject({
+      delivery: "interrupt",
+      input: {
+        attachments: [{ id: "F123" }],
+        metadata: { platform: "slack", route: "mention" },
+      },
+    });
   });
 
   it("retries transient conversation work index lock contention", async () => {
@@ -1125,9 +1252,7 @@ describe("conversation work execution", () => {
         run: async (context) => {
           await context.attempt.drain(async (messages) => {
             injected.push(messages.map((message) => message.inboundMessageId));
-            return messages
-              .filter((message) => message.inboundMessageId === "m1")
-              .map((message) => message.inboundMessageId);
+            return ["m1"];
           });
           return { status: "completed" };
         },
@@ -1142,6 +1267,100 @@ describe("conversation work execution", () => {
     expect(state?.messages.map((message) => message.inboundMessageId)).toEqual([
       "m2",
     ]);
+  });
+
+  it("drains interrupts while deferred messages stay queued", async () => {
+    const queue = createConversationWorkQueueTestAdapter();
+    await appendInboundMessage({ message: inboundMessage("m1"), nowMs: 1_000 });
+    await appendInboundMessage({
+      message: inboundMessage("m2", {
+        createdAtMs: 2_000,
+        delivery: "defer",
+        receivedAtMs: 2_100,
+      }),
+      nowMs: 2_100,
+    });
+    const drained: string[][] = [];
+
+    await expect(
+      processConversationWork(conversationQueueMessage(), {
+        queue,
+        run: async (context) => {
+          await context.attempt.drain(async (messages) => {
+            drained.push(messages.map((message) => message.inboundMessageId));
+            return messages.map((message) => message.inboundMessageId);
+          });
+          return { status: "completed" };
+        },
+      }),
+    ).resolves.toEqual({ status: "pending_requeued" });
+
+    expect(drained).toEqual([["m1"]]);
+    const state = await getConversationWorkState({
+      conversationId: CONVERSATION_ID,
+    });
+    expect(state?.messages).toEqual([
+      expect.objectContaining({
+        inboundMessageId: "m2",
+        delivery: "defer",
+      }),
+    ]);
+  });
+
+  it("does not rewrite mailbox state for an empty drain result", async () => {
+    const events: string[] = [];
+    const conversationStore = metadataEventsStore(events);
+    const state = getStateAdapter();
+    await state.connect();
+    await appendInboundMessage({
+      conversationStore,
+      message: inboundMessage("m1"),
+      nowMs: 1_000,
+      state,
+    });
+    const lease = await startConversationWork({
+      conversationId: CONVERSATION_ID,
+      conversationStore,
+      nowMs: 2_000,
+      state,
+    });
+    expect(lease.status).toBe("acquired");
+    if (lease.status !== "acquired") {
+      throw new Error("Expected conversation work lease");
+    }
+    await appendInboundMessage({
+      conversationStore,
+      message: inboundMessage("m2", {
+        createdAtMs: 2_100,
+        delivery: "defer",
+        receivedAtMs: 2_100,
+      }),
+      nowMs: 2_100,
+      state,
+    });
+    const before = await getConversationWorkState({
+      conversationId: CONVERSATION_ID,
+      state,
+    });
+    const metadataCount = events.length;
+
+    await expect(
+      drainConversationMailbox({
+        conversationId: CONVERSATION_ID,
+        conversationStore,
+        handle: async () => [],
+        leaseToken: lease.leaseToken,
+        nowMs: 3_000,
+        state,
+      }),
+    ).resolves.toEqual([]);
+
+    const after = await getConversationWorkState({
+      conversationId: CONVERSATION_ID,
+      state,
+    });
+    expect(after?.execution.updatedAtMs).toBe(before?.execution.updatedAtMs);
+    expect(events).toHaveLength(metadataCount);
   });
 
   it("rejects mailbox acknowledgements outside the pending set", async () => {
@@ -1165,7 +1384,7 @@ describe("conversation work execution", () => {
     ).resolves.toEqual({ status: "failed" });
 
     expect(String(drainError)).toContain(
-      "Conversation mailbox acknowledgement is not pending for",
+      "Conversation mailbox drain result is not pending for",
     );
 
     const state = await getConversationWorkState({

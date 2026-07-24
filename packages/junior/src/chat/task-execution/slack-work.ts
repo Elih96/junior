@@ -566,6 +566,7 @@ export function createSlackResourceEventInboundMessage(
     createdAtMs: input.event.occurredAtMs,
     destination,
     inboundMessageId: `resource-event:${input.subscription.id}:${input.event.eventKey}`,
+    delivery: "defer",
     source: "resource_event",
     receivedAtMs: Date.now(),
     input: {
@@ -625,18 +626,6 @@ function routeForRecords(records: InboundMessage[]): SlackConversationRoute {
   })
     ? "mention"
     : "subscribed";
-}
-
-function isSlackAssistantThreadUserMessage(message: Message): boolean {
-  const raw =
-    message.raw && typeof message.raw === "object"
-      ? (message.raw as Record<string, unknown>)
-      : undefined;
-  return (
-    raw?.channel_type === "im" &&
-    typeof raw.thread_ts === "string" &&
-    raw.thread_ts.trim().length > 0
-  );
 }
 
 function isResourceEventNotificationMessage(message: Message): boolean {
@@ -837,31 +826,20 @@ export function createSlackConversationWorker(
             );
           }
         };
-        // Restore stored mailbox entries as Slack steering candidates; the
-        // runtime returns only the inbound ids it handled durably.
+        // Only explicit interruptions enter the active turn. Deferred work
+        // stays pending for a normal turn.
         const drainSteeringMessages = async (
           accept: (
             messages: SteeringCandidateMessage[],
-          ) => Promise<readonly string[] | void>,
+          ) => Promise<readonly string[]>,
         ): Promise<void> => {
           await context.attempt.drain(async (pendingRecords) => {
-            const messages = pendingRecords.map((record) => {
-              const metadata = parseSlackMetadata(record.input.metadata);
-              if (!metadata) {
-                throw new Error(
-                  "Conversation mailbox record is not Slack metadata",
-                );
-              }
-              const message = restoreMessage({ adapter, record });
-              return {
-                activeRequest:
-                  metadata.route === "mention" ||
-                  isSlackAssistantThreadUserMessage(message),
+            return await accept(
+              pendingRecords.map((record) => ({
                 inboundMessageId: record.inboundMessageId,
-                message,
-              };
-            });
-            return await accept(messages);
+                message: restoreMessage({ adapter, record }),
+              })),
+            );
           });
         };
 
@@ -938,6 +916,7 @@ export function buildSlackInboundMessage(args: {
       args.conversationId,
       args.message.id,
     ].join(":"),
+    delivery: args.message.isMention ? "interrupt" : "defer",
     source: "slack",
     createdAtMs: args.message.metadata.dateSent.getTime(),
     receivedAtMs: args.receivedAtMs,

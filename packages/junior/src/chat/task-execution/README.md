@@ -6,13 +6,17 @@ source of truth.
 
 ## State Model
 
-- A conversation mailbox contains normalized pending user work.
+- A conversation mailbox contains normalized pending work with a durable
+  delivery mode: `interrupt` or `defer`.
 - A queue payload identifies the conversation to wake; persisted conversation
-  work owns destination and routing.
+  work owns destination and delivery.
 - A lease grants one worker temporary execution ownership.
 - Check-ins extend active ownership and allow heartbeat recovery to distinguish
   slow work from abandoned work.
 - Delivery state prevents a completed turn from being posted twice.
+
+Schema-v1 mailbox entries migrate to deferred delivery. Schema-v2 entries
+require a valid delivery value and reject invalid pending work.
 
 `state.ts`, `store.ts`, and their runtime schemas define the persisted shapes.
 
@@ -30,8 +34,15 @@ source of truth.
 6. Terminal delivery or intentional no-reply completion records the delivered
    turn before acknowledging work.
 
-New messages that arrive during a run remain durable and are drained at the
-next safe boundary or subsequent wake-up.
+New messages that arrive during a run remain durable. `interrupt` work is
+eligible at the next safe boundary, while `defer` work follows normal ordering
+and waits for the next turn.
+
+Slack `@` mentions use `interrupt` delivery; all other inbound messages use
+`defer`.
+
+An active turn drains only `interrupt` messages. When a new turn starts,
+interrupt messages are handled before queued deferred work.
 
 ## Queue And Lease Rules
 
