@@ -1,4 +1,21 @@
 # Changelog
+## 0.112.0
+
+### New Features ✨
+
+- (auth) Include model intent in all authorization requests by @sentry-junior in [#1024](https://github.com/getsentry/junior/pull/1024)
+- (dashboard) Add profile metric charts by @sentry-junior in [#1035](https://github.com/getsentry/junior/pull/1035)
+
+### Bug Fixes 🐛
+
+- (agent) Stop resource watches when users ask by @dcramer in [#1032](https://github.com/getsentry/junior/pull/1032)
+- (dashboard) Break down cost by model by @sentry-junior in [#1034](https://github.com/getsentry/junior/pull/1034)
+- (github) Simplify dashboard activity reporting by @dcramer in [#1033](https://github.com/getsentry/junior/pull/1033)
+
+### Internal Changes 🔧
+
+- (oauth) Complete headless MCP auth fixture by @dcramer in [#847](https://github.com/getsentry/junior/pull/847)
+
 ## 0.111.0
 
 ### Bug Fixes 🐛
