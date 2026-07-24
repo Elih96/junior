@@ -1,15 +1,21 @@
 import { z } from "zod";
 import { juniorToolResultSchema } from "@/chat/tool-support/structured-result";
 import { zodTool } from "@/chat/tool-support/zod-tool";
+import type { ToolRegistry } from "@/chat/tools/definition";
 import type { ToolRuntimeContext } from "@/chat/tools/types";
 import {
-  cancelResourceEventSubscription,
+  cancelSubscriptions,
   createResourceEventSubscription,
   listResourceEventSubscriptions,
 } from "@/chat/resource-events/store";
 
 const DEFAULT_TTL_MS = 14 * 24 * 60 * 60 * 1000;
 const MAX_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const STOP_WATCHING_TOOL_NAME = "stopWatchingResources";
+const RESOURCE_WATCH_TOOL_SOURCE = {
+  id: "resource-watches",
+  description: "Inspect or stop resource watches for the current conversation.",
+};
 
 const subscribeInputSchema = z.object({
   resourceRef: z
@@ -41,16 +47,7 @@ const subscribeInputSchema = z.object({
     .optional(),
 });
 
-const cancelInputSchema = z.object({
-  subscriptionId: z
-    .string()
-    .describe(
-      "Subscription id returned by subscribeToResourceEvents or listResourceEventSubscriptions.",
-    ),
-});
-
 type SubscribeInput = z.output<typeof subscribeInputSchema>;
-type CancelInput = z.output<typeof cancelInputSchema>;
 
 function requireConversationContext(context: ToolRuntimeContext): string {
   if (!context.conversationId) {
@@ -70,7 +67,7 @@ function requireConversationContext(context: ToolRuntimeContext): string {
 }
 
 /** Return whether the current runtime can safely manage conversation subscriptions. */
-export function canUseResourceEventSubscriptionTools(
+function canUseResourceEventSubscriptionTools(
   context: ToolRuntimeContext,
 ): boolean {
   return (
@@ -107,9 +104,7 @@ function ttlMs(input: SubscribeInput): number {
 }
 
 /** Create the tool that subscribes the current conversation to resource events. */
-export function createSubscribeToResourceEventsTool(
-  context: ToolRuntimeContext,
-) {
+function createSubscribeToResourceEventsTool(context: ToolRuntimeContext) {
   return zodTool({
     description:
       "Subscribe the current conversation to high-signal events for a resource returned by a subscribable tool result. Matching events are queued as normal conversation messages; they do not interrupt active work.",
@@ -140,6 +135,13 @@ export function createSubscribeToResourceEventsTool(
         resourceRef: subscription.resourceRef,
         events: subscription.events,
         expiresAtMs: subscription.expiresAtMs,
+        stop_watching: {
+          execution_tool: "executeTool",
+          execution_example: {
+            tool_name: STOP_WATCHING_TOOL_NAME,
+            arguments: {},
+          },
+        },
       };
       return {
         ok: true,
@@ -152,12 +154,12 @@ export function createSubscribeToResourceEventsTool(
 }
 
 /** Create the tool that lists active resource subscriptions for this conversation. */
-export function createListResourceEventSubscriptionsTool(
-  context: ToolRuntimeContext,
-) {
+function createListResourceEventSubscriptionsTool(context: ToolRuntimeContext) {
   return zodTool({
     description:
       "List active resource event subscriptions for the current conversation.",
+    exposure: "deferred",
+    source: RESOURCE_WATCH_TOOL_SOURCE,
     inputSchema: z.object({}),
     outputSchema: juniorToolResultSchema,
     async execute() {
@@ -187,27 +189,20 @@ export function createListResourceEventSubscriptionsTool(
   });
 }
 
-/** Create the tool that cancels a current-conversation resource subscription. */
-export function createCancelResourceEventSubscriptionTool(
-  context: ToolRuntimeContext,
-) {
+/** Create the tool that stops resource watches for this conversation. */
+function createStopWatchingResourcesTool(context: ToolRuntimeContext) {
   return zodTool({
     description:
-      "Cancel a resource event subscription for the current conversation.",
-    inputSchema: cancelInputSchema,
+      "Stop every resource watch for the current conversation. Infer the user's intent from context instead of requiring a special command, and call this tool before confirming that watching stopped.",
+    exposure: "deferred",
+    source: RESOURCE_WATCH_TOOL_SOURCE,
+    inputSchema: z.object({}),
     outputSchema: juniorToolResultSchema,
-    async execute(input: CancelInput) {
+    async execute() {
       const conversationId = requireConversationContext(context);
-      const subscription = await cancelResourceEventSubscription({
-        conversationId,
-        id: input.subscriptionId,
-      });
-      if (!subscription) {
-        throw new Error("Resource event subscription was not found");
-      }
+      await cancelSubscriptions({ conversationId });
       const details = {
-        id: subscription.id,
-        subscription_status: subscription.status,
+        watching_status: "stopped",
       };
       return {
         ok: true,
@@ -217,4 +212,20 @@ export function createCancelResourceEventSubscriptionTool(
       };
     },
   });
+}
+
+/** Build the complete resource-watch tool set allowed by this runtime context. */
+export function createResourceEventTools(
+  context: ToolRuntimeContext,
+): ToolRegistry {
+  if (!canUseResourceEventSubscriptionTools(context)) {
+    return {};
+  }
+
+  return {
+    subscribeToResourceEvents: createSubscribeToResourceEventsTool(context),
+    listResourceEventSubscriptions:
+      createListResourceEventSubscriptionsTool(context),
+    [STOP_WATCHING_TOOL_NAME]: createStopWatchingResourcesTool(context),
+  };
 }

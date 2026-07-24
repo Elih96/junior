@@ -99,10 +99,14 @@ describe("Slack tool registration", () => {
     expect(tools).toHaveProperty("addReaction");
     expect(tools).toHaveProperty("slackCanvasCreate");
     expect(tools).toHaveProperty("searchConversationHistory");
+    expect(tools).toHaveProperty("stopWatchingResources");
+    expect(tools).toHaveProperty("listResourceEventSubscriptions");
     expect(tools.searchConversationHistory?.exposure).toBe("deferred");
     expect(tools.searchConversationHistory?.source?.id).toBe(
       "conversation-history",
     );
+    expect(tools.stopWatchingResources?.exposure).toBe("deferred");
+    expect(tools.listResourceEventSubscriptions?.exposure).toBe("deferred");
   });
 
   it("does not register public search without an action token", () => {
@@ -236,6 +240,7 @@ describe("Slack tool registration", () => {
       Object.keys(tools).filter((name) => name.startsWith("slack")),
     ).toEqual([]);
     expect(tools).not.toHaveProperty("attachFile");
+    expect(tools).not.toHaveProperty("stopWatchingResources");
   });
 
   it("registers image generation only when artifact persistence is available", () => {

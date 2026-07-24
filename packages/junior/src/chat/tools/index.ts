@@ -13,12 +13,7 @@ import { createLoadSkillTool } from "@/chat/tools/skill/load-skill";
 import { createSearchMcpToolsTool } from "@/chat/tools/skill/search-mcp-tools";
 import { createReadFileTool } from "@/chat/tools/sandbox/read-file";
 import { createReportProgressTool } from "@/chat/tools/runtime/report-progress";
-import {
-  canUseResourceEventSubscriptionTools,
-  createCancelResourceEventSubscriptionTool,
-  createListResourceEventSubscriptionsTool,
-  createSubscribeToResourceEventsTool,
-} from "@/chat/tools/resource-events";
+import { createResourceEventTools } from "@/chat/tools/resource-events";
 import { createSlackChannelListMessagesTool } from "@/chat/slack/tools/channel-list-messages";
 import { createSlackConversationSearchTool } from "@/chat/slack/tools/conversation-search";
 import { createSlackPublicSearchTool } from "@/chat/slack/tools/public-search";
@@ -120,6 +115,7 @@ export function createTools(
     webFetch: createWebFetchTool(hooks, {
       canSendFilesToActiveConversation,
     }),
+    ...createResourceEventTools(context),
   };
   if (hooks.writeGeneratedArtifacts) {
     tools.imageGenerate = createImageGenerateTool(
@@ -136,15 +132,6 @@ export function createTools(
 
   if (context.handoff) {
     tools.handoff = createHandoffTool(context.handoff);
-  }
-
-  if (canUseResourceEventSubscriptionTools(context)) {
-    tools.subscribeToResourceEvents =
-      createSubscribeToResourceEventsTool(context);
-    tools.listResourceEventSubscriptions =
-      createListResourceEventSubscriptionsTool(context);
-    tools.cancelResourceEventSubscription =
-      createCancelResourceEventSubscriptionTool(context);
   }
 
   if (context.mcpToolManager) {

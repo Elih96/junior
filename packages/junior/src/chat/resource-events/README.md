@@ -9,6 +9,9 @@ conversation.
   operation.
 - Core owns subscription creation, cancellation, expiry, deduplication, and the
   conversation association.
+- Inspection and stop actions stay in the tool catalog. A successful
+  subscription result identifies the exact no-argument catalog call that stops
+  every resource watch for the conversation.
 - A thread opt-out cancels every active subscription for that conversation
   before the Slack thread is marked unsubscribed.
 - Provider route code validates and normalizes incoming events before calling
