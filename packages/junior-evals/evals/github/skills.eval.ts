@@ -60,6 +60,56 @@ describeEval("GitHub Skill Workflows", slackEvals, (it) => {
     expect(verifyCall).toMatchObject({ result: { ok: true } });
   });
 
+  it("when an interrupted push applied remotely, verify it and do not push again", async ({
+    run,
+  }) => {
+    const pushCommand = "skills/github-push-recovery-fixture/push.sh";
+    const result = await run({
+      overrides: {
+        plugin_packages: ["@sentry/junior-github"],
+        skill_dirs: ["fixtures/github-push-recovery-skills"],
+        timeout_resume: {
+          tool_name: "bash",
+          arguments: { command: pushCommand },
+        },
+      },
+      initialEvents: [
+        mention(
+          "Finish pushing the already-committed release-status change using the local push-recovery fixture, then tell me whether the remote has it.",
+        ),
+      ],
+      criteria: rubric({
+        pass: [
+          "The assistant reports that the remote release status is shipped.",
+          "The final answer is based on the observed remote state rather than treating the interrupted command as a confirmed failure.",
+        ],
+        fail: [
+          "Do not ask for OAuth, a token, or changed GitHub permissions for the local fixture.",
+          "Do not contact production GitHub.",
+        ],
+      }),
+    });
+
+    const calls = toolCalls(result.session);
+    const pushCalls = calls.filter(
+      (call) =>
+        call.name === "bash" &&
+        typeof call.arguments?.command === "string" &&
+        call.arguments.command.includes("github-push-recovery-fixture/push.sh"),
+    );
+    const remoteStateCall = calls.find(
+      (call) =>
+        call.name === "bash" &&
+        call.status === "ok" &&
+        JSON.stringify(call.result)?.includes(
+          "remote_release_status=shipped push_attempts=1",
+        ) === true,
+    );
+
+    expect(pushCalls).toHaveLength(0);
+    expect(remoteStateCall).toMatchObject({ result: { ok: true } });
+  });
+
   it("when asked about PR auth sequencing, explain automatic installation credentials", async ({
     run,
   }) => {
