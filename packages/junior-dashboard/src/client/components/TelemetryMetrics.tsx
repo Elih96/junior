@@ -4,6 +4,7 @@ import {
   formatCompactNumber,
   formatTime,
   formatTokenSummary,
+  summarizeCost,
   summarizeUsage,
   type CostUsageSummary,
   type MessageSummary,
@@ -89,8 +90,9 @@ function tokenTooltip(
   return lines.filter(isMetricTooltipLine);
 }
 
-function costTooltip(summary: CostUsageSummary): MetricTooltipLine[] {
+function costTooltipLines(summary: CostUsageSummary): MetricTooltipLine[] {
   const lines: Array<MetricTooltipLine | undefined> = [
+    { label: "total", value: formatCostSummary(summary) },
     summary.input !== undefined
       ? { label: "input", value: formatCostSummary({ total: summary.input }) }
       : undefined,
@@ -116,14 +118,41 @@ function costTooltip(summary: CostUsageSummary): MetricTooltipLine[] {
   return lines.filter(isMetricTooltipLine);
 }
 
+function costTooltip(
+  summary: CostUsageSummary,
+  modelUsage: ConversationModelUsage[] | undefined,
+): MetricTooltipLine[] {
+  const modelSummaries = (modelUsage ?? []).flatMap((item) => {
+    const modelSummary = summarizeCost(item.usage);
+    return modelSummary
+      ? [{ modelId: item.modelId, summary: modelSummary }]
+      : [];
+  });
+  if (!modelSummaries.length) {
+    return costTooltipLines(summary);
+  }
+
+  return modelSummaries.flatMap((item) => [
+    { value: modelLabel(item.modelId), valueStyle: "heading" },
+    ...costTooltipLines(item.summary).map((line) => ({
+      ...line,
+      label: `• ${line.label}`,
+    })),
+  ]);
+}
+
 /** Render estimated model cost with a hoverable USD breakdown. */
 export function CostMetric(props: {
   align?: "left" | "right";
+  modelUsage?: ConversationModelUsage[];
   summary: CostUsageSummary | undefined;
 }) {
   if (!props.summary) return null;
   return (
-    <MetricValue align={props.align} tooltip={costTooltip(props.summary)}>
+    <MetricValue
+      align={props.align}
+      tooltip={costTooltip(props.summary, props.modelUsage)}
+    >
       {formatCostSummary(props.summary)}
     </MetricValue>
   );
