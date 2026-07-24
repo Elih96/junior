@@ -658,9 +658,11 @@ describe("dashboard canonical-event components", () => {
         {
           active: 0,
           conversations: 2,
+          costUsd: 0.42,
           date: "2026-01-02",
           durationMs: 1_200,
           failed: 0,
+          tokens: 1_234,
         },
       ],
       generatedAt: "2026-01-02T00:00:00.000Z",
@@ -671,6 +673,13 @@ describe("dashboard canonical-event components", () => {
           durationMs: 1_200,
           failed: 0,
           label: "#proj-alpha",
+        },
+        {
+          active: 0,
+          conversations: 1,
+          durationMs: 400,
+          failed: 0,
+          label: "#proj-beta",
         },
       ],
       recentConversations: [
@@ -704,6 +713,13 @@ describe("dashboard canonical-event components", () => {
           failed: 0,
           label: "Conversation",
         },
+        {
+          active: 0,
+          conversations: 1,
+          durationMs: 400,
+          failed: 0,
+          label: "API",
+        },
       ],
       totals: {
         active: 0,
@@ -723,6 +739,13 @@ describe("dashboard canonical-event components", () => {
     expect(html).toContain("Avery Example");
     expect(html).toContain("avery@example.com");
     expect(html).toContain("Activity");
+    expect(html).toContain("Usage over time");
+    expect(html).toContain("Token usage");
+    expect(html).toContain("Model spend");
+    expect(html).toContain("Runtime");
+    expect(html).toContain("1.2k");
+    expect(html).toContain("$0.42");
+    expect(html).toContain("30d");
     expect(html).not.toContain("Incident triage");
     expect(html).toContain("Daily Junior conversation activity");
     expect(html).toContain("52 weeks");
@@ -742,7 +765,10 @@ describe("dashboard canonical-event components", () => {
     ).toHaveLength(4);
     expect(html).not.toContain('href="/people/avery%40example.com"');
     expect(html).not.toContain('aria-label="Search recent conversations"');
-    expect(html).not.toContain(">Places<");
+    expect(html).toContain(">Places<");
+    expect(html).toContain(">Surfaces<");
+    expect(html.indexOf(">Places<")).toBeGreaterThan(activityStart);
+    expect(html.indexOf(">Surfaces<")).toBeGreaterThan(activityStart);
     expect(html).not.toContain(">active days<");
     expect(html).not.toContain(">runs<");
     expect(html).not.toContain(">attention<");
