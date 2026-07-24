@@ -387,12 +387,11 @@ function createResumeReplyContext(
     delivery,
     durability: {
       ...replyContext.durability,
-      onSandboxAcquired: async (sandbox) => {
+      onSandboxRefChanged: async (sandboxRef) => {
         await persistThreadStateById(threadId, {
-          sandboxId: sandbox.sandboxId,
-          sandboxDependencyProfileHash: sandbox.sandboxDependencyProfileHash,
+          sandboxRef,
         });
-        await replyContext.durability?.onSandboxAcquired?.(sandbox);
+        await replyContext.durability?.onSandboxRefChanged?.(sandboxRef);
       },
       onArtifactStateUpdated: async (artifacts) => {
         await persistThreadStateById(threadId, { artifacts });

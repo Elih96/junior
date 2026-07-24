@@ -16,24 +16,27 @@ import {
   consumeSandboxEgressAuthRequiredSignal,
   consumeSandboxEgressPermissionDeniedSignal,
   createSandboxEgressCredentialToken,
-  type SandboxEgressAuthRequiredSignal,
-  type SandboxEgressPermissionDeniedSignal,
 } from "@/chat/sandbox/egress/session";
+import { formatSandboxCommandResult } from "@/chat/sandbox/command-result";
 import type { SandboxEgressTracePropagationConfig } from "@/chat/sandbox/egress/tracing";
 import type { CredentialContext } from "@/chat/credentials/context";
 import {
   isSandboxCommandStreamInterruptedError,
+  isSandboxUnavailableError,
   throwSandboxOperationError,
 } from "@/chat/sandbox/errors";
 import { SANDBOX_WORKSPACE_ROOT } from "@/chat/sandbox/paths";
-import { createSandboxSessionManager } from "@/chat/sandbox/session";
-import type { PluginHookRunner } from "@/chat/plugins/agent-hooks";
+import { createSandboxRuntime } from "@/chat/sandbox/session";
 import {
   isHostFileMissingError,
   resolveHostDataPath,
   resolveHostSkillPath,
 } from "@/chat/sandbox/skill-sync";
-import type { SandboxInstance } from "@/chat/sandbox/workspace";
+import type { SandboxRef } from "@/chat/sandbox/ref";
+import type {
+  SandboxSession,
+  SandboxWorkspace,
+} from "@/chat/sandbox/workspace";
 import type { SkillMetadata } from "@/chat/skills";
 import { editFile } from "@/chat/tools/sandbox/edit-file";
 import { findFiles } from "@/chat/tools/sandbox/find-files";
@@ -51,48 +54,44 @@ import { ToolInputError } from "@/chat/tools/execution/tool-input-error";
 import { makeStructuredToolResult } from "@/chat/tool-support/structured-result";
 
 // Policies: policies/security.md and policies/observability.md.
-interface SandboxExecutionInput {
+export interface SandboxToolCall {
   toolName: string;
   input: unknown;
   signal?: AbortSignal;
 }
 
-export interface SandboxExecutionEnvelope<T = unknown> {
-  result: T;
+export interface SandboxTools {
+  supports(toolName: string): boolean;
+  execute(params: SandboxToolCall): Promise<unknown>;
 }
 
-export interface BashCustomCommandResult {
-  ok: boolean;
-  command: string;
-  cwd: string;
-  exit_code: number;
-  signal: null;
-  timed_out: boolean;
-  aborted?: boolean;
-  stdout: string;
-  stderr: string;
-  stdout_truncated: boolean;
-  stderr_truncated: boolean;
-  auth_required?: SandboxEgressAuthRequiredSignal;
-  permission_denied?: SandboxEgressPermissionDeniedSignal;
+export interface SandboxAccess {
+  readonly tools: SandboxTools;
+  readonly workspace: SandboxWorkspace;
+  sandboxRef(): SandboxRef | undefined;
 }
 
-export interface SandboxAcquiredState {
-  sandboxId: string;
-  sandboxDependencyProfileHash?: string;
+export interface SandboxOptions {
+  sandboxRef?: SandboxRef;
+  skills: SkillMetadata[];
+  referenceFiles: string[];
+  timeoutMs?: number;
+  traceContext?: LogContext;
+  tracePropagation?: SandboxEgressTracePropagationConfig;
+  credentialEgress?: CredentialContext;
+  prepare?: (workspace: SandboxWorkspace) => void | Promise<void>;
+  onSandboxRefChanged?: (sandboxRef: SandboxRef) => void | Promise<void>;
 }
 
-export interface SandboxExecutor {
-  configureSkills(skills: SkillMetadata[]): void;
-  configureReferenceFiles(files: string[]): void;
-  getSandboxId(): string | undefined;
-  getDependencyProfileHash(): string | undefined;
-  canExecute(toolName: string): boolean;
-  createSandbox(): Promise<SandboxInstance>;
-  execute<T>(
-    params: SandboxExecutionInput,
-  ): Promise<SandboxExecutionEnvelope<T>>;
-  dispose(): Promise<void>;
+/** Create the safe expected tool error for an unavailable sandbox operation. */
+function createSandboxUnavailableToolError(
+  operation: string,
+  cause: unknown,
+): ToolInputError {
+  return new ToolInputError(
+    `The temporary sandbox became unavailable during ${operation}, so the operation did not complete reliably. The next sandbox operation will use a fresh session. It may have produced side effects; retry only if it is safe.`,
+    { cause },
+  );
 }
 
 const SANDBOX_TOOL_NAMES = new Set([
@@ -117,95 +116,16 @@ function parseEnv(raw: unknown): Record<string, string> | undefined {
   );
 }
 
-function sandboxStreamInterruptedResult(toolName: string) {
-  return makeStructuredToolResult({
-    ok: false,
-    status: "error",
-    target: toolName,
-    error: {
-      kind: "stream_interrupted",
-      message: `Sandbox command stream was interrupted during ${toolName}. The operation did not complete reliably. It may have produced side effects; inspect the workspace or retry only if it is safe.`,
-      retryable: true,
-    },
-    tool: toolName,
-  });
-}
-
-function bashToolResult(params: BashCustomCommandResult) {
-  return makeStructuredToolResult({
-    ok: params.ok,
-    status: params.ok ? "success" : "error",
-    target: params.command,
-    data: {
-      command: params.command,
-      cwd: params.cwd,
-      exit_code: params.exit_code,
-      signal: params.signal,
-      timed_out: params.timed_out,
-      aborted: Boolean(params.aborted),
-      stdout: params.stdout,
-      stderr: params.stderr,
-      stdout_truncated: params.stdout_truncated,
-      stderr_truncated: params.stderr_truncated,
-    },
-    truncated: params.stdout_truncated || params.stderr_truncated,
-    ...(!params.ok
-      ? {
-          error: {
-            kind: params.aborted
-              ? "outcome_unknown"
-              : params.timed_out
-                ? "timeout"
-                : "nonzero_exit",
-            message: params.aborted
-              ? "Command was interrupted before its outcome was confirmed. It may have produced side effects; reconcile external state before retrying or reporting failure."
-              : params.stderr.trim() ||
-                `Command exited with code ${params.exit_code}`,
-            retryable: params.timed_out,
-          },
-        }
-      : {}),
-    command: params.command,
-    cwd: params.cwd,
-    exit_code: params.exit_code,
-    signal: params.signal,
-    timed_out: params.timed_out,
-    aborted: Boolean(params.aborted),
-    stdout: params.stdout,
-    stderr: params.stderr,
-    stdout_truncated: params.stdout_truncated,
-    stderr_truncated: params.stderr_truncated,
-    ...(params.auth_required ? { auth_required: params.auth_required } : {}),
-    ...(params.permission_denied
-      ? { permission_denied: params.permission_denied }
-      : {}),
-  });
-}
-
-/** Create one sandbox-backed tool executor facade for the current turn. */
-export function createSandboxExecutor(options?: {
-  sandboxId?: string;
-  sandboxDependencyProfileHash?: string;
-  timeoutMs?: number;
-  traceContext?: LogContext;
-  tracePropagation?: SandboxEgressTracePropagationConfig;
-  credentialEgress?: CredentialContext;
-  agentHooks?: PluginHookRunner;
-  onSandboxAcquired?: (sandbox: SandboxAcquiredState) => void | Promise<void>;
-  runBashCustomCommand?: (
-    command: string,
-  ) => Promise<{ handled: boolean; result?: BashCustomCommandResult }>;
-}): SandboxExecutor {
-  let availableSkills: SkillMetadata[] = [];
-  let referenceFiles: string[] = [];
-  const traceContext = options?.traceContext ?? {};
-  const tracePropagation = options?.tracePropagation;
+/** Create lazy run-scoped access to a conversation's durable sandbox. */
+export function createSandbox(options: SandboxOptions): SandboxAccess {
+  const traceContext = options.traceContext ?? {};
+  const tracePropagation = options.tracePropagation;
   const hasTracePropagationDomains =
     (tracePropagation?.domains?.length ?? 0) > 0;
-  const credentialEgress = options?.credentialEgress;
+  const credentialEgress = options.credentialEgress;
   const sandboxEgressTokenTtlMs = Math.max(
     1,
-    options?.timeoutMs ?? 1000 * 60 * 30,
+    options.timeoutMs ?? 1000 * 60 * 30,
   );
   const sandboxEgressCredentialTokens = new Map<
     string,
@@ -231,31 +151,28 @@ export function createSandboxExecutor(options?: {
     });
     return token;
   };
-  const sessionManager = createSandboxSessionManager({
-    sandboxId: options?.sandboxId,
-    sandboxDependencyProfileHash: options?.sandboxDependencyProfileHash,
-    timeoutMs: options?.timeoutMs,
+  const runtime = createSandboxRuntime({
+    sandboxRef: options.sandboxRef,
+    skills: options.skills,
+    referenceFiles: options.referenceFiles,
+    timeoutMs: options.timeoutMs,
     traceContext,
-    commandEnv: credentialEgress
-      ? async () => await resolveSandboxCommandEnvironment()
-      : undefined,
+    commandEnv: credentialEgress ? resolveSandboxCommandEnvironment : undefined,
     createNetworkPolicy:
       credentialEgress || hasTracePropagationDomains
-        ? (egressId, traceHeaders) =>
+        ? (sessionId, traceHeaders) =>
             buildSandboxEgressNetworkPolicy({
               ...(credentialEgress
-                ? { credentialToken: sandboxEgressCredentialTokenFor(egressId) }
+                ? {
+                    credentialToken: sandboxEgressCredentialTokenFor(sessionId),
+                  }
                 : {}),
               traceConfig: tracePropagation,
               traceHeaders,
             })
         : undefined,
-    onSandboxPrepare: async (sandbox) => {
-      await options?.agentHooks?.prepareSandbox(sandbox);
-    },
-    onSandboxAcquired: async (sandbox) => {
-      await options?.onSandboxAcquired?.(sandbox);
-    },
+    onSandboxPrepare: options.prepare,
+    onSandboxRefChanged: options.onSandboxRefChanged,
   });
 
   const withSandboxSpan = <T>(
@@ -273,7 +190,7 @@ export function createSandboxExecutor(options?: {
     callback: () => Promise<T>,
   ): Promise<T> =>
     withSandboxSpan(name, op, attributes, async () => {
-      await sessionManager.refreshNetworkPolicy(getTracePropagationHeaders());
+      await runtime.refreshNetworkPolicy(getTracePropagationHeaders());
       return await callback();
     });
 
@@ -281,7 +198,7 @@ export function createSandboxExecutor(options?: {
     trigger: string,
     details: Record<string, string | number> = {},
   ): void => {
-    if (sessionManager.getSandboxId()) {
+    if (runtime.sandboxRef()) {
       return;
     }
 
@@ -300,15 +217,15 @@ export function createSandboxExecutor(options?: {
     rawInput: Record<string, unknown>,
     command: string,
     signal?: AbortSignal,
-  ): Promise<SandboxExecutionEnvelope<T>> => {
+  ): Promise<T> => {
     const env = parseEnv(rawInput.env);
     const timeoutMs = positiveInteger(rawInput.timeoutMs);
     logSandboxBootRequest("tool.bash", {
       "app.sandbox.command_length": command.length,
     });
-    const executeBash = (await sessionManager.ensureToolExecutors()).bash;
-    const activeEgressId = sessionManager.getSandboxEgressId();
-    await clearSandboxEgressSignals(activeEgressId);
+    const { bash: executeBash, sessionId: activeSessionId } =
+      await runtime.tools();
+    await clearSandboxEgressSignals(activeSessionId);
     const result = await withSandboxToolSpan(
       "bash",
       "process.exec",
@@ -359,32 +276,30 @@ export function createSandboxExecutor(options?: {
     // and `clearSandboxEgressSignals` runs before each execution to prevent
     // cross-command leakage.
     const authRequired =
-      await consumeSandboxEgressAuthRequiredSignal(activeEgressId);
+      await consumeSandboxEgressAuthRequiredSignal(activeSessionId);
     const permissionDenied =
-      await consumeSandboxEgressPermissionDeniedSignal(activeEgressId);
+      await consumeSandboxEgressPermissionDeniedSignal(activeSessionId);
 
-    return {
-      result: bashToolResult({
-        ok: result.exitCode === 0,
-        command,
-        cwd: SANDBOX_WORKSPACE_ROOT,
-        exit_code: result.exitCode,
-        signal: null,
-        timed_out: Boolean(result.timedOut),
-        aborted: Boolean(result.aborted),
-        stdout: result.stdout,
-        stderr: result.stderr,
-        stdout_truncated: result.stdoutTruncated,
-        stderr_truncated: result.stderrTruncated,
-        ...(authRequired ? { auth_required: authRequired } : {}),
-        ...(permissionDenied ? { permission_denied: permissionDenied } : {}),
-      }) as T,
-    };
+    return formatSandboxCommandResult({
+      ok: result.exitCode === 0,
+      command,
+      cwd: SANDBOX_WORKSPACE_ROOT,
+      exit_code: result.exitCode,
+      signal: null,
+      timed_out: Boolean(result.timedOut),
+      aborted: Boolean(result.aborted),
+      stdout: result.stdout,
+      stderr: result.stderr,
+      stdout_truncated: result.stdoutTruncated,
+      stderr_truncated: result.stderrTruncated,
+      ...(authRequired ? { auth_required: authRequired } : {}),
+      ...(permissionDenied ? { permission_denied: permissionDenied } : {}),
+    }) as T;
   };
 
   const executeReadFileTool = async <T>(
     rawInput: Record<string, unknown>,
-  ): Promise<SandboxExecutionEnvelope<T>> => {
+  ): Promise<T> => {
     const filePath = String(rawInput.path ?? "").trim();
     if (!filePath) {
       throw new ToolInputError("path is required");
@@ -392,10 +307,10 @@ export function createSandboxExecutor(options?: {
     const offset = positiveInteger(rawInput.offset);
     const limit = positiveInteger(rawInput.limit);
 
-    if (!sessionManager.getSandboxId()) {
+    if (!runtime.sandboxRef()) {
       const hostPath =
-        resolveHostSkillPath(availableSkills, filePath) ??
-        resolveHostDataPath(referenceFiles, filePath);
+        resolveHostSkillPath(options.skills, filePath) ??
+        resolveHostDataPath(options.referenceFiles, filePath);
       if (hostPath) {
         try {
           const content = await fs.readFile(hostPath, "utf8");
@@ -406,14 +321,12 @@ export function createSandboxExecutor(options?: {
             "app.skill.virtual_read": true,
           });
           setSpanStatus("ok");
-          return {
-            result: sliceFileContent({
-              content,
-              path: filePath,
-              offset,
-              limit,
-            }) as T,
-          };
+          return sliceFileContent({
+            content,
+            path: filePath,
+            offset,
+            limit,
+          }) as T;
         } catch (error) {
           if (!isHostFileMissingError(error)) {
             throw error;
@@ -425,8 +338,7 @@ export function createSandboxExecutor(options?: {
     logSandboxBootRequest("tool.readFile", {
       "file.path": filePath,
     });
-    const executeReadFile = (await sessionManager.ensureToolExecutors())
-      .readFile;
+    const executeReadFile = (await runtime.tools()).readFile;
     const result = await withSandboxToolSpan(
       "sandbox.readFile",
       "sandbox.fs.read",
@@ -461,12 +373,12 @@ export function createSandboxExecutor(options?: {
       },
     );
 
-    return { result: result as T };
+    return result as T;
   };
 
   const executeWriteFileTool = async <T>(
     rawInput: Record<string, unknown>,
-  ): Promise<SandboxExecutionEnvelope<T>> => {
+  ): Promise<T> => {
     const filePath = String(rawInput.path ?? "").trim();
     if (!filePath) {
       throw new ToolInputError("path is required");
@@ -476,8 +388,7 @@ export function createSandboxExecutor(options?: {
     logSandboxBootRequest("tool.writeFile", {
       "file.path": filePath,
     });
-    const executeWriteFile = (await sessionManager.ensureToolExecutors())
-      .writeFile;
+    const executeWriteFile = (await runtime.tools()).writeFile;
     await withSandboxToolSpan(
       "sandbox.writeFile",
       "sandbox.fs.write",
@@ -495,24 +406,22 @@ export function createSandboxExecutor(options?: {
       },
     );
 
-    return {
-      result: makeStructuredToolResult({
-        ok: true,
-        status: "success",
-        target: filePath,
-        data: {
-          bytes_written: Buffer.byteLength(content, "utf8"),
-          path: filePath,
-        },
-        path: filePath,
+    return makeStructuredToolResult({
+      ok: true,
+      status: "success",
+      target: filePath,
+      data: {
         bytes_written: Buffer.byteLength(content, "utf8"),
-      }) as T,
-    };
+        path: filePath,
+      },
+      path: filePath,
+      bytes_written: Buffer.byteLength(content, "utf8"),
+    }) as T;
   };
 
   const executeEditFileTool = async <T>(
     rawInput: Record<string, unknown>,
-  ): Promise<SandboxExecutionEnvelope<T>> => {
+  ): Promise<T> => {
     const filePath = String(rawInput.path ?? "").trim();
     if (!filePath) {
       throw new ToolInputError("path is required");
@@ -524,7 +433,7 @@ export function createSandboxExecutor(options?: {
     logSandboxBootRequest("tool.editFile", {
       "file.path": filePath,
     });
-    const executors = await sessionManager.ensureToolExecutors();
+    const executors = await runtime.tools();
     const result = await withSandboxToolSpan(
       "sandbox.editFile",
       "sandbox.fs.edit",
@@ -543,12 +452,12 @@ export function createSandboxExecutor(options?: {
       },
     );
 
-    return { result: result as T };
+    return result as T;
   };
 
   const executeGrepTool = async <T>(
     rawInput: Record<string, unknown>,
-  ): Promise<SandboxExecutionEnvelope<T>> => {
+  ): Promise<T> => {
     const pattern = String(rawInput.pattern ?? "");
     if (!pattern) {
       throw new ToolInputError("pattern is required");
@@ -557,7 +466,7 @@ export function createSandboxExecutor(options?: {
     logSandboxBootRequest("tool.grep");
     const contextLines = positiveInteger(rawInput.context);
     const limit = positiveInteger(rawInput.limit);
-    const executors = await sessionManager.ensureToolExecutors();
+    const executors = await runtime.tools();
     const result = await withSandboxToolSpan(
       "sandbox.grep",
       "sandbox.fs.search",
@@ -584,12 +493,12 @@ export function createSandboxExecutor(options?: {
       },
     );
 
-    return { result: result as T };
+    return result as T;
   };
 
   const executeFindFilesTool = async <T>(
     rawInput: Record<string, unknown>,
-  ): Promise<SandboxExecutionEnvelope<T>> => {
+  ): Promise<T> => {
     const pattern = String(rawInput.pattern ?? "");
     if (!pattern) {
       throw new ToolInputError("pattern is required");
@@ -597,7 +506,7 @@ export function createSandboxExecutor(options?: {
 
     logSandboxBootRequest("tool.findFiles");
     const limit = positiveInteger(rawInput.limit);
-    const executors = await sessionManager.ensureToolExecutors();
+    const executors = await runtime.tools();
     const result = await withSandboxToolSpan(
       "sandbox.findFiles",
       "sandbox.fs.find",
@@ -616,15 +525,15 @@ export function createSandboxExecutor(options?: {
       },
     );
 
-    return { result: result as T };
+    return result as T;
   };
 
   const executeListDirTool = async <T>(
     rawInput: Record<string, unknown>,
-  ): Promise<SandboxExecutionEnvelope<T>> => {
+  ): Promise<T> => {
     logSandboxBootRequest("tool.listDir");
     const limit = positiveInteger(rawInput.limit);
-    const executors = await sessionManager.ensureToolExecutors();
+    const executors = await runtime.tools();
     const result = await withSandboxToolSpan(
       "sandbox.listDir",
       "sandbox.fs.list",
@@ -640,12 +549,10 @@ export function createSandboxExecutor(options?: {
       },
     );
 
-    return { result: result as T };
+    return result as T;
   };
 
-  const execute = async <T>(
-    params: SandboxExecutionInput,
-  ): Promise<SandboxExecutionEnvelope<T>> => {
+  const execute = async <T>(params: SandboxToolCall): Promise<T> => {
     const rawInput = (params.input ?? {}) as Record<string, unknown>;
     const bashCommand =
       params.toolName === "bash"
@@ -656,19 +563,13 @@ export function createSandboxExecutor(options?: {
       if (!bashCommand) {
         throw new ToolInputError("command is required");
       }
-      if (options?.runBashCustomCommand) {
-        const custom = await options.runBashCustomCommand(bashCommand);
-        if (custom.handled) {
-          if (!custom.result) {
-            throw new Error("Custom bash command handler returned no result.");
-          }
-          return { result: bashToolResult(custom.result) as T };
-        }
-      }
-      return await executeBashTool(rawInput, bashCommand, params.signal);
     }
 
     try {
+      if (bashCommand !== undefined) {
+        return await executeBashTool(rawInput, bashCommand, params.signal);
+      }
+
       if (params.toolName === "readFile") {
         return await executeReadFileTool(rawInput);
       }
@@ -693,39 +594,62 @@ export function createSandboxExecutor(options?: {
         return await executeWriteFileTool(rawInput);
       }
     } catch (error) {
-      if (!isSandboxCommandStreamInterruptedError(error)) {
-        throw error;
+      if (isSandboxUnavailableError(error)) {
+        // Do not replay an operation that may already have produced side effects.
+        throw createSandboxUnavailableToolError(params.toolName, error);
       }
-      return { result: sandboxStreamInterruptedResult(params.toolName) as T };
+      if (isSandboxCommandStreamInterruptedError(error)) {
+        throw new ToolInputError(
+          `The sandbox command stream was interrupted during ${params.toolName}, so the operation did not complete reliably. It may have produced side effects; inspect the workspace or retry only if it is safe.`,
+          { cause: error },
+        );
+      }
+      throw error;
     }
 
     throw new Error(`unsupported sandbox tool: ${params.toolName}`);
   };
 
+  const runWorkspaceOperation = async <T>(
+    operation: string,
+    callback: (sandbox: SandboxSession) => Promise<T>,
+  ): Promise<T> => {
+    try {
+      return await callback(await runtime.acquire());
+    } catch (error) {
+      if (isSandboxUnavailableError(error)) {
+        throw createSandboxUnavailableToolError(operation, error);
+      }
+      throw error;
+    }
+  };
+  const workspace: SandboxWorkspace = {
+    readFileToBuffer: async (input) =>
+      await runWorkspaceOperation(
+        "workspace.readFileToBuffer",
+        async (sandbox) => await sandbox.readFileToBuffer(input),
+      ),
+    runCommand: async (input) =>
+      await runWorkspaceOperation(
+        "workspace.runCommand",
+        async (sandbox) => await sandbox.runCommand(input),
+      ),
+    writeFiles: async (files) =>
+      await runWorkspaceOperation("workspace.writeFiles", async (sandbox) => {
+        await sandbox.writeFiles(files);
+      }),
+  };
+
   return {
-    configureSkills(skills: SkillMetadata[]) {
-      availableSkills = [...skills];
-      sessionManager.configureSkills(skills);
+    workspace,
+    tools: {
+      supports(toolName: string) {
+        return SANDBOX_TOOL_NAMES.has(toolName);
+      },
+      execute,
     },
-    configureReferenceFiles(files: string[]) {
-      referenceFiles = [...files];
-      sessionManager.configureReferenceFiles(files);
-    },
-    getSandboxId() {
-      return sessionManager.getSandboxId();
-    },
-    getDependencyProfileHash() {
-      return sessionManager.getDependencyProfileHash();
-    },
-    canExecute(toolName: string) {
-      return SANDBOX_TOOL_NAMES.has(toolName);
-    },
-    async createSandbox() {
-      return await sessionManager.createSandbox();
-    },
-    execute,
-    async dispose() {
-      await sessionManager.dispose();
+    sandboxRef() {
+      return runtime.sandboxRef();
     },
   };
 }

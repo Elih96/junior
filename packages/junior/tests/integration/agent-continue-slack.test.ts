@@ -61,16 +61,17 @@ function createSandbox(files: Record<string, Buffer>): SandboxWorkspace {
     readFileToBuffer: async ({ path }) => files[path] ?? null,
     runCommand: async () => ({
       exitCode: 0,
-      stdout: async () => "image/png\n",
-      stderr: async () => "",
+      stdout: "image/png\n",
+      stderr: "",
     }),
+    writeFiles: async () => undefined,
   };
 }
 
 /** Build a Slack tool context from the resumed request to exercise continuation file sends. */
 function createToolContext(
   request: AgentRunRequest,
-  sandbox: SandboxWorkspace,
+  workspace: SandboxWorkspace,
 ): ToolRuntimeContext {
   if (
     request.routing.source.platform !== "slack" ||
@@ -89,7 +90,7 @@ function createToolContext(
       request.routing.actor?.platform === "slack"
         ? request.routing.actor
         : undefined,
-    sandbox,
+    workspace,
     source: request.routing.source,
     surface: request.routing.surface,
     userText: request.input.messageText,
@@ -294,10 +295,7 @@ describe("agent continuation Slack integration", () => {
           toolChannelId: "C999",
         }),
         state: expect.objectContaining({
-          sandbox: expect.objectContaining({
-            sandboxId: undefined,
-            sandboxDependencyProfileHash: undefined,
-          }),
+          sandboxRef: undefined,
         }),
       }),
     );

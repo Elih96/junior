@@ -12,9 +12,9 @@ import type {
   ConversationMessage,
   ThreadConversationState,
 } from "@/chat/state/conversation";
-import { toOptionalString } from "@/chat/coerce";
 import { setSpanAttributes } from "@/chat/logging";
 import { getThreadTs } from "@/chat/runtime/thread-context";
+import type { SandboxRef } from "@/chat/sandbox/ref";
 import {
   coerceThreadArtifactsState,
   type ThreadArtifactsState,
@@ -30,7 +30,10 @@ import {
   hasPotentialImageAttachment,
   isVisionEnabled,
 } from "@/chat/slack/vision-context";
-import { getChannelConfigurationService } from "@/chat/runtime/thread-state";
+import {
+  getChannelConfigurationService,
+  getPersistedSandboxState,
+} from "@/chat/runtime/thread-state";
 import {
   hydrateConversationMessages,
   persistConversationMessages,
@@ -52,8 +55,7 @@ export interface PreparedTurnState {
   channelConfiguration?: ChannelConfigurationService;
   conversation: ThreadConversationState;
   conversationContext?: string;
-  sandboxId?: string;
-  sandboxDependencyProfileHash?: string;
+  sandboxRef?: SandboxRef;
   userMessageAlreadyReplied?: boolean;
   userMessageId?: string;
 }
@@ -177,17 +179,7 @@ export function createPrepareTurnState(deps: PrepareTurnStateDeps) {
     args: PrepareTurnStateInput,
   ): Promise<PreparedTurnState> {
     const existingState = await args.thread.state;
-    const existingSandboxId = existingState
-      ? toOptionalString(
-          (existingState as Record<string, unknown>).app_sandbox_id,
-        )
-      : undefined;
-    const existingSandboxDependencyProfileHash = existingState
-      ? toOptionalString(
-          (existingState as Record<string, unknown>)
-            .app_sandbox_dependency_profile_hash,
-        )
-      : undefined;
+    const sandboxRef = getPersistedSandboxState(existingState ?? {});
     const artifacts = coerceThreadArtifactsState(existingState);
     const conversation = coerceThreadConversationState(existingState);
     const conversationId = args.context.threadId ?? args.context.runId;
@@ -275,8 +267,7 @@ export function createPrepareTurnState(deps: PrepareTurnStateDeps) {
       configuration,
       channelConfiguration,
       conversation,
-      sandboxId: existingSandboxId,
-      sandboxDependencyProfileHash: existingSandboxDependencyProfileHash,
+      sandboxRef,
       conversationContext,
       userMessageAlreadyReplied,
       userMessageId,

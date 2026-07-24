@@ -1,6 +1,6 @@
 import type { FileUpload } from "chat";
 import { describe, expect, it } from "vitest";
-import { writeSandboxGeneratedArtifacts } from "@/chat/runtime/generated-artifacts";
+import { writeSandboxGeneratedArtifacts } from "@/chat/tools/sandbox/generated-artifacts";
 import { SANDBOX_ARTIFACTS_DIR } from "@/chat/tools/sandbox/file-uploads";
 import type { SandboxCommandResult } from "@/chat/sandbox/workspace";
 
@@ -9,8 +9,8 @@ const GENERATED_IMAGE_PATH = `${SANDBOX_ARTIFACTS_DIR}/generated.png`;
 function commandResult(overrides: Partial<SandboxCommandResult> = {}) {
   return {
     exitCode: 0,
-    stdout: async () => "",
-    stderr: async () => "",
+    stdout: "",
+    stderr: "",
     ...overrides,
   } satisfies SandboxCommandResult;
 }
@@ -21,7 +21,7 @@ function createGeneratedArtifactSandbox() {
   return {
     commands,
     files,
-    sandbox: {
+    workspace: {
       runCommand: async (input: { args?: string[]; cmd: string }) => {
         commands.push(input);
         return commandResult();
@@ -58,7 +58,7 @@ describe("writeSandboxGeneratedArtifacts", () => {
     ];
 
     const refs = await writeSandboxGeneratedArtifacts(
-      fixture.sandbox,
+      fixture.workspace,
       generated,
     );
 
@@ -81,11 +81,11 @@ describe("writeSandboxGeneratedArtifacts", () => {
   });
 
   it("fails before returning refs when the artifact directory cannot be created", async () => {
-    const sandbox = {
+    const workspace = {
       runCommand: async () =>
         commandResult({
           exitCode: 1,
-          stderr: async () => "permission denied",
+          stderr: "permission denied",
         }),
       writeFiles: async () => {
         throw new Error("writeFiles should not run");
@@ -93,7 +93,7 @@ describe("writeSandboxGeneratedArtifacts", () => {
     };
 
     await expect(
-      writeSandboxGeneratedArtifacts(sandbox, [
+      writeSandboxGeneratedArtifacts(workspace, [
         {
           data: Buffer.from("image-bytes"),
           filename: "generated.png",

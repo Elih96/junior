@@ -6,8 +6,8 @@ import {
 } from "@/chat/tools/sandbox/file-uploads";
 import type { SandboxCommandResult } from "@/chat/sandbox/workspace";
 
-/** Sandbox operations needed to make generated artifacts visible to later tools. */
-export interface GeneratedArtifactSandbox {
+/** Workspace operations needed to make generated artifacts visible to later tools. */
+export interface GeneratedArtifactWorkspace {
   runCommand(input: {
     args?: string[];
     cmd: string;
@@ -34,16 +34,16 @@ async function fileUploadDataToBuffer(
 
 /** Persist generated artifacts into the sandbox before returning model-visible handles. */
 export async function writeSandboxGeneratedArtifacts(
-  sandbox: GeneratedArtifactSandbox,
+  workspace: GeneratedArtifactWorkspace,
   files: FileUpload[],
 ): Promise<GeneratedArtifactFileRef[]> {
-  const mkdir = await sandbox.runCommand({
+  const mkdir = await workspace.runCommand({
     cmd: "mkdir",
     args: ["-p", SANDBOX_ARTIFACTS_DIR],
   });
   if (mkdir.exitCode !== 0) {
     throw new Error(
-      `failed to create generated artifact directory: ${await mkdir.stderr()}`,
+      `failed to create generated artifact directory: ${mkdir.stderr}`,
     );
   }
 
@@ -63,7 +63,7 @@ export async function writeSandboxGeneratedArtifacts(
     }),
   );
 
-  await sandbox.writeFiles(
+  await workspace.writeFiles(
     artifacts.map((artifact) => ({
       content: artifact.content,
       path: artifact.ref.path,

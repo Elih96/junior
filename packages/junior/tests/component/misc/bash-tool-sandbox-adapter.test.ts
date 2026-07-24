@@ -5,6 +5,7 @@ const { sandboxGetMock } = vi.hoisted(() => ({
 }));
 
 vi.mock("@vercel/sandbox", () => ({
+  FileSystem: class {},
   Sandbox: {
     get: sandboxGetMock,
   },
@@ -14,18 +15,14 @@ vi.mock("@/chat/sandbox/runtime-dependency-snapshots", () => ({
   getRuntimeDependencyProfileHash: () => "current-profile",
 }));
 
-import { createSandboxSessionManager } from "@/chat/sandbox/session";
+import { createSandboxRuntime } from "@/chat/sandbox/session";
 
 function makeSandbox() {
-  return {
-    name: "sbx_adapter_contract",
-    currentSession: vi.fn(() => ({
-      sessionId: "sbx_adapter_contract_session",
-    })),
-    mkDir: vi.fn(async () => {}),
-    writeFiles: vi.fn(async () => {}),
-    readFileToBuffer: vi.fn(async () => Buffer.from("file content")),
-    runCommand: vi.fn(async (params: { cmd: string; args?: string[] }) => ({
+  const mkDir = vi.fn(async () => {});
+  const writeFiles = vi.fn(async () => {});
+  const readFileToBuffer = vi.fn(async () => Buffer.from("file content"));
+  const runCommand = vi.fn(
+    async (params: { cmd: string; args?: string[] }) => ({
       exitCode: 0,
       stdout: async () =>
         params.cmd === "bash" &&
@@ -34,11 +31,35 @@ function makeSandbox() {
           ? "grep\nsed\ncat\n"
           : "command stdout",
       stderr: async () => "",
+    }),
+  );
+  const stop = vi.fn(async () => {});
+  const extendTimeout = vi.fn(async () => {});
+  const snapshot = vi.fn(async () => ({
+    snapshotId: "snap_adapter_contract",
+  }));
+  const update = vi.fn(async () => {});
+  return {
+    name: "sbx_adapter_contract",
+    currentSession: vi.fn(() => ({
+      sessionId: "sbx_adapter_contract_session",
+      mkDir,
+      writeFiles,
+      readFileToBuffer,
+      runCommand,
+      stop,
+      extendTimeout,
+      snapshot,
+      update,
     })),
-    stop: vi.fn(async () => {}),
-    extendTimeout: vi.fn(async () => {}),
-    snapshot: vi.fn(async () => ({ snapshotId: "snap_adapter_contract" })),
-    update: vi.fn(async () => {}),
+    mkDir,
+    writeFiles,
+    readFileToBuffer,
+    runCommand,
+    stop,
+    extendTimeout,
+    snapshot,
+    update,
     fs: {},
   };
 }
@@ -51,12 +72,16 @@ describe("bash-tool sandbox adapter", () => {
   it("lets real bash-tool initialize against Vercel Sandbox v2 shape", async () => {
     const sandbox = makeSandbox();
     sandboxGetMock.mockResolvedValue(sandbox);
-    const manager = createSandboxSessionManager({
-      sandboxId: "sbx_adapter_contract",
-      sandboxDependencyProfileHash: "current-profile",
+    const manager = createSandboxRuntime({
+      sandboxRef: {
+        id: "sbx_adapter_contract",
+        profileHash: "current-profile",
+      },
+      skills: [],
+      referenceFiles: [],
     });
 
-    const executors = await manager.ensureToolExecutors();
+    const executors = await manager.tools();
 
     expect(sandbox.runCommand).toHaveBeenCalledWith({
       cmd: "bash",

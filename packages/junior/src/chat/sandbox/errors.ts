@@ -88,7 +88,7 @@ export function isAlreadyExistsError(error: unknown): boolean {
   );
 }
 
-/** Detect when a cached sandbox can no longer be reused and must be recreated. */
+/** Detect when the current sandbox session is unavailable and must be reacquired. */
 export function isSandboxUnavailableError(error: unknown): boolean {
   return findInErrorChain(error, (candidate) => {
     if (isInvalidSandboxSessionError(candidate)) {
@@ -104,6 +104,20 @@ export function isSandboxUnavailableError(error: unknown): boolean {
       searchable.includes("status code 410") ||
       searchable.includes("no longer available") ||
       searchable.includes("stream was closed and is not accepting commands")
+    );
+  });
+}
+
+/** Detect a durable sandbox reference that can no longer be restored. */
+export function isSandboxMissingError(error: unknown): boolean {
+  return findInErrorChain(error, (candidate) => {
+    const details = getSandboxErrorDetails(candidate);
+    const searchable =
+      `${details.searchableText} ${details.summary}`.toLowerCase();
+    return (
+      searchable.includes("status=404") ||
+      searchable.includes("status code 404") ||
+      searchable.includes("snapshot_not_found")
     );
   });
 }

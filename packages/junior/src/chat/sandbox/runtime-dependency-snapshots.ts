@@ -6,8 +6,8 @@ import { GLOBAL_RUNTIME_DEPENDENCIES } from "@/chat/sandbox/runtime-dependencies
 import { runNonInteractiveCommand } from "@/chat/sandbox/noninteractive-command";
 import { getVercelSandboxCredentials } from "@/chat/sandbox/credentials";
 import {
-  createSandboxInstance,
-  type SandboxInstance,
+  createSandboxSession,
+  type SandboxSession,
 } from "@/chat/sandbox/workspace";
 import type {
   PluginRuntimeDependency,
@@ -207,7 +207,7 @@ async function withSnapshotSpan<T>(
 }
 
 async function runOrThrow(
-  sandbox: SandboxInstance,
+  sandbox: SandboxSession,
   params: {
     cmd: string;
     args?: string[];
@@ -220,14 +220,14 @@ async function runOrThrow(
     return;
   }
 
-  const stderr = (await result.stderr()).trim();
-  const stdout = (await result.stdout()).trim();
+  const stderr = result.stderr.trim();
+  const stdout = result.stdout.trim();
   const detail = stderr || stdout || "command failed";
   throw new Error(`${label} failed: ${detail}`);
 }
 
 async function tryRun(
-  sandbox: SandboxInstance,
+  sandbox: SandboxSession,
   params: {
     cmd: string;
     args?: string[];
@@ -239,12 +239,12 @@ async function tryRun(
     return { ok: true };
   }
 
-  const stderr = (await result.stderr()).trim();
-  const stdout = (await result.stdout()).trim();
+  const stderr = result.stderr.trim();
+  const stdout = result.stdout.trim();
   return { ok: false, detail: stderr || stdout || "command failed" };
 }
 
-async function installGhCliViaDnf(sandbox: SandboxInstance): Promise<void> {
+async function installGhCliViaDnf(sandbox: SandboxSession): Promise<void> {
   const direct = await tryRun(sandbox, {
     cmd: "dnf",
     args: ["install", "-y", "gh"],
@@ -317,7 +317,7 @@ function runtimeDependencyFilePath(url: string, sha256: string): string {
 }
 
 async function installRuntimeDependencies(
-  sandbox: SandboxInstance,
+  sandbox: SandboxSession,
   deps: PluginRuntimeDependency[],
 ): Promise<void> {
   const systemDeps = deps.filter(
@@ -355,8 +355,8 @@ async function installRuntimeDependencies(
               cmd: "sha256sum",
               args: [rpmPath],
             });
-            const checksumStdout = (await checksumResult.stdout()).trim();
-            const checksumStderr = (await checksumResult.stderr()).trim();
+            const checksumStdout = checksumResult.stdout.trim();
+            const checksumStderr = checksumResult.stderr.trim();
             if (checksumResult.exitCode !== 0) {
               throw new Error(
                 `sha256sum failed: ${checksumStderr || checksumStdout || "command failed"}`,
@@ -432,7 +432,7 @@ async function installRuntimeDependencies(
 }
 
 async function runRuntimePostinstall(
-  sandbox: SandboxInstance,
+  sandbox: SandboxSession,
   commands: PluginRuntimePostinstallCommand[],
 ): Promise<void> {
   if (commands.length === 0) {
@@ -458,8 +458,8 @@ async function runRuntimePostinstall(
           continue;
         }
 
-        const stderr = (await result.stderr()).trim();
-        const stdout = (await result.stdout()).trim();
+        const stderr = result.stderr.trim();
+        const stdout = result.stdout.trim();
         const detail = stderr || stdout || "command failed";
         throw new Error(`runtime-postinstall ${command.cmd} failed: ${detail}`);
       }
@@ -482,7 +482,7 @@ async function createDependencySnapshot(
     async () => {
       const sandboxCredentials = getVercelSandboxCredentials();
       const resources = getSandboxResources();
-      const sandbox = createSandboxInstance(
+      const sandbox = createSandboxSession(
         await Sandbox.create({
           timeout: timeoutMs,
           runtime,

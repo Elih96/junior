@@ -21,7 +21,7 @@ import {
 } from "@/chat/plugins/agent-hooks";
 import { createTools } from "@/chat/tools";
 import type { ToolRuntimeContext } from "@/chat/tools/types";
-import type { SandboxInstance } from "@/chat/sandbox/workspace";
+import type { SandboxSession } from "@/chat/sandbox/workspace";
 
 const demoToolResultSchema = pluginToolResultSchema.extend({
   ok: z.literal(true),
@@ -93,10 +93,10 @@ function slackSource(channelId: string) {
 
 function fakeSandbox(
   writes: Array<{ content: string | Uint8Array; path: string }>,
-): SandboxInstance {
+): SandboxSession {
   return {
     sandboxId: "sandbox-agent-hooks",
-    sandboxEgressId: "session-agent-hooks",
+    sessionId: "session-agent-hooks",
     fs: {
       async readFile() {
         return "";
@@ -117,12 +117,8 @@ function fakeSandbox(
     async runCommand() {
       return {
         exitCode: 0,
-        async stdout() {
-          return "";
-        },
-        async stderr() {
-          return "";
-        },
+        stdout: "",
+        stderr: "",
       };
     },
     async snapshot() {
@@ -428,7 +424,7 @@ describe("agent plugin hooks", () => {
         actor: TEST_ACTOR,
         egress: TEST_EGRESS,
         source: SLACK_SOURCE,
-        sandbox: {} as any,
+        workspace: {} as any,
       });
 
       expect(tools).toHaveProperty("agentDemo_demoTool");
@@ -470,7 +466,7 @@ describe("agent plugin hooks", () => {
         destination: LOCAL_DESTINATION,
         egress: TEST_EGRESS,
         source: LOCAL_SOURCE,
-        sandbox: {} as any,
+        workspace: {} as any,
       });
 
       expect(tools.agentDemo_prototypeTool).toBe(prototypeTool);
@@ -519,7 +515,7 @@ describe("agent plugin hooks", () => {
         destination: LOCAL_DESTINATION,
         egress: TEST_EGRESS,
         source: LOCAL_SOURCE,
-        sandbox: {} as any,
+        workspace: {} as any,
       });
 
       expect(tools.agentDemo_demoTool).toBeDefined();
@@ -552,7 +548,7 @@ describe("agent plugin hooks", () => {
           destination: LOCAL_DESTINATION,
           egress: TEST_EGRESS,
           source: LOCAL_SOURCE,
-          sandbox: {} as any,
+          workspace: {} as any,
         }),
       ).toThrow("must be a camelCase identifier");
     } finally {
@@ -585,7 +581,7 @@ describe("agent plugin hooks", () => {
           destination: LOCAL_DESTINATION,
           egress: TEST_EGRESS,
           source: LOCAL_SOURCE,
-          sandbox: {} as any,
+          workspace: {} as any,
         },
       );
       expect(tools.loadSkill).toBeDefined();
@@ -1223,7 +1219,7 @@ describe("getPluginTools channel resolution", () => {
       destination: LOCAL_DESTINATION,
       egress: TEST_EGRESS,
       source: LOCAL_SOURCE,
-      sandbox: {} as any,
+      workspace: {} as any,
     },
   ) {
     let captured: ToolRegistrationHookContext | undefined;
@@ -1260,7 +1256,7 @@ describe("getPluginTools channel resolution", () => {
         channelId: "COUT",
       },
       egress: TEST_EGRESS,
-      sandbox: {} as any,
+      workspace: {} as any,
     });
     expect(ctx.source).toEqual(source);
     expect(ctx.destination).toEqual({
@@ -1280,7 +1276,7 @@ describe("getPluginTools channel resolution", () => {
         channelId: "COUT",
       },
       egress: TEST_EGRESS,
-      sandbox: {} as any,
+      workspace: {} as any,
     });
     expect(ctx.slack?.channelCapabilities.canCreateCanvas).toBe(true);
     expect(ctx.slack?.channelCapabilities.canAddReactions).toBe(true);
@@ -1297,7 +1293,7 @@ describe("getPluginTools channel resolution", () => {
       },
       egress: TEST_EGRESS,
       actor: TEST_ACTOR,
-      sandbox: {} as any,
+      workspace: {} as any,
     });
 
     expect(ctx.slack?.credentialSubject).toMatchObject({
@@ -1317,7 +1313,7 @@ describe("getPluginTools channel resolution", () => {
       },
       egress: TEST_EGRESS,
       actor: TEST_ACTOR,
-      sandbox: {} as any,
+      workspace: {} as any,
     });
 
     expect(ctx.slack?.credentialSubject).toBeUndefined();
@@ -1329,7 +1325,7 @@ describe("getPluginTools channel resolution", () => {
       destination: SLACK_DESTINATION,
       egress: TEST_EGRESS,
       source: SLACK_SOURCE,
-      sandbox: {} as any,
+      workspace: {} as any,
     });
 
     expect(ctx.conversationId).toBe("slack:DDM:1780479160.406339");

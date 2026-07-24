@@ -2,16 +2,15 @@
  * Run tool wiring.
  *
  * Builds everything the agent can act through for one run slice: the sandbox
- * executor and lazy workspace, MCP and plugin auth orchestration, MCP
+ * access, MCP and plugin auth orchestration, MCP
  * provider restoration from durable history, and the Pi-facing tool surfaces
  * (main-agent tools plus runtime control tools). Auth pauses raised while
  * restoring providers are thrown here so the run parks before prompting.
  */
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { FileUpload } from "chat";
-import { listReferenceFiles } from "@/chat/discovery";
-import { maybeExecuteJrRpcCustomCommand } from "@/chat/capabilities/jr-rpc-command";
 import { createUserTokenStore } from "@/chat/capabilities/factory";
+import { createAgentSandbox } from "@/chat/agent/sandbox";
 import { SkillSandbox } from "@/chat/sandbox/skill-sandbox";
 import type { Skill, SkillMetadata } from "@/chat/skills";
 import {
@@ -30,10 +29,7 @@ import {
 } from "@/chat/tool-support/skill/mcp-tool-summary";
 import { createPiAgentTools } from "@/chat/tool-support/pi-tool-adapter";
 import { planToolExposure } from "@/chat/tool-exposure";
-import {
-  createSandboxExecutor,
-  type SandboxExecutor,
-} from "@/chat/sandbox/sandbox";
+import type { SandboxRef } from "@/chat/sandbox/ref";
 import { createMcpAuthOrchestration } from "@/chat/services/mcp-auth-orchestration";
 import { createPluginAuthOrchestration } from "@/chat/services/plugin-auth-orchestration";
 import { createPluginEgress } from "@/chat/egress/plugin";
@@ -42,7 +38,7 @@ import type { LogContext } from "@/chat/logging";
 import { logWarn } from "@/chat/logging";
 import type { ConversationPrivacy } from "@/chat/conversation-privacy";
 import { mergeArtifactsState } from "@/chat/runtime/thread-state";
-import { isUserActor, type Actor } from "@/chat/actor";
+import type { Actor } from "@/chat/actor";
 import type { ThreadArtifactsState } from "@/chat/state/artifacts";
 import type { AuthorizationPauseError } from "@/chat/services/auth-pause";
 import type { AgentTurnSurface } from "@/chat/state/turn-session";
@@ -54,10 +50,8 @@ import {
   type AgentRunRouting,
   type AgentRunState,
 } from "@/chat/agent/request";
-import { createLazySandboxWorkspace } from "@/chat/agent/sandbox";
 import { upsertActiveSkill } from "@/chat/agent/skills";
 import type { ResumeState } from "@/chat/agent/resume";
-import { writeSandboxGeneratedArtifacts } from "@/chat/runtime/generated-artifacts";
 import { credentialUserSubjectId } from "@/chat/credentials/context";
 
 interface ToolWiringArgs {
@@ -75,10 +69,7 @@ interface ToolWiringArgs {
   generatedFiles: FileUpload[];
   invokedSkill: SkillMetadata | null;
   observers: AgentRunObservers;
-  onSandboxMetadataChanged: (sandbox: {
-    sandboxId?: string;
-    sandboxDependencyProfileHash?: string;
-  }) => void;
+  onSandboxRefChanged: (sandboxRef: SandboxRef) => void;
   policy: AgentRunPolicy;
   preAgentPromptMessages: () => PiMessage[];
   priorPiMessages: PiMessage[] | undefined;
@@ -103,7 +94,7 @@ export interface ToolWiring {
   getPendingAuthPause: () => AuthorizationPauseError | undefined;
   mcpToolManager: McpToolManager;
   pluginHooks: PluginHookRunner;
-  sandboxExecutor: SandboxExecutor;
+  getSandboxRef: () => SandboxRef | undefined;
   toolGuidance: Array<{
     name: string;
     promptGuidelines: AnyToolDefinition["promptGuidelines"];
@@ -125,46 +116,19 @@ export async function wireAgentTools(
     actor: args.currentActor,
     actors: args.currentActors,
   });
-  const sandboxExecutor = createSandboxExecutor({
-    sandboxId: args.state.sandbox?.sandboxId,
-    sandboxDependencyProfileHash:
-      args.state.sandbox?.sandboxDependencyProfileHash,
+  const agentSandbox = createAgentSandbox({
+    sandboxRef: args.state.sandboxRef,
+    skills: args.availableSkills,
     traceContext: args.spanContext,
     tracePropagation: args.policy.sandboxTracePropagation,
     credentialEgress: args.routing.credentialContext,
-    agentHooks: pluginHooks,
-    onSandboxAcquired: async (sandbox) => {
-      args.onSandboxMetadataChanged({
-        sandboxId: sandbox.sandboxId,
-        sandboxDependencyProfileHash: sandbox.sandboxDependencyProfileHash,
-      });
-      await args.durability.onSandboxAcquired?.(sandbox);
-    },
-    runBashCustomCommand: async (command) => {
-      const result = await maybeExecuteJrRpcCustomCommand(command, {
-        activeSkill: args.skillSandbox.getActiveSkill(),
-        channelConfiguration: args.policy.channelConfiguration,
-        actorId: isUserActor(args.currentActor)
-          ? args.currentActor.userId
-          : undefined,
-        onConfigurationValueChanged: (key, value) => {
-          if (value === undefined) {
-            delete args.configurationValues[key];
-            return;
-          }
-          args.configurationValues[key] = value;
-        },
-      });
-      return result.handled
-        ? { handled: true, result: result.result }
-        : { handled: false };
-    },
-  });
-  sandboxExecutor.configureSkills(args.availableSkills);
-  sandboxExecutor.configureReferenceFiles(listReferenceFiles());
-  const sandbox = createLazySandboxWorkspace({
-    executor: sandboxExecutor,
-    spanContext: args.spanContext,
+    actor: args.currentActor,
+    channelConfiguration: args.policy.channelConfiguration,
+    configurationValues: args.configurationValues,
+    getActiveSkill: () => args.skillSandbox.getActiveSkill(),
+    prepareSandbox: pluginHooks.prepareSandbox,
+    onSandboxRefChanged: args.onSandboxRefChanged,
+    persistSandboxRef: args.durability.onSandboxRefChanged,
   });
 
   const slackDestination =
@@ -256,7 +220,7 @@ export async function wireAgentTools(
       },
     }),
     mcpToolManager,
-    sandbox,
+    workspace: agentSandbox.workspace,
     surface: args.surface,
     ...(args.requestHandoff ? { handoff: args.requestHandoff } : {}),
   };
@@ -290,10 +254,7 @@ export async function wireAgentTools(
     loadableSkills,
     {
       writeGeneratedArtifacts: async (files) => {
-        const refs = await writeSandboxGeneratedArtifacts(
-          await sandboxExecutor.createSandbox(),
-          files,
-        );
+        const refs = await agentSandbox.writeGeneratedArtifacts(files);
         args.generatedFiles.push(...files);
         return refs;
       },
@@ -430,7 +391,7 @@ export async function wireAgentTools(
     args.skillSandbox,
     args.spanContext,
     args.observers.onStatus,
-    sandboxExecutor,
+    agentSandbox.tools,
     pluginAuth,
     onToolCall,
     pluginHooks,
@@ -450,7 +411,7 @@ export async function wireAgentTools(
     getPendingAuthPause,
     mcpToolManager,
     pluginHooks,
-    sandboxExecutor,
+    getSandboxRef: agentSandbox.sandboxRef,
     toolGuidance,
     toolRuntimeContext,
   };
