@@ -1,4 +1,24 @@
 # Changelog
+## 0.111.0
+
+### Bug Fixes 🐛
+
+#### Runtime
+
+- Keep deferred messages out of active turns by @sentry-junior in [#1014](https://github.com/getsentry/junior/pull/1014)
+- Derive deadlines from Nitro max duration by @sentry-junior in [#1029](https://github.com/getsentry/junior/pull/1029)
+
+#### Other
+
+- (dashboard) Reflect expanded tool call groups by @sentry-junior in [#1028](https://github.com/getsentry/junior/pull/1028)
+- (evals) Stabilize model-backed scenarios by @dcramer in [#1022](https://github.com/getsentry/junior/pull/1022)
+- (sandbox) Recover safely from unavailable sessions by @dcramer in [#1012](https://github.com/getsentry/junior/pull/1012)
+
+### Internal Changes 🔧
+
+- (github) Cover interrupted push reconciliation by @sentry-junior in [#919](https://github.com/getsentry/junior/pull/919)
+- (runtime) Continue paused work in the same worker by @dcramer in [#1023](https://github.com/getsentry/junior/pull/1023)
+
 ## 0.110.0
 
 ### New Features ✨
