@@ -26,6 +26,8 @@ import {
 } from "@/chat/pi/conversation-events";
 import { stripRuntimeTurnContext } from "@/chat/pi/transcript";
 import { sanitizePostgresJson } from "@/db/postgres-json";
+import type { ModelProfile } from "@/chat/model-profile";
+import type { TurnReasoningLevel } from "@/chat/reasoning-level";
 
 /** Distinct MCP providers durably connected in the given events, sorted. */
 function connectedMcpProvidersFromEvents(
@@ -385,6 +387,55 @@ export async function recordAuthorizationCompleted(args: {
         authorizationId: args.authorizationId,
       },
       createdAtMs: Date.now(),
+    },
+  ]);
+}
+
+/** Load a previously selected execution profile for a resumed turn. */
+export async function loadTurnRoute(args: {
+  conversationId: string;
+  turnId: string;
+}): Promise<
+  Extract<ConversationEvent["data"], { type: "turn_routed" }> | undefined
+> {
+  const event = await getConversationEventStore().loadByIdempotencyKey(
+    args.conversationId,
+    `turn:${args.turnId}:routed`,
+  );
+  if (!event) {
+    return undefined;
+  }
+  if (event.data.type !== "turn_routed" || event.data.turnId !== args.turnId) {
+    throw new Error(`Turn route key for "${args.turnId}" has invalid data`);
+  }
+  return event.data;
+}
+
+/** Record the execution profile selected for one turn without changing agent history. */
+export async function recordTurnRoute(args: {
+  conversationId: string;
+  turnId: string;
+  modelProfile: ModelProfile;
+  modelId: string;
+  reasoningLevel: TurnReasoningLevel;
+  confidence?: number;
+  source: "configured" | "inherited" | "router";
+}): Promise<void> {
+  await getConversationEventStore().append(args.conversationId, [
+    {
+      idempotencyKey: `turn:${args.turnId}:routed`,
+      createdAtMs: Date.now(),
+      data: {
+        type: "turn_routed",
+        turnId: args.turnId,
+        modelProfile: args.modelProfile,
+        modelId: args.modelId,
+        reasoningLevel: args.reasoningLevel,
+        ...(args.confidence !== undefined
+          ? { confidence: args.confidence }
+          : {}),
+        source: args.source,
+      },
     },
   ]);
 }

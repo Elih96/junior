@@ -19,6 +19,7 @@ const observations = vi.hoisted(() => ({
   providerCalls: 0,
   routerCalls: 0,
   requestedProfile: "handoff" as string | null | undefined,
+  requestHandoffAfterRouting: false,
   routedModelProfile: "standard",
   routedReasoningLevel: "high",
   reasoningLevels: [] as string[],
@@ -82,8 +83,11 @@ vi.mock("@/chat/pi/traced-stream", () => ({
       observations.providerCalls += 1;
       observations.reasoningLevels.push(options?.reasoning ?? "unset");
       const call = observations.providerCalls;
-      const routerForcedHandoff =
+      const routedToHandoff =
         call === 1 && observations.routedModelProfile === "handoff";
+      const shouldRequestHandoff =
+        call === 1 &&
+        (!routedToHandoff || observations.requestHandoffAfterRouting);
       if (call === 1) {
         observations.initialModelId = model.id;
         observations.initialImagePart = (
@@ -110,17 +114,18 @@ vi.mock("@/chat/pi/traced-stream", () => ({
         );
       }
 
-      const text = routerForcedHandoff
-        ? "Handoff model completed it."
-        : call === 1
-          ? observations.progressTool
-            ? "Let me do that now."
-            : "The standard model started an answer that must be hidden."
-          : observations.mixedBatch
-            ? "Standard model recovered safely."
-            : "Handoff model completed it.";
+      const text =
+        routedToHandoff && !shouldRequestHandoff
+          ? "Handoff model completed it."
+          : call === 1
+            ? observations.progressTool
+              ? "Let me do that now."
+              : "The standard model started an answer that must be hidden."
+            : observations.mixedBatch
+              ? "Standard model recovered safely."
+              : "Handoff model completed it.";
       const content: Array<Record<string, unknown>> = [{ type: "text", text }];
-      if (call === 1 && !routerForcedHandoff) {
+      if (shouldRequestHandoff) {
         content.push({
           type: "toolCall",
           id: observations.progressTool ? "progress-call-1" : "handoff-call-1",
@@ -143,7 +148,7 @@ vi.mock("@/chat/pi/traced-stream", () => ({
       const message = {
         role: "assistant",
         content,
-        stopReason: call === 1 && !routerForcedHandoff ? "toolUse" : "stop",
+        stopReason: shouldRequestHandoff ? "toolUse" : "stop",
         api: "test",
         provider: "test",
         model: model.id,
@@ -233,6 +238,7 @@ describe("executeAgentRun model handoff", () => {
     observations.providerCalls = 0;
     observations.routerCalls = 0;
     observations.requestedProfile = "handoff";
+    observations.requestHandoffAfterRouting = false;
     observations.routedModelProfile = "standard";
     observations.routedReasoningLevel = "high";
     observations.reasoningLevels = [];
@@ -253,7 +259,7 @@ describe("executeAgentRun model handoff", () => {
     }
   });
 
-  it("routes requested execution profiles through handoff before the first provider request", async () => {
+  it("uses router-selected profile reasoning before the first provider request", async () => {
     observations.routedModelProfile = "handoff";
     observations.routedReasoningLevel = "xhigh";
     const conversationId = "local:test:router-model-handoff";
@@ -275,6 +281,7 @@ describe("executeAgentRun model handoff", () => {
         destination: { platform: "local", conversationId },
         source: createLocalSource(conversationId),
       },
+      policy: { reasoningLevel: "xhigh" },
     });
 
     expect(outcome.status).toBe("completed");
@@ -291,26 +298,28 @@ describe("executeAgentRun model handoff", () => {
       mimeType: "image/png",
     });
     expect(observations.reasoningLevels).toEqual(["high"]);
-    expect(observations.summaryCalls).toBe(1);
+    expect(observations.summaryCalls).toBe(0);
     expect(
       (await loadConversationProjection({ conversationId })).modelProfile,
-    ).toBe("handoff");
-    expect(
-      (await getConversationEventStore().loadHistory(conversationId))
-        .map((event) => event.data)
-        .filter((entry) => entry.type === "handoff"),
-    ).toEqual([
+    ).toBe("standard");
+    const events = (
+      await getConversationEventStore().loadHistory(conversationId)
+    ).map((event) => event.data);
+    expect(events.filter((entry) => entry.type === "handoff")).toEqual([]);
+    expect(events.filter((entry) => entry.type === "turn_routed")).toEqual([
       {
-        type: "handoff",
+        type: "turn_routed",
+        turnId: "turn-router-model-handoff",
         modelProfile: "handoff",
         modelId: "openai/gpt-5.6-sol",
         reasoningLevel: "high",
-        replacementHistory: expectedHandoffReplacementHistory(),
+        confidence: 0.99,
+        source: "router",
       },
     ]);
   });
 
-  it("applies the turn deadline while preparing a router-requested handoff", async () => {
+  it("does not compact context while applying a router-selected profile", async () => {
     observations.routedModelProfile = "handoff";
     observations.summaryPending = true;
     const conversationId = "local:test:router-model-handoff-timeout";
@@ -319,16 +328,55 @@ describe("executeAgentRun model handoff", () => {
       runId: "run-router-model-handoff-timeout",
       turnId: "turn-router-model-handoff-timeout",
       input: { messageText: "Recommend the architecture." },
-      policy: { turnDeadlineAtMs: Date.now() + 50 },
+      policy: { turnDeadlineAtMs: Date.now() + 1_000 },
       routing: {
         destination: { platform: "local", conversationId },
         source: createLocalSource(conversationId),
       },
     });
 
-    expect(outcome.status).toBe("suspended");
-    expect(observations.summaryAborted).toBe(true);
-    expect(observations.providerCalls).toBe(0);
+    expect(outcome.status).toBe("completed");
+    expect(observations.summaryCalls).toBe(0);
+    expect(observations.summaryAborted).toBe(false);
+    expect(observations.providerCalls).toBe(1);
+  });
+
+  it("durably hands off when a routed model requests its active profile", async () => {
+    observations.routedModelProfile = "handoff";
+    observations.requestHandoffAfterRouting = true;
+    const conversationId = "local:test:routed-model-confirms-handoff";
+    const outcome = await executeAgentRun({
+      conversationId,
+      runId: "run-routed-model-confirms-handoff",
+      turnId: "turn-routed-model-confirms-handoff",
+      input: { messageText: "Implement the multi-file refactor." },
+      routing: {
+        destination: { platform: "local", conversationId },
+        source: createLocalSource(conversationId),
+      },
+    });
+
+    expect(outcome.status).toBe("completed");
+    if (outcome.status !== "completed") return;
+    expect(observations.providerCalls).toBe(2);
+    expect(observations.summaryCalls).toBe(1);
+    expect(
+      (await loadConversationProjection({ conversationId })).modelProfile,
+    ).toBe("handoff");
+    expect(
+      (await getConversationEventStore().loadHistory(conversationId))
+        .map((event) => event.data)
+        .filter((event) => event.type === "handoff"),
+    ).toEqual([
+      {
+        type: "handoff",
+        modelProfile: "handoff",
+        modelId: "openai/gpt-5.6-sol",
+        reasoningLevel: "high",
+        triggeringToolCallId: "handoff-call-1",
+        replacementHistory: expectedHandoffReplacementHistory(),
+      },
+    ]);
   });
 
   it("compacts and upgrades the same conversation before continuing the turn", async () => {
@@ -426,6 +474,22 @@ describe("executeAgentRun model handoff", () => {
     expect(followUp.result.diagnostics.modelId).toBe("openai/gpt-5.6-sol");
     expect(observations.providerCalls).toBe(3);
     expect(observations.routerCalls).toBe(1);
+    expect(
+      (await getConversationEventStore().loadHistory(conversationId))
+        .map((event) => event.data)
+        .find(
+          (event) =>
+            event.type === "turn_routed" &&
+            event.turnId === "turn-model-handoff-follow-up",
+        ),
+    ).toEqual({
+      type: "turn_routed",
+      turnId: "turn-model-handoff-follow-up",
+      modelProfile: "handoff",
+      modelId: "openai/gpt-5.6-sol",
+      reasoningLevel: "high",
+      source: "inherited",
+    });
     expect(observations.afterHandoffModelId).toBe("openai/gpt-5.6-sol");
     expect(observations.afterHandoffToolNames).toContain("handoff");
     expect(observations.reasoningLevels).toEqual(["high", "high", "high"]);
@@ -752,5 +816,24 @@ describe("executeAgentRun model handoff", () => {
     expect(JSON.stringify(record?.piMessages)).not.toContain(
       "Implement the risky refactor.",
     );
+
+    const resumed = await executeAgentRun({
+      conversationId,
+      runId: "run-model-handoff-yield-resumed",
+      turnId: sessionId,
+      input: { messageText: "Implement the risky refactor." },
+      routing: {
+        destination: { platform: "local", conversationId },
+        source: createLocalSource(conversationId),
+      },
+      durability: {
+        shouldYield: () => false,
+      },
+    });
+
+    expect(resumed.status).toBe("completed");
+    if (resumed.status !== "completed") return;
+    expect(resumed.result.diagnostics.modelId).toBe("openai/gpt-5.6-sol");
+    expect(observations.afterHandoffModelId).toBe("openai/gpt-5.6-sol");
   });
 });

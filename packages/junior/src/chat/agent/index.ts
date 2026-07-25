@@ -39,9 +39,11 @@ import { McpToolManager } from "@/chat/mcp/tool-manager";
 import type { ThreadArtifactsState } from "@/chat/state/artifacts";
 import {
   loadConnectedMcpProviders,
+  loadTurnRoute,
   openConversationProjection,
   recordToolExecutionStarted,
   recordMcpProviderConnected,
+  recordTurnRoute,
 } from "@/chat/conversations/projection";
 import {
   instructionActors,
@@ -82,6 +84,7 @@ import {
   toPiReasoningLevel,
   type TurnRoute,
 } from "@/chat/services/turn-router";
+import { parseTurnReasoningLevel } from "@/chat/reasoning-level";
 import {
   addAgentTurnUsage,
   hasAgentTurnUsage,
@@ -326,6 +329,7 @@ async function executeAgentRunInPrivacyContext(
     const projection = await openConversationProjection({ conversationId });
     activeModelProfile = projection.modelProfile;
     activeModelId = modelIdForProfile(botConfig, activeModelProfile);
+    let durableModelProfile = projection.modelProfile;
     const shouldTrace = shouldEmitDevAgentTrace();
     const spanContext: LogContext = { modelId: activeModelId };
 
@@ -461,7 +465,39 @@ async function executeAgentRunInPrivacyContext(
     const preAgentPromptMessages = (): PiMessage[] =>
       existingSessionRecord?.piMessages ?? [...(input.piMessages ?? [])];
 
-    if (activeModelProfile === STANDARD_MODEL_PROFILE) {
+    const storedTurnRoute = await loadTurnRoute({ conversationId, turnId });
+    if (storedTurnRoute) {
+      const resumedAfterHandoff =
+        activeModelProfile !== STANDARD_MODEL_PROFILE &&
+        activeModelProfile !== storedTurnRoute.modelProfile;
+      if (resumedAfterHandoff) {
+        const activeProfileConfig = profileConfig(
+          botConfig,
+          activeModelProfile,
+        );
+        const resumedReasoningLevel = existingSessionRecord?.reasoningLevel
+          ? parseTurnReasoningLevel(existingSessionRecord.reasoningLevel)
+          : undefined;
+        turnRoute = {
+          profile: activeModelProfile,
+          reasoningLevel:
+            activeProfileConfig.reasoningLevel ??
+            resumedReasoningLevel ??
+            storedTurnRoute.reasoningLevel,
+          reason: `resumed_handoff:${storedTurnRoute.modelProfile}:${activeModelProfile}`,
+        };
+      } else {
+        turnRoute = {
+          profile: storedTurnRoute.modelProfile,
+          reasoningLevel: storedTurnRoute.reasoningLevel,
+          ...(storedTurnRoute.confidence !== undefined
+            ? { confidence: storedTurnRoute.confidence }
+            : {}),
+          reason: `persisted:${storedTurnRoute.source}`,
+          source: storedTurnRoute.source,
+        };
+      }
+    } else if (activeModelProfile === STANDARD_MODEL_PROFILE) {
       turnRoute = await selectTurnRoute({
         completeObject,
         conversationContext: input.conversationContext,
@@ -476,7 +512,11 @@ async function executeAgentRunInPrivacyContext(
         messageText: userInput,
         profiles: botConfig.profiles,
       });
-      if (configuredReasoningLevel) {
+      const routedProfileReasoningLevel = profileConfig(
+        botConfig,
+        turnRoute.profile,
+      ).reasoningLevel;
+      if (configuredReasoningLevel && !routedProfileReasoningLevel) {
         turnRoute = {
           ...turnRoute,
           reasoningLevel: configuredReasoningLevel,
@@ -485,19 +525,40 @@ async function executeAgentRunInPrivacyContext(
       }
     } else {
       const activeProfileConfig = profileConfig(botConfig, activeModelProfile);
-      turnRoute = configuredTurnRoute(
-        activeModelProfile,
-        activeProfileConfig.reasoningLevel ??
+      const reasoningSource = activeProfileConfig.reasoningLevel
+        ? "profile"
+        : policy.reasoningLevel
+          ? "agent_config"
+          : "default";
+      turnRoute = {
+        profile: activeModelProfile,
+        reasoningLevel:
+          activeProfileConfig.reasoningLevel ??
           policy.reasoningLevel ??
           botConfig.reasoningLevel ??
           "medium",
-        activeProfileConfig.reasoningLevel
-          ? "profile"
-          : policy.reasoningLevel
-            ? "agent_config"
-            : "default",
-      );
+        reason: `inherited:${reasoningSource}`,
+        source: "inherited",
+      };
     }
+
+    const routedModelProfile = turnRoute.profile;
+    const routedModelId = modelIdForProfile(botConfig, routedModelProfile);
+    if (!storedTurnRoute) {
+      await recordTurnRoute({
+        conversationId,
+        turnId,
+        modelProfile: routedModelProfile,
+        modelId: routedModelId,
+        reasoningLevel: turnRoute.reasoningLevel,
+        ...(turnRoute.confidence !== undefined
+          ? { confidence: turnRoute.confidence }
+          : {}),
+        source: turnRoute.source ?? "configured",
+      });
+    }
+    activeModelProfile = routedModelProfile;
+    activeModelId = routedModelId;
 
     // ── Mutable turn state ───────────────────────────────────────────
     const generatedFiles: FileUpload[] = [];
@@ -533,7 +594,7 @@ async function executeAgentRunInPrivacyContext(
       sourceMessages: PiMessage[];
       triggeringToolCallId?: string;
     }) => {
-      if (args.profile === activeModelProfile) {
+      if (args.profile === durableModelProfile) {
         return;
       }
       const runtimeContext = retainRuntimeTurnContext(
@@ -588,6 +649,7 @@ async function executeAgentRunInPrivacyContext(
         },
         { completeText },
       );
+      durableModelProfile = args.profile;
       if (handoffReasoningLevel !== turnRoute!.reasoningLevel) {
         turnRoute = {
           ...turnRoute!,
@@ -1017,39 +1079,9 @@ async function executeAgentRunInPrivacyContext(
             return result;
           };
 
-          const requestedProfile =
-            activeModelProfile === STANDARD_MODEL_PROFILE
-              ? turnRoute!.profile
-              : undefined;
-          let run: Promise<unknown>;
-          if (requestedProfile && requestedProfile !== STANDARD_MODEL_PROFILE) {
-            const handoffAbortController = new AbortController();
-            await runAgentStep(
-              scheduleHandoff({
-                profile: requestedProfile,
-                runtimeContextSourceMessages: shouldPromptAgent
-                  ? [freshPromptMessage]
-                  : undefined,
-                signal: handoffAbortController.signal,
-                sourceMessages: [...agent!.state.messages],
-              }),
-              () => handoffAbortController.abort(),
-            );
-            applyPendingHandoff();
-            if (shouldPromptAgent) {
-              await runResume.requireDurableInputCheckpoint([
-                ...agent!.state.messages,
-                freshPromptMessage,
-              ]);
-              run = agent!.prompt(freshPromptMessage);
-            } else {
-              run = agent!.continue();
-            }
-          } else {
-            run = shouldPromptAgent
-              ? agent!.prompt(freshPromptMessage)
-              : agent!.continue();
-          }
+          let run: Promise<unknown> = shouldPromptAgent
+            ? agent!.prompt(freshPromptMessage)
+            : agent!.continue();
           let retryUsage: AgentTurnUsage | undefined;
           try {
             for (let attempt = 0; ; attempt += 1) {
