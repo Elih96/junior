@@ -1,6 +1,11 @@
 import type { LogContext } from "@/chat/logging";
 import { buildTurnFailureResponse } from "@/chat/logging";
 import { getInterruptionMarker } from "@/chat/interruption-marker";
+import {
+  getProviderErrorAttributes,
+  getProviderErrorUserMessage,
+  ProviderError,
+} from "@/chat/services/provider-error";
 import type { AgentRunResult } from "@/chat/services/turn-result";
 
 type LogException = (
@@ -57,7 +62,10 @@ function getFailureCapture(reply: AgentRunResult): {
           reply.diagnostics.errorMessage ??
             "Provider error without explicit message",
         ),
-      attributes: {},
+      attributes:
+        reply.diagnostics.providerError instanceof ProviderError
+          ? getProviderErrorAttributes(reply.diagnostics.providerError)
+          : {},
       body: "Agent turn failed with provider error",
     };
   }
@@ -94,7 +102,8 @@ export function getAgentTurnDiagnosticsAttributes(
           "gen_ai.response.finish_reasons": [reply.diagnostics.stopReason],
         }
       : {}),
-    ...(reply.diagnostics.errorMessage
+    ...(reply.diagnostics.errorMessage &&
+    reply.diagnostics.outcome !== "provider_error"
       ? { "exception.message": reply.diagnostics.errorMessage }
       : {}),
   };
@@ -142,6 +151,13 @@ export function finalizeFailedTurnReplyWithEvent(args: {
     args.reply.diagnostics.assistantMessageCount > 0
       ? args.reply.text.trim()
       : "";
+  const providerUserMessage =
+    args.reply.diagnostics.providerError instanceof ProviderError
+      ? getProviderErrorUserMessage(args.reply.diagnostics.providerError)
+      : "";
+  const failureText = providerUserMessage
+    ? `${providerUserMessage} Reference: \`event_id=${eventId}\`.`
+    : buildTurnFailureResponse(eventId);
 
   return {
     eventId,
@@ -149,7 +165,7 @@ export function finalizeFailedTurnReplyWithEvent(args: {
       ...args.reply,
       text: providerPartialText
         ? `${providerPartialText}${getInterruptionMarker()}`
-        : buildTurnFailureResponse(eventId),
+        : failureText,
     },
   };
 }

@@ -244,7 +244,7 @@ vi.mock("@earendil-works/pi-agent-core", () => {
         role: "assistant",
         content: [],
         stopReason: "error",
-        errorMessage: "Anthropic stream ended before message_stop",
+        errorMessage: "408 Request failed",
         usage: {
           input: 10,
           output: 1,
@@ -411,7 +411,7 @@ describe("executeAgentRun provider retry", () => {
     delete process.env.JUNIOR_STATE_ADAPTER;
   });
 
-  it("continues from the last safe boundary after a transient provider stream error", async () => {
+  it("continues from the last safe boundary after an HTTP request timeout", async () => {
     const replyPromise = executeAgentRun({
       conversationId: "conversation-1",
       turnId: "turn-1",
@@ -489,10 +489,14 @@ describe("executeAgentRun provider retry", () => {
     expect(setTimeoutSpy.mock.calls.some((call) => call[1] === 2_000)).toBe(
       true,
     );
-    controller.abort(new Error("eval test cancelled"));
+    const cancellation = new Error("provider connection cancelled");
+    controller.abort(cancellation);
 
     const reply = finalReply(await replyPromise);
-    expect(reply.diagnostics.errorMessage).toBe("eval test cancelled");
+    expect(reply.diagnostics.errorMessage).toBe(
+      "provider connection cancelled",
+    );
+    expect(reply.diagnostics.providerError).toBe(cancellation);
     expect(counters.continueCalls).toBe(0);
     setTimeoutSpy.mockRestore();
   });

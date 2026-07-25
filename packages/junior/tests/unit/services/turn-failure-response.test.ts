@@ -1,11 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 import { getInterruptionMarker } from "@/chat/interruption-marker";
+import { createProviderError } from "@/chat/services/provider-error";
 import { finalizeFailedTurnReply } from "@/chat/services/turn-failure-response";
 import type { AgentRunResult } from "@/chat/services/turn-result";
 
 function providerErrorReply(args: {
   assistantMessageCount: number;
   errorMessage?: string;
+  providerError?: unknown;
   text: string;
 }): AgentRunResult {
   return {
@@ -19,6 +21,7 @@ function providerErrorReply(args: {
       toolErrorCount: 0,
       usedPrimaryText: false,
       ...(args.errorMessage ? { errorMessage: args.errorMessage } : {}),
+      ...(args.providerError ? { providerError: args.providerError } : {}),
     },
   };
 }
@@ -26,11 +29,13 @@ function providerErrorReply(args: {
 describe("finalizeFailedTurnReply", () => {
   it("never delivers synthesized error text without assistant messages", () => {
     const logException = vi.fn().mockReturnValue("evt_123");
+    const internalError = new Error("ECONNRESET at redis.js:42");
 
     const finalized = finalizeFailedTurnReply({
       reply: providerErrorReply({
         assistantMessageCount: 0,
-        errorMessage: "ECONNRESET at redis.js:42",
+        errorMessage: internalError.message,
+        providerError: internalError,
         text: "Error: ECONNRESET at redis.js:42",
       }),
       logException,
@@ -40,6 +45,72 @@ describe("finalizeFailedTurnReply", () => {
     expect(finalized.text).not.toContain("ECONNRESET");
     expect(finalized.text).toContain("event_id=evt_123");
   });
+
+  it("records structured provider failure telemetry without raw payloads", () => {
+    const logException = vi.fn().mockReturnValue("evt_503");
+    const providerError = createProviderError(
+      '503 {"error":{"message":"Service temporarily unavailable"}}',
+      { modelId: "xai/grok-4.5" },
+    );
+
+    finalizeFailedTurnReply({
+      reply: providerErrorReply({
+        assistantMessageCount: 0,
+        errorMessage: providerError.message,
+        providerError,
+        text: "",
+      }),
+      logException,
+      context: {},
+    });
+
+    const attributes = logException.mock.calls[0]?.[3];
+    expect(attributes).toMatchObject({
+      "app.ai.provider_error.kind": "server",
+      "app.ai.provider_error.retryable": true,
+      "app.ai.provider_error.status": 503,
+      "gen_ai.request.model": "xai/grok-4.5",
+    });
+    expect(attributes).not.toHaveProperty("exception.message");
+  });
+
+  it.each([
+    {
+      error: createProviderError("Blocked by the content policy"),
+      explanation: "content policy",
+    },
+    {
+      error: createProviderError("Context length exceeded"),
+      explanation: "invalid",
+    },
+    {
+      error: createProviderError(
+        "Embedding provider returned invalid vectors",
+        {
+          kind: "invalid_response",
+        },
+      ),
+      explanation: "invalid response",
+    },
+  ])(
+    "explains terminal provider failures instead of calling them internal errors",
+    ({ error, explanation }) => {
+      const finalized = finalizeFailedTurnReply({
+        reply: providerErrorReply({
+          assistantMessageCount: 0,
+          errorMessage: error.message,
+          providerError: error,
+          text: "",
+        }),
+        logException: vi.fn().mockReturnValue("evt_terminal"),
+        context: {},
+      });
+
+      expect(finalized.text).toContain(explanation);
+      expect(finalized.text).toContain("event_id=evt_terminal");
+      expect(finalized.text).not.toContain("internal error");
+    },
+  );
 
   it("delivers genuine model-authored partial text with the interruption marker", () => {
     const logException = vi.fn().mockReturnValue("evt_456");
