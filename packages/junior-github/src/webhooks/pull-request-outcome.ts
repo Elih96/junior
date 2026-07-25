@@ -2,9 +2,11 @@ import { z } from "zod";
 import {
   GITHUB_SESSION_FOOTER_START,
   githubConversationIds,
+  githubLinkedIssues,
 } from "../tools/footer.js";
 import type {
   GitHubPullRequestConversationsInput,
+  GitHubPullRequestLinkedIssuesInput,
   GitHubPullRequestOutcomeInput,
 } from "../pull-request-outcomes/store.js";
 import { botLoginFromEmail } from "./ownership.js";
@@ -91,6 +93,7 @@ const canonicalPullRequestConversationSchema = z
         user: z.object({ login: z.string().min(1) }).strict(),
       })
       .strict(),
+    repository: z.object({ full_name: z.string().min(1) }).strict(),
     sender: z.object({ login: z.string().min(1) }).strict(),
   })
   .strict();
@@ -104,6 +107,9 @@ const pullRequestConversationSchema = z
         user: z.object({ login: z.string().min(1) }).passthrough(),
       })
       .passthrough(),
+    repository: z
+      .object({ full_name: z.string().min(1) })
+      .passthrough(),
     sender: z.object({ login: z.string().min(1) }).passthrough(),
   })
   .passthrough()
@@ -114,6 +120,7 @@ const pullRequestConversationSchema = z
         id: provider.pull_request.id,
         user: { login: provider.pull_request.user.login },
       },
+      repository: { full_name: provider.repository.full_name },
       sender: { login: provider.sender.login },
     }),
   );
@@ -205,6 +212,32 @@ export function normalizeGitHubPullRequestConversations(args: {
   return conversationIds.length > 0
     ? {
         conversationIds,
+        pullRequestId: String(parsed.data.pull_request.id),
+      }
+    : undefined;
+}
+
+/** Normalize linked issues written into a Junior-owned PR body by its bot. */
+export function normalizeGitHubPullRequestLinkedIssues(args: {
+  body: unknown;
+  botEmail?: string;
+}): GitHubPullRequestLinkedIssuesInput | undefined {
+  const parsed = pullRequestConversationSchema.safeParse(args.body);
+  const botLogin = botLoginFromEmail(args.botEmail)?.toLowerCase();
+  if (!parsed.success || !botLogin) return undefined;
+  if (
+    parsed.data.pull_request.user.login.trim().toLowerCase() !== botLogin ||
+    parsed.data.sender.login.trim().toLowerCase() !== botLogin
+  ) {
+    return undefined;
+  }
+  const linkedIssues = githubLinkedIssues(
+    parsed.data.pull_request.body,
+    parsed.data.repository.full_name,
+  );
+  return linkedIssues.length > 0
+    ? {
+        linkedIssues,
         pullRequestId: String(parsed.data.pull_request.id),
       }
     : undefined;

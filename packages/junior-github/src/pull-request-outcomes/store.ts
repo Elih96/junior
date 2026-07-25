@@ -5,6 +5,7 @@ import {
   type GitHubPullRequestCommitComposition,
   githubPullRequestCommitCompositionSchema,
   githubPullRequestStateSchema,
+  juniorGitHubPullRequestIssues,
   juniorGitHubPullRequests,
 } from "../db/schema.js";
 
@@ -37,6 +38,26 @@ const githubPullRequestConversationsInputSchema = z
 
 export type GitHubPullRequestConversationsInput = z.output<
   typeof githubPullRequestConversationsInputSchema
+>;
+
+const githubPullRequestLinkedIssuesInputSchema = z
+  .object({
+    linkedIssues: z
+      .array(
+        z
+          .object({
+            number: z.number().int().positive(),
+            repositoryFullName: z.string().min(1),
+          })
+          .strict(),
+      )
+      .min(1),
+    pullRequestId: z.string().min(1),
+  })
+  .strict();
+
+export type GitHubPullRequestLinkedIssuesInput = z.output<
+  typeof githubPullRequestLinkedIssuesInputSchema
 >;
 
 /** Select mutable lifecycle fields while excluding transient ownership inputs. */
@@ -134,4 +155,41 @@ export async function recordGitHubPullRequestConversations(
     )
     .returning({ pullRequestId: juniorGitHubPullRequests.pullRequestId });
   return updated.length > 0;
+}
+
+/** Link an existing Junior-owned PR to tracked issues across repositories. */
+export async function recordGitHubPullRequestLinkedIssues(
+  db: GitHubDb,
+  input: GitHubPullRequestLinkedIssuesInput,
+): Promise<boolean> {
+  const association = githubPullRequestLinkedIssuesInputSchema.parse(input);
+  const inserted = await Promise.all(
+    association.linkedIssues.map((issue) =>
+      db
+        .insert(juniorGitHubPullRequestIssues)
+        .select(
+          db
+            .select({
+              pullRequestId: juniorGitHubPullRequests.pullRequestId,
+              issueRepositoryFullName:
+                sql<string>`lower(${issue.repositoryFullName})`.as(
+                  "issue_repository_full_name",
+                ),
+              issueNumber: sql<number>`${issue.number}`.as("issue_number"),
+            })
+            .from(juniorGitHubPullRequests)
+            .where(
+              eq(
+                juniorGitHubPullRequests.pullRequestId,
+                association.pullRequestId,
+              ),
+            ),
+        )
+        .onConflictDoNothing()
+        .returning({
+          issueNumber: juniorGitHubPullRequestIssues.issueNumber,
+        }),
+    ),
+  );
+  return inserted.some((rows) => rows.length > 0);
 }
