@@ -1,4 +1,20 @@
 # Changelog
+## 0.113.0
+
+### New Features ✨
+
+- (github) Track PR and issue conversation costs by @sentry-junior in [#1040](https://github.com/getsentry/junior/pull/1040)
+
+### Bug Fixes 🐛
+
+- (agent) Prevent duplicate replies after cooperative yield by @dcramer in [#1042](https://github.com/getsentry/junior/pull/1042)
+- (provider) Normalize terminal failures by @sentry-junior in [#907](https://github.com/getsentry/junior/pull/907)
+
+### Internal Changes 🔧
+
+- (dashboard) Paginate conversation transcripts by @sentry-junior in [#1017](https://github.com/getsentry/junior/pull/1017)
+- (evals) Gate runs on eval changes or label by @sentry-junior in [#1039](https://github.com/getsentry/junior/pull/1039)
+
 ## 0.112.0
 
 ### New Features ✨
