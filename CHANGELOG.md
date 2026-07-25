@@ -1,4 +1,17 @@
 # Changelog
+## 0.114.0
+
+### New Features ✨
+
+- (dashboard) Improve collapsed tool call rendering by @dcramer in [#1046](https://github.com/getsentry/junior/pull/1046)
+
+### Bug Fixes 🐛
+
+- (agent) Enforce context window compaction by @dcramer in [#1045](https://github.com/getsentry/junior/pull/1045)
+- (ai) Handle invalid structured responses by @dcramer in [#1043](https://github.com/getsentry/junior/pull/1043)
+- (conversations) Preserve transcript formatting by @dcramer in [#1044](https://github.com/getsentry/junior/pull/1044)
+- (runtime) Separate turn routes from handoffs by @sentry-junior in [#1037](https://github.com/getsentry/junior/pull/1037)
+
 ## 0.113.0
 
 ### New Features ✨
