@@ -24,8 +24,10 @@ import {
 import { Transcript } from "../src/client/components/Transcript";
 import { TranscriptHeader } from "../src/client/components/TranscriptHeader";
 import { TranscriptMarkdown } from "../src/client/components/TranscriptMarkdown";
+import { TranscriptToolView } from "../src/client/components/TranscriptToolView";
 import { TranscriptSearchProvider } from "../src/client/components/transcriptSearch";
 import { ConversationPage } from "../src/client/pages/ConversationPage";
+import { ToolCallGallery } from "../src/client/pages/dev/ComponentsPage";
 import { LocationDetailPageContent } from "../src/client/pages/locations/LocationDetailPage";
 import { LocationsPageContent } from "../src/client/pages/locations/LocationsPage";
 import { Profile } from "../src/client/pages/people/PersonProfilePage";
@@ -185,6 +187,41 @@ describe("dashboard canonical-event components", () => {
     expect(renderToStaticMarkup(<Button>Copy</Button>)).toContain(
       'type="button"',
     );
+  });
+
+  it("renders typed tool states in the component gallery", () => {
+    const html = renderToStaticMarkup(
+      <QueryClientProvider client={client}>
+        <ToolCallGallery />
+      </QueryClientProvider>,
+    );
+
+    expect(html).toContain("webSearch");
+    expect(html).toContain("github_search, query: is:pr is:open, limit: 25");
+    expect(html).toContain("jr-rpc config get github.repo");
+    expect(html).toContain("junior-qa");
+    expect(html).toContain('aria-label="Tool failed"');
+  });
+
+  it("keeps a running tool name searchable and accessible", () => {
+    const html = renderToStaticMarkup(
+      <QueryClientProvider client={client}>
+        <TranscriptSearchProvider query="search">
+          <TranscriptToolView
+            part={{
+              id: "tool-1",
+              input: { query: "regression" },
+              name: "webSearch",
+              status: "running",
+              type: "tool_call",
+            }}
+          />
+        </TranscriptSearchProvider>
+      </QueryClientProvider>,
+    );
+
+    expect(html).toContain('aria-label="webSearch (running)"');
+    expect(html).toContain("<mark");
   });
 
   it("exposes pressed state for transcript view controls", () => {
@@ -419,7 +456,8 @@ describe("dashboard canonical-event components", () => {
       ),
     );
     expect(html).toContain("search");
-    expect(html).toContain("running");
+    expect(html).toContain('aria-label="search (running)"');
+    expect(html).not.toContain(">running<");
     expect(html).not.toContain("started");
     expect(html).not.toContain("missing result");
   });
