@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   isNearScrollBottom,
+  prependViewportIntent,
+  scrollTopAfterPrepend,
   shouldAutoPinTranscriptBottom,
   transcriptFollowIntent,
   transcriptBottomVersion,
@@ -85,9 +87,14 @@ describe("transcript bottom pinning", () => {
       seq: 0,
       createdAt: "2026-01-01T00:00:01.000Z",
       data: {
-        type: "tool_started" as const,
-        toolCallId: "search-1",
-        name: "search",
+        type: "tool_calls" as const,
+        calls: [
+          {
+            toolCallId: "search-1",
+            name: "search",
+            status: "running" as const,
+          },
+        ],
       },
     };
     const before = transcriptBottomVersion(activeTurn({ events: [started] }));
@@ -99,10 +106,15 @@ describe("transcript bottom pinning", () => {
             seq: 1,
             createdAt: "2026-01-01T00:00:02.000Z",
             data: {
-              type: "tool_result",
-              toolCallId: "search-1",
-              outcome: "completed",
-              output: { matches: 2 },
+              type: "tool_calls",
+              calls: [
+                {
+                  toolCallId: "search-1",
+                  name: "search",
+                  status: "completed",
+                  output: { matches: 2 },
+                },
+              ],
             },
           },
         ],
@@ -122,6 +134,79 @@ describe("transcript bottom pinning", () => {
     );
 
     expect(after).toBe(before);
+  });
+
+  it("keeps the tail version stable when earlier events are prepended", () => {
+    const current = activeTurn({
+      events: [
+        {
+          seq: 10,
+          createdAt: "2026-01-01T00:00:01.000Z",
+          data: {
+            type: "message",
+            messageId: "assistant-10",
+            role: "assistant",
+            text: "checking",
+          },
+        },
+      ],
+    });
+    const before = transcriptBottomVersion(current);
+    const after = transcriptBottomVersion(
+      activeTurn({
+        events: [
+          {
+            seq: 5,
+            createdAt: "2026-01-01T00:00:00.000Z",
+            data: {
+              type: "message",
+              messageId: "user-1",
+              role: "user",
+              text: "earlier context",
+            },
+          },
+          ...current.events,
+        ],
+      }),
+    );
+
+    expect(after).toBe(before);
+  });
+
+  it("offsets the viewport by the height added above it", () => {
+    expect(
+      scrollTopAfterPrepend(
+        {
+          scrollHeight: 2_000,
+          scrollTop: 480,
+        },
+        2_750,
+      ),
+    ).toBe(1_230);
+  });
+
+  it("waits for history data instead of treating a detail poll as a prepend", () => {
+    expect(
+      prependViewportIntent({
+        currentHistoryVersion: "10",
+        loadingPreviousPage: true,
+        snapshotHistoryVersion: "10",
+      }),
+    ).toBe("wait");
+    expect(
+      prependViewportIntent({
+        currentHistoryVersion: "5",
+        loadingPreviousPage: true,
+        snapshotHistoryVersion: "10",
+      }),
+    ).toBe("wait");
+    expect(
+      prependViewportIntent({
+        currentHistoryVersion: "5",
+        loadingPreviousPage: false,
+        snapshotHistoryVersion: "10",
+      }),
+    ).toBe("restore");
   });
 
   it("changes the tail version when the live turn completes", () => {

@@ -2,7 +2,7 @@ import { useEffect } from "react";
 import { Bot, ExternalLink, X } from "lucide-react";
 import { Link } from "react-router";
 
-import { useConversationData } from "../api";
+import { useConversationData } from "../conversations/queries";
 import { conversationPath, formatMessageTimestamp } from "../format";
 import { buildConversationMarkdown } from "../markdownExport";
 import type { TranscriptViewSubagentPart } from "../types";
@@ -83,9 +83,14 @@ export function SubagentTranscriptDrawer(props: {
             </div>
             <div className="absolute right-4 top-3 flex items-center gap-1.5 md:right-5">
               <CopyMarkdownButton
-                key={`${props.target.conversationId}:${detail?.generatedAt ?? "loading"}`}
+                key={props.target.conversationId}
                 getMarkdown={
-                  detail ? () => buildConversationMarkdown(detail) : undefined
+                  detail
+                    ? async () =>
+                        buildConversationMarkdown(
+                          await query.loadCompleteTranscript(),
+                        )
+                    : undefined
                 }
               />
               <Button
@@ -102,12 +107,19 @@ export function SubagentTranscriptDrawer(props: {
         <div className="min-h-0 overflow-auto px-4 py-4 md:px-5">
           {query.isPending ? (
             <TranscriptLoading />
-          ) : query.error ? (
+          ) : query.error && !detail ? (
             <DrawerEmptyState tone="error">
               Conversation failed to load.
             </DrawerEmptyState>
           ) : detail ? (
-            <Transcript transcript={detail} />
+            <Transcript
+              hasPreviousPage={query.hasPreviousPage}
+              historyError={query.historyError}
+              historyVersion={query.historyVersion}
+              loadingPreviousPage={query.isLoadingPreviousPage}
+              onLoadPreviousPage={query.loadPreviousPage}
+              transcript={detail}
+            />
           ) : (
             <DrawerEmptyState>Conversation unavailable.</DrawerEmptyState>
           )}

@@ -6,7 +6,7 @@ import {
 import type { AddressInfo } from "node:net";
 import { Readable } from "node:stream";
 import { expect, test } from "@playwright/test";
-import { createDashboardApp } from "../dist/app.js";
+import type { ConversationDetailReport } from "@sentry/junior/api/schema";
 
 let server: ReturnType<typeof createServer> | undefined;
 let baseURL = "http://127.0.0.1";
@@ -45,6 +45,8 @@ async function writeResponse(res: ServerResponse, response: Response) {
 }
 
 test.beforeAll(async () => {
+  process.env.DATABASE_URL ??= "postgres://localhost/junior-dashboard-e2e";
+  const { createDashboardApp } = await import("../dist/app.js");
   const app = createDashboardApp({
     allowedEmails: ["morgan@sentry.io"],
     auth: {
@@ -283,6 +285,98 @@ test("opens and closes a conversation in the mobile workspace", async ({
   expect(
     await page.evaluate(() => document.documentElement.scrollWidth),
   ).toBeLessThanOrEqual(390);
+});
+
+test("loads earlier transcript events without dropping the current page", async ({
+  page,
+}) => {
+  const conversationId = "slack:CQA456:1770021600.000600";
+  const detailPath = `/api/conversations/${encodeURIComponent(conversationId)}`;
+  let detailReads = 0;
+  let historyReads = 0;
+  await page.route(`**${detailPath}`, async (route) => {
+    const response = await route.fetch();
+    const detail = (await response.json()) as ConversationDetailReport;
+    detailReads += 1;
+    await route.fulfill({
+      response,
+      json:
+        detailReads === 1
+          ? { ...detail, status: "active" }
+          : {
+              ...detail,
+              events: [
+                ...detail.events.slice(1),
+                {
+                  seq: 17,
+                  createdAt: "2026-06-12T00:00:17.000Z",
+                  data: {
+                    type: "message",
+                    messageId: "release-live-update",
+                    role: "assistant",
+                    text: "The release verification is still running.",
+                  },
+                },
+              ],
+              previousCursor: `mock:before:${encodeURIComponent(conversationId)}:2`,
+              status: "active",
+            },
+    });
+  });
+  await page.route(`**${detailPath}/events?*`, async (route) => {
+    historyReads += 1;
+    if (historyReads === 1) {
+      await new Promise((resolve) => setTimeout(resolve, 2_500));
+    }
+    await route.continue();
+  });
+  await page.goto(
+    `${baseURL}/conversations/${encodeURIComponent(conversationId)}`,
+  );
+
+  await expect(
+    page.getByRole("heading", { name: "Package release and self-update" }),
+  ).toBeVisible();
+  const currentEvent = page.getByText(
+    "Released the package and opened the update pull request.",
+  );
+  await expect(currentEvent).toBeVisible();
+
+  const toolRun = page.locator("details").filter({ hasText: /12 tool calls/ });
+  await toolRun.locator("summary").click();
+  await expect(toolRun).toHaveAttribute("open", "");
+
+  const transcript = page.locator('[aria-label="Conversation transcript"]');
+  const loadEarlier = page.getByRole("button", {
+    name: "Load earlier events",
+  });
+  await loadEarlier.scrollIntoViewIfNeeded();
+  const before = await transcript.evaluate((element) => ({
+    scrollHeight: element.scrollHeight,
+    scrollTop: element.scrollTop,
+  }));
+
+  await loadEarlier.click();
+  await expect.poll(() => detailReads).toBeGreaterThan(1);
+
+  await expect(
+    page.getByText(
+      "Prepare the release and include the complete earlier context.",
+    ),
+  ).toBeVisible();
+  await expect(currentEvent).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Load earlier events" }),
+  ).toHaveCount(0);
+  await expect(toolRun).toHaveAttribute("open", "");
+
+  const after = await transcript.evaluate((element) => ({
+    scrollHeight: element.scrollHeight,
+    scrollTop: element.scrollTop,
+  }));
+  expect(after.scrollTop - before.scrollTop).toBe(
+    after.scrollHeight - before.scrollHeight,
+  );
 });
 
 test("scrolls long conversation and transcript panes independently", async ({

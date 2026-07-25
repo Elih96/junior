@@ -4,8 +4,12 @@ import type {
   ConversationTranscript,
   TranscriptViewMessage,
   TranscriptViewPart,
-  TranscriptViewSubagentPart,
-} from "./types";
+} from "../types";
+
+type ToolCall = Extract<
+  ConversationReportEvent["data"],
+  { type: "tool_calls" }
+>["calls"][number];
 
 function eventTimestamp(event: ConversationReportEvent): number {
   return Date.parse(event.createdAt);
@@ -16,31 +20,12 @@ function eventMessage(
   role: TranscriptViewMessage["role"],
   parts: TranscriptViewPart[],
 ): TranscriptViewMessage {
-  return { role, timestamp: eventTimestamp(event), parts };
-}
-
-function subagentOutcomes(
-  events: ConversationReportEvent[],
-): Map<
-  number,
-  Extract<
-    ConversationReportEvent["data"],
-    { type: "subagent_ended" }
-  >["outcome"]
-> {
-  const outcomes = new Map<
-    number,
-    Extract<
-      ConversationReportEvent["data"],
-      { type: "subagent_ended" }
-    >["outcome"]
-  >();
-  for (const event of events) {
-    if (event.data.type === "subagent_ended") {
-      outcomes.set(event.data.startedSeq, event.data.outcome);
-    }
-  }
-  return outcomes;
+  return {
+    parts,
+    role,
+    sourceSeq: event.seq,
+    timestamp: eventTimestamp(event),
+  };
 }
 
 function specialToolIds(events: ConversationReportEvent[]): Set<string> {
@@ -50,60 +35,62 @@ function specialToolIds(events: ConversationReportEvent[]): Set<string> {
     if (data.type === "handoff" && data.triggeringToolCallId) {
       ids.add(data.triggeringToolCallId);
     }
-    if (data.type === "subagent_started" && data.parentToolCallId) {
+    if (data.type === "subagent" && data.parentToolCallId) {
       ids.add(data.parentToolCallId);
     }
   }
   return ids;
 }
 
-function subagentPart(
-  data: Extract<ConversationReportEvent["data"], { type: "subagent_started" }>,
-  outcome: "aborted" | "error" | "success" | undefined,
-): TranscriptViewSubagentPart {
-  return {
-    type: "subagent",
-    id: data.childConversationId,
-    childConversationId: data.childConversationId,
-    subagentKind: data.subagentKind,
-    status:
-      outcome === "error" || outcome === "aborted"
-        ? outcome
-        : outcome === "success"
-          ? "completed"
-          : "running",
-  };
-}
-
 /** Reduce the ordered reporting event API into dashboard-only transcript rows. */
 export function conversationTranscriptMessages(
   conversation: ConversationTranscript,
 ): TranscriptViewMessage[] {
-  const outcomes = subagentOutcomes(conversation.events);
   const replacedToolIds = specialToolIds(conversation.events);
   const tools = new Map<
     string,
     Extract<TranscriptViewPart, { type: "tool_call" }>
   >();
+  const subagents = new Map<
+    string,
+    Extract<TranscriptViewPart, { type: "subagent" }>
+  >();
   const messages: TranscriptViewMessage[] = [];
 
-  const ensureTool = (
-    event: ConversationReportEvent,
-    toolCallId: string,
-    name: string,
-  ): Extract<TranscriptViewPart, { type: "tool_call" }> | undefined => {
-    if (replacedToolIds.has(toolCallId)) return undefined;
-    const existing = tools.get(toolCallId);
-    if (existing) return existing;
+  const ensureTool = (event: ConversationReportEvent, call: ToolCall): void => {
+    if (replacedToolIds.has(call.toolCallId)) return;
+    const existing = tools.get(call.toolCallId);
+    if (existing) {
+      existing.name = call.name;
+      existing.status = call.status;
+      if (call.input !== undefined) existing.input = call.input;
+      if (call.output !== undefined) existing.output = call.output;
+      if (call.status !== "running") {
+        existing.resultTimestamp = eventTimestamp(event);
+      }
+      return;
+    }
+
     const part = {
       type: "tool_call" as const,
-      id: toolCallId,
-      name,
-      status: "running" as const,
+      id: call.toolCallId,
+      name: call.name,
+      status: call.status,
+      ...(call.input === undefined ? {} : { input: call.input }),
+      ...(call.output === undefined ? {} : { output: call.output }),
+      ...(call.status === "running"
+        ? {}
+        : { resultTimestamp: eventTimestamp(event) }),
     };
-    tools.set(toolCallId, part);
-    messages.push(eventMessage(event, "tool", [part]));
-    return part;
+    const message = {
+      ...eventMessage(event, "tool", [part]),
+      sourceSeq: call.startedSeq ?? event.seq,
+      timestamp: call.startedAt
+        ? Date.parse(call.startedAt)
+        : eventTimestamp(event),
+    };
+    tools.set(call.toolCallId, part);
+    messages.push(message);
   };
 
   // API sequence is the only ordering authority. Do not sort by timestamps:
@@ -122,35 +109,31 @@ export function conversationTranscriptMessages(
       continue;
     }
 
-    if (data.type === "tool_started") {
-      ensureTool(event, data.toolCallId, data.name);
-      continue;
-    }
-
     if (data.type === "tool_calls") {
-      for (const call of data.calls) {
-        const part = ensureTool(event, call.toolCallId, call.name);
-        if (part && call.input !== undefined) part.input = call.input;
-      }
+      for (const call of data.calls) ensureTool(event, call);
       continue;
     }
 
-    if (data.type === "tool_result") {
-      const part = tools.get(data.toolCallId);
-      if (part) {
-        part.status = data.outcome;
-        part.resultTimestamp = eventTimestamp(event);
-        if (data.output !== undefined) part.output = data.output;
+    if (data.type === "subagent") {
+      const subagentId = `${data.childConversationId}:${data.startedSeq}`;
+      const existing = subagents.get(subagentId);
+      if (existing) {
+        existing.status = data.status;
+        continue;
       }
-      continue;
-    }
-
-    if (data.type === "subagent_started") {
-      messages.push(
-        eventMessage(event, "tool", [
-          subagentPart(data, outcomes.get(event.seq)),
-        ]),
-      );
+      const part = {
+        type: "subagent" as const,
+        id: subagentId,
+        childConversationId: data.childConversationId,
+        subagentKind: data.subagentKind,
+        status: data.status,
+      };
+      subagents.set(subagentId, part);
+      messages.push({
+        ...eventMessage(event, "tool", [part]),
+        sourceSeq: data.startedSeq,
+        timestamp: Date.parse(data.startedAt),
+      });
       continue;
     }
 
@@ -182,11 +165,12 @@ export function conversationTranscriptMessages(
         role: data.failureKind === "delivery" ? "system" : "assistant",
         outcome: data.failureKind === "delivery" ? "delivery_failed" : "error",
         parts: [],
+        sourceSeq: event.seq,
         timestamp: eventTimestamp(event),
       });
       continue;
     }
   }
 
-  return messages;
+  return messages.sort((left, right) => left.sourceSeq - right.sourceSeq);
 }

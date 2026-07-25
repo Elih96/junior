@@ -14,7 +14,7 @@ import {
   groupTranscriptMessages,
   messageRawText,
 } from "./components/transcriptRenderModel";
-import { conversationTranscriptMessages } from "./eventTranscript";
+import { conversationTranscriptMessages } from "./conversations/eventTranscript";
 import type {
   Conversation,
   ConversationTranscript,
@@ -29,6 +29,9 @@ export function buildConversationMarkdown(
   detail: ConversationTranscript,
   conversation?: Conversation,
 ): string {
+  if (detail.previousCursor) {
+    throw new Error("Cannot export a partial conversation transcript");
+  }
   const lines: string[] = [];
 
   lines.push(`# ${headingText(conversationTitle(detail, conversation))}`, "");

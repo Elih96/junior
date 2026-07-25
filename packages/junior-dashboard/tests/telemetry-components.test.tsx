@@ -11,8 +11,8 @@ import type {
   LocationDirectoryReport,
 } from "@sentry/junior/api/schema";
 
-import { client } from "../src/client/api";
 import { HighlightedCode } from "../src/client/code";
+import { conversationDetailQueryKey } from "../src/client/conversations/queries";
 import { Button } from "../src/client/components/Button";
 import { ConversationTranscriptView } from "../src/client/components/ConversationTranscript";
 import { ContributionGrid } from "../src/client/components/ContributionGrid";
@@ -32,6 +32,8 @@ import { Profile } from "../src/client/pages/people/PersonProfilePage";
 import { SkillInventory } from "../src/client/pages/system/SkillInventory";
 import { SystemPage } from "../src/client/pages/system/SystemPage";
 import type { ConversationTranscript, SystemData } from "../src/client/types";
+
+const client = new QueryClient();
 
 afterEach(() => client.clear());
 
@@ -218,15 +220,45 @@ describe("dashboard canonical-event components", () => {
     expect(completedHtml).not.toContain("Junior is responding");
   });
 
+  it("does not present partial event counts as conversation totals", () => {
+    const events = [
+      event(0, {
+        type: "message",
+        messageId: "user-1",
+        role: "user",
+        text: "Investigate",
+      }),
+      event(1, {
+        type: "tool_calls",
+        calls: [
+          {
+            toolCallId: "search-1",
+            name: "search",
+            status: "running",
+          },
+        ],
+      }),
+    ];
+    const partialHtml = renderTranscript(
+      conversation(events, { previousCursor: "older-events" }),
+    );
+    const completeHtml = renderTranscript(conversation(events));
+
+    expect(partialHtml).not.toContain("1 turn");
+    expect(partialHtml).not.toContain("1 tool call");
+    expect(completeHtml).toContain("1 turn");
+    expect(completeHtml).toContain("1 tool call");
+  });
+
   it("omits status badges from conversation detail while retaining progress", () => {
     const activeClient = conversationQueryClient();
     activeClient.setQueryData(
-      ["conversation", "conversation-1"],
+      conversationDetailQueryKey("conversation-1"),
       conversation([], { status: "active" }),
     );
     const failedClient = conversationQueryClient();
     failedClient.setQueryData(
-      ["conversation", "conversation-1"],
+      conversationDetailQueryKey("conversation-1"),
       conversation([], { status: "failed" }),
     );
 
@@ -242,7 +274,7 @@ describe("dashboard canonical-event components", () => {
     const initialClient = conversationQueryClient();
     const initialError = new Error("initial detail failed");
     const initialQuery = initialClient.getQueryCache().build(initialClient, {
-      queryKey: ["conversation", "conversation-1"],
+      queryKey: conversationDetailQueryKey("conversation-1"),
     });
     initialQuery.setState({
       ...initialQuery.state,
@@ -270,9 +302,12 @@ describe("dashboard canonical-event components", () => {
       ],
       { status: "active" },
     );
-    staleClient.setQueryData(["conversation", "conversation-1"], staleDetail);
+    staleClient.setQueryData(
+      conversationDetailQueryKey("conversation-1"),
+      staleDetail,
+    );
     const staleQuery = staleClient.getQueryCache().find({
-      queryKey: ["conversation", "conversation-1"],
+      queryKey: conversationDetailQueryKey("conversation-1"),
     });
     staleQuery?.setState({
       ...staleQuery.state,
@@ -365,9 +400,14 @@ describe("dashboard canonical-event components", () => {
       conversation(
         [
           event(0, {
-            type: "tool_started",
-            toolCallId: "search-1",
-            name: "search",
+            type: "tool_calls",
+            calls: [
+              {
+                toolCallId: "search-1",
+                name: "search",
+                status: "running",
+              },
+            ],
           }),
         ],
         {
@@ -388,9 +428,14 @@ describe("dashboard canonical-event components", () => {
     const html = renderTranscript(
       conversation([
         event(0, {
-          type: "tool_started",
-          toolCallId: "search-1",
-          name: "search",
+          type: "tool_calls",
+          calls: [
+            {
+              toolCallId: "search-1",
+              name: "search",
+              status: "running",
+            },
+          ],
         }),
         event(1, {
           type: "tool_calls",
@@ -398,15 +443,21 @@ describe("dashboard canonical-event components", () => {
             {
               toolCallId: "search-1",
               name: "search",
+              status: "running",
               input: { query: "regression" },
             },
           ],
         }),
         event(2, {
-          type: "tool_result",
-          toolCallId: "search-1",
-          outcome: "completed",
-          output: { matches: 2 },
+          type: "tool_calls",
+          calls: [
+            {
+              toolCallId: "search-1",
+              name: "search",
+              status: "completed",
+              output: { matches: 2 },
+            },
+          ],
         }),
       ]),
     );
@@ -423,15 +474,25 @@ describe("dashboard canonical-event components", () => {
     const html = renderTranscript(
       conversation([
         event(0, {
-          type: "tool_started",
-          toolCallId: "search-1",
-          name: "search",
+          type: "tool_calls",
+          calls: [
+            {
+              toolCallId: "search-1",
+              name: "search",
+              status: "running",
+            },
+          ],
         }),
         event(1, {
-          type: "tool_result",
-          toolCallId: "search-1",
-          outcome: "error",
-          output: { error: "timed out" },
+          type: "tool_calls",
+          calls: [
+            {
+              toolCallId: "search-1",
+              name: "search",
+              status: "error",
+              output: { error: "timed out" },
+            },
+          ],
         }),
       ]),
     );
@@ -449,17 +510,23 @@ describe("dashboard canonical-event components", () => {
   ] as const)("renders the %s child lifecycle status", (status, outcome) => {
     const events: ConversationReportEvent[] = [
       event(0, {
-        type: "subagent_started",
+        type: "subagent",
+        startedSeq: 0,
+        startedAt: "2026-01-01T00:00:00.000Z",
         childConversationId: "child-1",
         subagentKind: "advisor",
+        status: "running",
       }),
     ];
     if (outcome) {
       events.push(
         event(1, {
-          type: "subagent_ended",
+          type: "subagent",
           startedSeq: 0,
-          outcome,
+          startedAt: "2026-01-01T00:00:00.000Z",
+          childConversationId: "child-1",
+          subagentKind: "advisor",
+          status: outcome,
         }),
       );
     }
@@ -492,7 +559,7 @@ describe("dashboard canonical-event components", () => {
       ],
       { conversationId: "child-1", displayTitle: "Advisor review" },
     );
-    client.setQueryData(["conversation", "child-1"], child);
+    client.setQueryData(conversationDetailQueryKey("child-1"), child);
     const target: SubagentTranscriptTarget = {
       conversationId: "child-1",
       part: {
@@ -523,7 +590,7 @@ describe("dashboard canonical-event components", () => {
       displayTitle: "Advisor review",
       status: "completed",
     });
-    client.setQueryData(["conversation", "child-1"], child);
+    client.setQueryData(conversationDetailQueryKey("child-1"), child);
     const target: SubagentTranscriptTarget = {
       conversationId: "child-1",
       part: {
@@ -553,9 +620,12 @@ describe("dashboard canonical-event components", () => {
           <ConversationTranscriptView
             conversation={conversation([
               event(0, {
-                type: "subagent_started",
+                type: "subagent",
+                startedSeq: 0,
+                startedAt: "2026-01-01T00:00:00.000Z",
                 childConversationId: "child-1",
                 subagentKind: "advisor",
+                status: "running",
               }),
             ])}
             onOpenSubagentTranscript={() => {}}
@@ -572,7 +642,7 @@ describe("dashboard canonical-event components", () => {
       displayTitle: "Advisor review",
       status: "completed",
     });
-    client.setQueryData(["conversation", "child-1"], child);
+    client.setQueryData(conversationDetailQueryKey("child-1"), child);
     const drawerHtml = renderToStaticMarkup(
       <MemoryRouter>
         <QueryClientProvider client={client}>
@@ -606,7 +676,7 @@ describe("dashboard canonical-event components", () => {
     const error = new Error("unavailable");
     errorClient.getQueryCache().build(
       errorClient,
-      { queryKey: ["conversation", "child-error"] },
+      { queryKey: conversationDetailQueryKey("child-error") },
       {
         data: undefined,
         dataUpdateCount: 0,
@@ -643,6 +713,56 @@ describe("dashboard canonical-event components", () => {
     expect(html).toContain("Conversation failed to load.");
     expect(html).toContain('data-tone="error"');
     expect(html).toContain('role="alert"');
+  });
+
+  it("keeps a cached child transcript visible after a refresh failure", () => {
+    const staleClient = conversationQueryClient();
+    const staleDetail = conversation(
+      [
+        event(0, {
+          type: "message",
+          messageId: "cached-child-answer",
+          role: "assistant",
+          text: "cached child answer",
+        }),
+      ],
+      { conversationId: "child-stale", status: "active" },
+    );
+    staleClient.setQueryData(
+      conversationDetailQueryKey("child-stale"),
+      staleDetail,
+    );
+    const staleQuery = staleClient.getQueryCache().find({
+      queryKey: conversationDetailQueryKey("child-stale"),
+    });
+    staleQuery?.setState({
+      ...staleQuery.state,
+      error: new Error("refresh failed"),
+      errorUpdatedAt: Date.now(),
+      fetchStatus: "idle",
+      status: "error",
+    });
+    const target: SubagentTranscriptTarget = {
+      conversationId: "child-stale",
+      part: {
+        type: "subagent",
+        id: "child-stale",
+        childConversationId: "child-stale",
+        status: "running",
+        subagentKind: "advisor",
+      },
+    };
+
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <QueryClientProvider client={staleClient}>
+          <SubagentTranscriptDrawer target={target} onClose={() => {}} />
+        </QueryClientProvider>
+      </MemoryRouter>,
+    );
+
+    expect(html).toContain("cached child answer");
+    expect(html).not.toContain("Conversation failed to load.");
   });
 
   it("renders actor profiles with activity without recent conversations", () => {
@@ -1263,7 +1383,10 @@ describe("dashboard canonical-event components", () => {
         displayTitle: summary.displayTitle,
       },
     );
-    client.setQueryData(["conversation", summary.conversationId], detail);
+    client.setQueryData(
+      conversationDetailQueryKey(summary.conversationId),
+      detail,
+    );
     const html = renderToStaticMarkup(
       <QueryClientProvider client={client}>
         <MemoryRouter initialEntries={["/conversations/slack%3AC1%3A123"]}>

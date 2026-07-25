@@ -10,7 +10,7 @@ import {
 } from "react";
 
 import type { ConversationTranscript, TranscriptViewPart } from "../types";
-import { conversationTranscriptMessages } from "../eventTranscript";
+import { conversationTranscriptMessages } from "../conversations/eventTranscript";
 
 const BOTTOM_PROXIMITY_PX = 96;
 const USER_SCROLL_DELTA_PX = 2;
@@ -31,7 +31,15 @@ type BottomPinResult = {
   contentRef: RefCallback<HTMLDivElement>;
   hasPendingUpdate: boolean;
   jumpToBottom: () => void;
+  preserveViewportForPrepend: () => void;
   showJumpToLatest: boolean;
+};
+
+type PrependSnapshot = {
+  historyVersion: string;
+  root: ScrollRoot;
+  scrollHeight: number;
+  scrollTop: number;
 };
 
 const useBrowserLayoutEffect =
@@ -60,7 +68,7 @@ export function transcriptBottomVersion(
   return [
     conversation.conversationId,
     conversation.status,
-    messages.length,
+    lastMessage?.sourceSeq ?? "",
     lastMessage?.role ?? "",
     lastMessage?.outcome ?? "",
     lastMessage?.timestamp ?? "",
@@ -95,18 +103,33 @@ export function transcriptFollowIntent(input: {
   return "preserve";
 }
 
+/** Decide when a requested history prepend can restore or discard its viewport snapshot. */
+export function prependViewportIntent(input: {
+  currentHistoryVersion: string;
+  loadingPreviousPage: boolean;
+  snapshotHistoryVersion: string;
+}): "discard" | "restore" | "wait" {
+  if (input.loadingPreviousPage) return "wait";
+  if (input.currentHistoryVersion !== input.snapshotHistoryVersion) {
+    return "restore";
+  }
+  return "discard";
+}
+
 /** Keep live transcript updates visually pinned only while the reader intends to follow them. */
 export function usePinnedTranscriptBottom(input: {
   enabled: boolean;
+  historyVersion: string;
+  loadingPreviousPage: boolean;
   version: string;
 }): BottomPinResult {
   const anchorRef = useRef<HTMLDivElement | null>(null);
   const contentElementRef = useRef<HTMLDivElement | null>(null);
   const enabledRef = useRef(input.enabled);
-  const everEnabledRef = useRef(input.enabled);
   const followingRef = useRef(false);
   const initializedRef = useRef(false);
   const previousScrollTopRef = useRef<number | null>(null);
+  const prependSnapshotRef = useRef<PrependSnapshot | null>(null);
   const [following, setFollowing] = useState(false);
   const [hasPendingUpdate, setHasPendingUpdate] = useState(false);
   const [contentElement, setContentElement] = useState<HTMLDivElement | null>(
@@ -120,9 +143,7 @@ export function usePinnedTranscriptBottom(input: {
 
   useEffect(() => {
     enabledRef.current = input.enabled;
-    if (input.enabled) {
-      everEnabledRef.current = true;
-    } else {
+    if (!input.enabled) {
       followingRef.current = false;
       setFollowing(false);
       setHasPendingUpdate(false);
@@ -165,6 +186,40 @@ export function usePinnedTranscriptBottom(input: {
     anchorRef.current?.scrollIntoView({ behavior, block: "end" });
   }, []);
 
+  const preserveViewportForPrepend = useCallback(() => {
+    const root = scrollRootFor(contentElementRef.current);
+    if (!root) return;
+    const snapshot = scrollSnapshot(root);
+    prependSnapshotRef.current = {
+      historyVersion: input.historyVersion,
+      root,
+      scrollHeight: snapshot.scrollHeight,
+      scrollTop: snapshot.scrollTop,
+    };
+  }, [input.historyVersion]);
+
+  useBrowserLayoutEffect(() => {
+    const previous = prependSnapshotRef.current;
+    if (!previous) return;
+
+    const intent = prependViewportIntent({
+      currentHistoryVersion: input.historyVersion,
+      loadingPreviousPage: input.loadingPreviousPage,
+      snapshotHistoryVersion: previous.historyVersion,
+    });
+    if (intent === "restore") {
+      const current = scrollSnapshot(previous.root);
+      setScrollTop(
+        previous.root,
+        scrollTopAfterPrepend(previous, current.scrollHeight),
+      );
+      prependSnapshotRef.current = null;
+      return;
+    }
+
+    if (intent === "discard") prependSnapshotRef.current = null;
+  }, [input.historyVersion, input.loadingPreviousPage]);
+
   const syncAfterLayoutChange = useCallback(() => {
     if (
       shouldAutoPinTranscriptBottom({
@@ -183,7 +238,6 @@ export function usePinnedTranscriptBottom(input: {
     const wasEnabled = enabledRef.current;
     const shouldTrack = input.enabled || wasEnabled;
     enabledRef.current = input.enabled;
-    if (input.enabled) everEnabledRef.current = true;
     if (!shouldTrack) return;
 
     const wasInitialized = initializedRef.current;
@@ -249,10 +303,25 @@ export function usePinnedTranscriptBottom(input: {
       contentRef,
       hasPendingUpdate,
       jumpToBottom,
+      preserveViewportForPrepend,
       showJumpToLatest: input.enabled && !following,
     }),
-    [following, hasPendingUpdate, input.enabled, jumpToBottom],
+    [
+      following,
+      hasPendingUpdate,
+      input.enabled,
+      jumpToBottom,
+      preserveViewportForPrepend,
+    ],
   );
+}
+
+/** Keep the previously visible content at the same viewport offset after a prepend. */
+export function scrollTopAfterPrepend(
+  previous: Pick<ScrollSnapshot, "scrollHeight" | "scrollTop">,
+  scrollHeight: number,
+): number {
+  return previous.scrollTop + scrollHeight - previous.scrollHeight;
 }
 
 function transcriptPartVersion(part: TranscriptViewPart | undefined): string {
@@ -319,6 +388,14 @@ function scrollSnapshot(root: ScrollRoot): ScrollSnapshot {
     scrollHeight: root.scrollHeight,
     scrollTop: root.scrollTop,
   };
+}
+
+function setScrollTop(root: ScrollRoot, scrollTop: number): void {
+  if (isWindowRoot(root)) {
+    window.scrollTo({ behavior: "auto", top: scrollTop });
+    return;
+  }
+  root.scrollTop = scrollTop;
 }
 
 function isWindowRoot(root: ScrollRoot): root is Window {

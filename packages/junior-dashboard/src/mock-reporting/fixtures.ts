@@ -6,6 +6,7 @@ import type {
   ActorProfileReport,
   ActorSummaryReport,
   ConversationDetailReport,
+  ConversationEventPage,
   ConversationFeed,
   ConversationReportEvent,
   ConversationReportEventData,
@@ -131,9 +132,14 @@ function activeConversation(nowMs: number): ConversationDetailReport {
         state: "started",
       }),
       reportEvent(2, iso(Date.parse(startedAt), 8_000), {
-        type: "tool_started",
-        toolCallId: "active-search",
-        name: "datacat.search_logs",
+        type: "tool_calls",
+        calls: [
+          {
+            toolCallId: "active-search",
+            name: "datacat.search_logs",
+            status: "running",
+          },
+        ],
       }),
     ],
   });
@@ -157,9 +163,14 @@ function dashboardQaConversation(nowMs: number): ConversationDetailReport {
         text: "Review the dashboard plan before editing.",
       }),
       reportEvent(1, iso(Date.parse(startedAt), 2_000), {
-        type: "tool_started",
-        toolCallId: "qa-advisor",
-        name: "advisor",
+        type: "tool_calls",
+        calls: [
+          {
+            toolCallId: "qa-advisor",
+            name: "advisor",
+            status: "running",
+          },
+        ],
       }),
       reportEvent(2, iso(Date.parse(startedAt), 3_000), {
         type: "tool_calls",
@@ -167,36 +178,59 @@ function dashboardQaConversation(nowMs: number): ConversationDetailReport {
           {
             toolCallId: "qa-advisor",
             name: "advisor",
+            status: "running",
+            startedSeq: 1,
+            startedAt: iso(Date.parse(startedAt), 2_000),
             input: { task: "Review the dashboard plan" },
           },
         ],
       }),
       reportEvent(3, iso(Date.parse(startedAt), 4_000), {
-        type: "subagent_started",
+        type: "subagent",
+        startedSeq: 3,
+        startedAt: iso(Date.parse(startedAt), 4_000),
         childConversationId: DASHBOARD_QA_PLAN_ID,
         subagentKind: "advisor",
         parentToolCallId: "qa-advisor",
+        status: "running",
       }),
       reportEvent(4, iso(Date.parse(startedAt), 20_000), {
-        type: "subagent_ended",
+        type: "subagent",
         startedSeq: 3,
-        outcome: "success",
+        startedAt: iso(Date.parse(startedAt), 4_000),
+        childConversationId: DASHBOARD_QA_PLAN_ID,
+        subagentKind: "advisor",
+        parentToolCallId: "qa-advisor",
+        status: "completed",
       }),
       reportEvent(5, iso(Date.parse(startedAt), 21_000), {
-        type: "tool_result",
-        toolCallId: "qa-advisor",
-        outcome: "completed",
-        output: { ok: true, status: "success" },
+        type: "tool_calls",
+        calls: [
+          {
+            toolCallId: "qa-advisor",
+            name: "advisor",
+            status: "completed",
+            startedSeq: 1,
+            startedAt: iso(Date.parse(startedAt), 2_000),
+            output: { ok: true, status: "success" },
+          },
+        ],
       }),
       reportEvent(6, iso(Date.parse(startedAt), 25_000), {
-        type: "subagent_started",
+        type: "subagent",
+        startedSeq: 6,
+        startedAt: iso(Date.parse(startedAt), 25_000),
         childConversationId: DASHBOARD_QA_REVIEW_ID,
         subagentKind: "advisor",
+        status: "running",
       }),
       reportEvent(7, iso(Date.parse(startedAt), 44_000), {
-        type: "subagent_ended",
+        type: "subagent",
         startedSeq: 6,
-        outcome: "success",
+        startedAt: iso(Date.parse(startedAt), 25_000),
+        childConversationId: DASHBOARD_QA_REVIEW_ID,
+        subagentKind: "advisor",
+        status: "completed",
       }),
       reportEvent(8, iso(Date.parse(startedAt), 50_000), {
         type: "compaction",
@@ -248,7 +282,7 @@ function advisorConversation(
 function longConversation(nowMs: number): ConversationDetailReport {
   const startedAt = iso(nowMs, -92 * 60_000);
   const events: ConversationReportEvent[] = [
-    reportEvent(0, startedAt, {
+    reportEvent(1, startedAt, {
       type: "message",
       messageId: "release-user",
       role: "user",
@@ -258,27 +292,32 @@ function longConversation(nowMs: number): ConversationDetailReport {
   for (let index = 0; index < 12; index += 1) {
     events.push(
       reportEvent(
-        index + 1,
+        index + 2,
         iso(Date.parse(startedAt), 2_000 + index * 4_000),
         {
-          type: "tool_started",
-          toolCallId: `release-bash-${index}`,
-          name: "bash",
+          type: "tool_calls",
+          calls: [
+            {
+              toolCallId: `release-bash-${index}`,
+              name: "bash",
+              status: "running",
+            },
+          ],
         },
       ),
     );
   }
   events.push(
-    reportEvent(13, iso(Date.parse(startedAt), 53_000), {
+    reportEvent(14, iso(Date.parse(startedAt), 53_000), {
       type: "compaction",
     }),
-    reportEvent(14, iso(Date.parse(startedAt), 90_000), {
+    reportEvent(15, iso(Date.parse(startedAt), 90_000), {
       type: "handoff",
       modelProfile: "fast",
       modelId: "openai/gpt-5-mini",
       reasoningLevel: "medium",
     }),
-    reportEvent(15, iso(Date.parse(startedAt), 166_000), {
+    reportEvent(16, iso(Date.parse(startedAt), 166_000), {
       type: "message",
       messageId: "release-assistant",
       role: "assistant",
@@ -297,6 +336,7 @@ function longConversation(nowMs: number): ConversationDetailReport {
     actorIdentity: actor(undefined, "Jordan Blake", "jordan"),
     cumulativeDurationMs: 552_761,
     cumulativeUsage: usage(0.18),
+    previousCursor: `mock:before:${LONG_CONVERSATION_ID}`,
     modelUsage: [
       {
         modelId: "anthropic/claude-sonnet-4-5",
@@ -343,9 +383,14 @@ function incidentConversation(nowMs: number): ConversationDetailReport {
         text: "Draft the rollback note with the exact evidence.",
       }),
       reportEvent(1, iso(Date.parse(startedAt), 12_000), {
-        type: "tool_started",
-        toolCallId: "incident-issue",
-        name: "sentry.get_issue",
+        type: "tool_calls",
+        calls: [
+          {
+            toolCallId: "incident-issue",
+            name: "sentry.get_issue",
+            status: "running",
+          },
+        ],
       }),
       reportEvent(2, iso(Date.parse(startedAt), 13_000), {
         type: "tool_calls",
@@ -353,19 +398,29 @@ function incidentConversation(nowMs: number): ConversationDetailReport {
           {
             toolCallId: "incident-issue",
             name: "sentry.get_issue",
+            status: "running",
+            startedSeq: 1,
+            startedAt: iso(Date.parse(startedAt), 12_000),
             input: { issueId: "PAYMENTS-42" },
           },
         ],
       }),
       reportEvent(3, iso(Date.parse(startedAt), 28_000), {
-        type: "tool_result",
-        toolCallId: "incident-issue",
-        outcome: "completed",
-        output: {
-          ok: true,
-          status: "success",
-          data: { culprit: "payments-v42", eventCount: 418 },
-        },
+        type: "tool_calls",
+        calls: [
+          {
+            toolCallId: "incident-issue",
+            name: "sentry.get_issue",
+            status: "completed",
+            startedSeq: 1,
+            startedAt: iso(Date.parse(startedAt), 12_000),
+            output: {
+              ok: true,
+              status: "success",
+              data: { culprit: "payments-v42", eventCount: 418 },
+            },
+          },
+        ],
       }),
       reportEvent(4, iso(Date.parse(startedAt), 35_000), {
         type: "message",
@@ -400,18 +455,38 @@ function privateConversation(nowMs: number): ConversationDetailReport {
         redacted: true,
       }),
       reportEvent(1, iso(Date.parse(startedAt), 10_000), {
-        type: "tool_started",
-        toolCallId: "private-search",
-        name: "sentry.search",
+        type: "tool_calls",
+        calls: [
+          {
+            toolCallId: "private-search",
+            name: "sentry.search",
+            status: "running",
+          },
+        ],
       }),
       reportEvent(2, iso(Date.parse(startedAt), 11_000), {
         type: "tool_calls",
-        calls: [{ toolCallId: "private-search", name: "sentry.search" }],
+        calls: [
+          {
+            toolCallId: "private-search",
+            name: "sentry.search",
+            status: "running",
+            startedSeq: 1,
+            startedAt: iso(Date.parse(startedAt), 10_000),
+          },
+        ],
       }),
       reportEvent(3, iso(Date.parse(startedAt), 25_000), {
-        type: "tool_result",
-        toolCallId: "private-search",
-        outcome: "completed",
+        type: "tool_calls",
+        calls: [
+          {
+            toolCallId: "private-search",
+            name: "sentry.search",
+            status: "completed",
+            startedSeq: 1,
+            startedAt: iso(Date.parse(startedAt), 10_000),
+          },
+        ],
       }),
       reportEvent(4, iso(Date.parse(startedAt), 30_000), {
         type: "message",
@@ -545,6 +620,7 @@ function summaryFromConversation(
     generatedAt: _generatedAt,
     modelUsage: _modelUsage,
     parentConversationId: _parentConversationId,
+    previousCursor: _previousCursor,
     sentryConversationUrl: _sentryConversationUrl,
     ...summary
   } = conversation;
@@ -667,6 +743,7 @@ export function readMockConversationFeed(
 /** Return one canonical-event visual-QA conversation detail fixture. */
 export function readMockConversationDetail(
   conversationId: string,
+  limit = 500,
 ): ConversationDetailReport | undefined {
   const conversation = mockConversations(Date.now()).find(
     (candidate) => candidate.conversationId === conversationId,
@@ -674,9 +751,75 @@ export function readMockConversationDetail(
   if (!conversation) return undefined;
   const { parentConversationId: _parentConversationId, ...detail } =
     conversation;
-  return detail.channel && PUBLIC_MOCK_CHANNEL_IDS.has(detail.channel)
-    ? { ...detail, locationId: `mock:${detail.channel}` }
-    : detail;
+  const events = detail.events.slice(-limit);
+  const bounded =
+    events.length < detail.events.length && events[0]
+      ? {
+          ...detail,
+          events,
+          previousCursor: mockBeforeCursor(conversationId, events[0].seq),
+        }
+      : detail;
+  return bounded.channel && PUBLIC_MOCK_CHANNEL_IDS.has(bounded.channel)
+    ? { ...bounded, locationId: `mock:${bounded.channel}` }
+    : bounded;
+}
+
+/** Return the deterministic older page used to exercise transcript pagination. */
+export function readMockConversationEvents(
+  conversationId: string,
+  before: string,
+  limit = 500,
+): ConversationEventPage | undefined {
+  const conversation = mockConversations(Date.now()).find(
+    (candidate) => candidate.conversationId === conversationId,
+  );
+  if (!conversation) return undefined;
+  if (before === conversation.previousCursor) {
+    return {
+      events: [
+        reportEvent(0, iso(Date.parse(conversation.startedAt), -60_000), {
+          type: "message",
+          messageId: `${conversationId}:earlier`,
+          role: "user",
+          text: "Prepare the release and include the complete earlier context.",
+        }),
+      ],
+      eventHistory: conversation.eventHistory,
+      generatedAt: new Date().toISOString(),
+    };
+  }
+
+  const beforeSeq = parseMockBeforeCursor(conversationId, before);
+  if (beforeSeq === undefined) return undefined;
+  const olderEvents = conversation.events.filter(
+    (event) => event.seq < beforeSeq,
+  );
+  const events = olderEvents.slice(-limit);
+  return {
+    events,
+    eventHistory: conversation.eventHistory,
+    generatedAt: new Date().toISOString(),
+    ...(events.length < olderEvents.length && events[0]
+      ? { previousCursor: mockBeforeCursor(conversationId, events[0].seq) }
+      : conversation.previousCursor
+        ? { previousCursor: conversation.previousCursor }
+        : {}),
+  };
+}
+
+function mockBeforeCursor(conversationId: string, seq: number): string {
+  return `mock:before:${encodeURIComponent(conversationId)}:${seq}`;
+}
+
+function parseMockBeforeCursor(
+  conversationId: string,
+  cursor: string,
+): number | undefined {
+  const prefix = `mock:before:${encodeURIComponent(conversationId)}:`;
+  if (!cursor.startsWith(prefix)) return undefined;
+  const seq = Number(cursor.slice(prefix.length));
+  return Number.isInteger(seq) && seq >= 0 ? seq : undefined;
 }
 
 /** Build mock dashboard stats from canonical-event mock conversations. */

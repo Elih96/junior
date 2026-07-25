@@ -4,8 +4,6 @@ import type {
   ConversationSummaryReport,
   ConversationUsage,
 } from "@sentry/junior/api/schema";
-import type { ConversationDetailReport } from "@sentry/junior/api/schema";
-
 import type {
   CodeBlock,
   Conversation,
@@ -16,7 +14,7 @@ import type {
   VisualStatus,
 } from "./types";
 import { formatDuration } from "./components/Duration";
-import { conversationTranscriptMessages } from "./eventTranscript";
+import { conversationTranscriptMessages } from "./conversations/eventTranscript";
 
 let dashboardTimeZone = "America/Los_Angeles";
 
@@ -234,23 +232,28 @@ export type ToolCallSummary = {
   total: number;
 };
 
-/** Summarize structural tool starts by name. */
+/** Summarize normalized tool calls by stable call id. */
 export function summarizeToolCalls(
   conversation: ConversationTranscript,
   limit = 5,
 ): ToolCallSummary {
   const byName = new Map<string, ToolCallSummaryItem>();
+  const seen = new Set<string>();
   let total = 0;
 
   for (const event of conversation.events) {
-    if (event.data.type !== "tool_started") continue;
-    const item = byName.get(event.data.name) ?? {
-      count: 0,
-      name: event.data.name,
-    };
-    item.count += 1;
-    byName.set(event.data.name, item);
-    total += 1;
+    if (event.data.type !== "tool_calls") continue;
+    for (const call of event.data.calls) {
+      if (seen.has(call.toolCallId)) continue;
+      seen.add(call.toolCallId);
+      const item = byName.get(call.name) ?? {
+        count: 0,
+        name: call.name,
+      };
+      item.count += 1;
+      byName.set(call.name, item);
+      total += 1;
+    }
   }
 
   const items = [...byName.values()]
@@ -857,7 +860,7 @@ export function buildConversations(
 
 /** Build a conversation row from a detail report so permalinks do not depend on the feed. */
 export function conversationFromDetail(
-  detail: ConversationDetailReport | undefined,
+  detail: ConversationTranscript | undefined,
 ): Conversation | undefined {
   if (!detail) return undefined;
   const conversation = buildConversations([detail])[0];

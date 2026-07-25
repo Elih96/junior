@@ -3,7 +3,10 @@ import { Link } from "react-router";
 import type { ConversationDetailReport } from "@sentry/junior/api/schema";
 import type { ConversationFeed } from "@sentry/junior/api/schema";
 
-import { useArchiveConversation, useConversationData } from "../api";
+import {
+  useArchiveConversation,
+  useConversationData,
+} from "../conversations/queries";
 import { buildConversationMarkdown } from "../markdownExport";
 import { CopyMarkdownButton } from "../components/CopyMarkdownButton";
 import {
@@ -131,16 +134,21 @@ export function ConversationPage(props: {
                   key={conversationDetail?.conversationId ?? "loading"}
                   getMarkdown={
                     conversationDetail
-                      ? () =>
+                      ? async () =>
                           buildConversationMarkdown(
-                            conversationDetail,
+                            await detail.loadCompleteTranscript(),
                             conversation,
                           )
                       : undefined
                   }
                 />
               }
+              hasPreviousPage={detail.hasPreviousPage}
+              historyError={detail.historyError}
+              historyVersion={detail.historyVersion}
               live={conversationIsLive(visualStatus, detail.data)}
+              loadingPreviousPage={detail.isLoadingPreviousPage}
+              onLoadPreviousPage={detail.loadPreviousPage}
               responding={
                 !detail.error && conversationIsLive(visualStatus, detail.data)
               }
@@ -220,9 +228,14 @@ function ConversationStats(props: {
   detail?: ConversationDetailReport;
 }) {
   if (!props.conversation) return null;
-  const turnSummary = props.detail ? summarizeTurns(props.detail) : undefined;
-  const toolSummary = props.detail
-    ? summarizeToolCalls(props.detail)
+  const completeDetail = props.detail?.previousCursor
+    ? undefined
+    : props.detail;
+  const turnSummary = completeDetail
+    ? summarizeTurns(completeDetail)
+    : undefined;
+  const toolSummary = completeDetail
+    ? summarizeToolCalls(completeDetail)
     : undefined;
   const usage =
     props.detail?.cumulativeUsage ?? props.conversation.cumulativeUsage;
@@ -256,9 +269,11 @@ function ConversationStats(props: {
           content: (
             <TokenMetric
               compactionCount={
-                (props.detail?.events ?? []).filter(
-                  (event) => event.data.type === "compaction",
-                ).length
+                completeDetail
+                  ? completeDetail.events.filter(
+                      (event) => event.data.type === "compaction",
+                    ).length
+                  : undefined
               }
               modelUsage={props.detail?.modelUsage}
               summary={tokenSummary}

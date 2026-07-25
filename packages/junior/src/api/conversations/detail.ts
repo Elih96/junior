@@ -1,78 +1,43 @@
-import { and, asc, eq, getTableColumns, inArray, sql } from "drizzle-orm";
-import {
-  decodeStoredConversationEvent,
-  type ConversationEvent,
-} from "@/chat/conversations/history";
 import type { Conversation } from "@/chat/conversations/store";
 import { getDb, getSqlExecutor } from "@/chat/db";
 import { buildSentryConversationUrl } from "@/chat/sentry-links";
 import { readConversationModelUsageFromSql } from "@/chat/pi/sql-model-usage";
-import type { JuniorSqlDatabase } from "@/db/db";
-import { juniorConversationEvents } from "@/db/schema";
-import {
-  conversationReportSourceEventTypes,
-  projectConversationReportEvents,
-} from "./events";
+import { encodeConversationCursor } from "./cursor";
+import { readConversationEventPage } from "./event-page";
 import { readConversationRecordFromSql } from "./list";
-import { conversationSummaryFromStoredConversation } from "./projection";
+import {
+  conversationEventHistory,
+  conversationSummaryFromStoredConversation,
+} from "./projection";
 import {
   readConversationAccessFromSql,
   type ConversationAccess,
 } from "./access";
 import { readRootConversationMetricsFromSql } from "./usage";
-import { conversationDetailReportSchema } from "../schema/conversation";
+import {
+  conversationDetailQuerySchema,
+  conversationDetailReportSchema,
+} from "../schema/conversation";
 import type { ConversationDetailReport } from "../schema/conversation";
 import { defineApiRoute } from "../route";
-import { parseParams, throwApiError } from "../http";
+import { parseParams, parseQuery, throwApiError } from "../http";
 import { conversationParamsSchema } from "../schema/conversation";
 
-const conversationEventColumns = getTableColumns(juniorConversationEvents);
-
-async function readConversationReportEventRows(
-  executor: JuniorSqlDatabase,
-  conversationId: string,
-) {
-  return executor
-    .db()
-    .select({
-      ...conversationEventColumns,
-      // Replacement history is model context, never dashboard report data.
-      payload: sql<Record<string, unknown>>`case
-        when ${juniorConversationEvents.type} in ('compaction', 'handoff')
-        then jsonb_set(
-          ${juniorConversationEvents.payload},
-          '{replacementHistory}',
-          '[]'::jsonb
-        )
-        else ${juniorConversationEvents.payload}
-      end`,
-    })
-    .from(juniorConversationEvents)
-    .where(
-      and(
-        eq(juniorConversationEvents.conversationId, conversationId),
-        inArray(juniorConversationEvents.type, [
-          ...conversationReportSourceEventTypes,
-        ]),
-      ),
-    )
-    .orderBy(asc(juniorConversationEvents.seq));
-}
-
+/** Project stored metadata and a bounded event page into a signed history cursor. */
 function projectConversationDetail(args: {
   access?: ConversationAccess;
   conversation: Conversation;
   durationMs: number;
-  events: ConversationEvent[];
+  events: ConversationDetailReport["events"];
   locationId?: string;
   modelUsage: NonNullable<ConversationDetailReport["modelUsage"]>;
+  previousSeq?: number;
   usage: ConversationDetailReport["cumulativeUsage"];
 }): ConversationDetailReport {
   const { conversation } = args;
   const conversationId = conversation.conversationId;
   const transcriptPurgedAtMs = conversation.transcriptPurgedAtMs;
   const canExposePayload = args.access?.canViewPrivateContent ?? false;
-  const events = transcriptPurgedAtMs === undefined ? args.events : [];
   const modelUsage = transcriptPurgedAtMs === undefined ? args.modelUsage : [];
   const sentryConversationUrl = buildSentryConversationUrl(conversationId);
 
@@ -84,20 +49,20 @@ function projectConversationDetail(args: {
       ...(args.locationId ? { locationId: args.locationId } : {}),
       usage: args.usage,
     }),
-    events: projectConversationReportEvents({ canExposePayload, events }),
+    events: args.events,
+    ...(args.previousSeq !== undefined
+      ? {
+          previousCursor: encodeConversationCursor({
+            conversationId,
+            seq: args.previousSeq,
+          }),
+        }
+      : {}),
     ...(modelUsage.length > 0 ? { modelUsage } : {}),
-    eventHistory:
-      transcriptPurgedAtMs !== undefined
-        ? {
-            status: "expired",
-            expiredAt: new Date(transcriptPurgedAtMs).toISOString(),
-          }
-        : canExposePayload
-          ? { status: "available" }
-          : {
-              status: "redacted",
-              reason: "non_public_conversation",
-            },
+    eventHistory: conversationEventHistory({
+      canExposePayload,
+      ...(transcriptPurgedAtMs === undefined ? {} : { transcriptPurgedAtMs }),
+    }),
     generatedAt: new Date().toISOString(),
     ...(sentryConversationUrl ? { sentryConversationUrl } : {}),
   };
@@ -105,50 +70,52 @@ function projectConversationDetail(args: {
 
 async function readConversationDetailFromSql(
   conversationId: string,
-  options: { verifiedViewerEmail?: string },
+  options: {
+    limit: number;
+    verifiedViewerEmail?: string;
+  },
 ): Promise<ConversationDetailReport | undefined> {
   const record = await readConversationRecordFromSql(conversationId);
   if (!record) return undefined;
 
   const executor = getSqlExecutor();
   const includeDescendantMetrics = record.rootConversationId === conversationId;
-  const [accessByConversation, eventRows, modelUsage, metricsByRoot] =
-    await Promise.all([
-      readConversationAccessFromSql(
-        getDb(),
-        [conversationId],
-        options.verifiedViewerEmail,
-      ),
-      readConversationReportEventRows(executor, conversationId),
-      record.conversation.transcriptPurgedAtMs === undefined
-        ? readConversationModelUsageFromSql(executor, {
-            conversationId,
-            includeDescendants: includeDescendantMetrics,
-          })
-        : Promise.resolve([]),
-      readRootConversationMetricsFromSql(
-        getDb(),
-        includeDescendantMetrics ? [conversationId] : [],
-      ),
-    ]);
-  const events = eventRows.map((row) =>
-    decodeStoredConversationEvent({
-      schemaVersion: row.schemaVersion,
-      seq: row.seq,
-      historyVersion: row.historyVersion,
-      ...(row.idempotencyKey ? { idempotencyKey: row.idempotencyKey } : {}),
-      createdAtMs: row.createdAt.getTime(),
-      type: row.type,
-      payload: row.payload,
-    }),
-  );
+  const [accessByConversation, modelUsage, metricsByRoot] = await Promise.all([
+    readConversationAccessFromSql(
+      getDb(),
+      [conversationId],
+      options.verifiedViewerEmail,
+    ),
+    record.conversation.transcriptPurgedAtMs === undefined
+      ? readConversationModelUsageFromSql(executor, {
+          conversationId,
+          includeDescendants: includeDescendantMetrics,
+        })
+      : Promise.resolve([]),
+    readRootConversationMetricsFromSql(
+      getDb(),
+      includeDescendantMetrics ? [conversationId] : [],
+    ),
+  ]);
+  const access = accessByConversation.get(conversationId);
+  const page =
+    record.conversation.transcriptPurgedAtMs === undefined
+      ? await readConversationEventPage(executor, {
+          canExposePayload: access?.canViewPrivateContent ?? false,
+          conversationId,
+          limit: options.limit,
+        })
+      : { events: [] };
   const metrics = metricsByRoot.get(conversationId);
   return projectConversationDetail({
     ...record,
-    access: accessByConversation.get(conversationId),
+    access,
     durationMs: metrics?.durationMs ?? record.durationMs,
-    events,
+    events: page.events,
     modelUsage,
+    ...(page.previousSeq === undefined
+      ? {}
+      : { previousSeq: page.previousSeq }),
     usage: metrics?.usage ?? record.usage ?? undefined,
   });
 }
@@ -156,9 +123,15 @@ async function readConversationDetailFromSql(
 /** Load one conversation from its canonical event history. */
 export async function readConversationDetail(
   conversationId: string,
-  options: { verifiedViewerEmail?: string } = {},
+  options: {
+    limit?: number;
+    verifiedViewerEmail?: string;
+  } = {},
 ): Promise<ConversationDetailReport | undefined> {
-  const report = await readConversationDetailFromSql(conversationId, options);
+  const report = await readConversationDetailFromSql(conversationId, {
+    ...options,
+    limit: options.limit ?? 500,
+  });
   return report ? conversationDetailReportSchema.parse(report) : undefined;
 }
 
@@ -172,11 +145,12 @@ export default defineApiRoute({
       conversationParamsSchema,
       c.req.param(),
     );
+    const query = parseQuery(conversationDetailQuerySchema, c.req.query());
     const verifiedViewerEmail = c.get("verifiedViewerEmail");
-    const report = await readConversationDetail(
-      conversationId,
-      verifiedViewerEmail ? { verifiedViewerEmail } : {},
-    );
+    const report = await readConversationDetail(conversationId, {
+      ...query,
+      ...(verifiedViewerEmail ? { verifiedViewerEmail } : {}),
+    });
     if (!report) throwApiError(404, "Conversation not found.");
     return report;
   },

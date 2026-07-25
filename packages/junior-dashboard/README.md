@@ -11,12 +11,13 @@ state.
 - Better Auth owns authentication; dashboard routes fail closed when identity
   or required configuration is missing.
 - API schemas under `src/api/` define the client/server boundary.
-- Conversation detail exposes one ordered, privacy-safe event log. The
-  dashboard owns the event-to-view reduction and never merges a duplicate
-  transcript, activity stream, or provider runtime state.
-- Reporting projects only tool calls and model-visible results from agent
-  steps. The dashboard correlates their start, call, and result facts by tool
-  call id into one row without exposing the rest of model history.
+- Conversation detail is a bounded TanStack Query resource that polls while
+  active. Earlier event pages use a separate infinite query loaded on demand.
+  The client derives one ordered transcript from those immutable responses;
+  paginated reads never write into another resource's cache.
+- The server adapts canonical runtime events into normalized reporting events.
+  The dashboard reduces tool and subagent observations by stable identity into
+  one row without interpreting Pi messages or host-only lifecycle shapes.
 - Private conversation access requires authenticated authorization at the
   server boundary. Client-side route hiding is not authorization.
 - The package remains stateless apart from normal auth/session infrastructure;

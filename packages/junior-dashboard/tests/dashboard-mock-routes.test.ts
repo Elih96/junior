@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   actorDirectoryReportSchema,
   conversationDetailReportSchema,
+  conversationEventPageSchema,
   type ConversationSummaryReport,
 } from "@sentry/junior/api/schema";
 
@@ -217,7 +218,9 @@ describe("dashboard canonical-event mock routes", () => {
     const active = await readDetail("slack:CQA123:1770003600.000200");
     expect(
       active.events.flatMap((event) =>
-        event.data.type === "tool_started" ? [event.data.name] : [],
+        event.data.type === "tool_calls"
+          ? event.data.calls.map((call) => call.name)
+          : [],
       ),
     ).toContain("datacat.search_logs");
 
@@ -243,6 +246,40 @@ describe("dashboard canonical-event mock routes", () => {
     expect(long.events.map((event) => event.data.type)).toEqual(
       expect.arrayContaining(["compaction", "handoff"]),
     );
+    const historyResponse = await app.fetch(
+      new Request(
+        `http://localhost/api/conversations/${encodeURIComponent(long.conversationId)}/events?before=${encodeURIComponent(long.previousCursor!)}`,
+      ),
+    );
+    expect(historyResponse.status).toBe(200);
+    const history = conversationEventPageSchema.parse(
+      await historyResponse.json(),
+    );
+    expect(history.events.map((event) => event.seq)).toEqual([0]);
+
+    const limitedDetailResponse = await app.fetch(
+      new Request(
+        `http://localhost/api/conversations/${encodeURIComponent(long.conversationId)}?limit=2`,
+      ),
+    );
+    const limitedDetail = conversationDetailReportSchema.parse(
+      await limitedDetailResponse.json(),
+    );
+    expect(limitedDetail.events).toHaveLength(2);
+    expect(limitedDetail.previousCursor).toBeDefined();
+
+    const limitedHistoryResponse = await app.fetch(
+      new Request(
+        `http://localhost/api/conversations/${encodeURIComponent(long.conversationId)}/events?before=${encodeURIComponent(limitedDetail.previousCursor!)}&limit=2`,
+      ),
+    );
+    const limitedHistory = conversationEventPageSchema.parse(
+      await limitedHistoryResponse.json(),
+    );
+    expect(limitedHistory.events).toHaveLength(2);
+    expect(limitedHistory.events.at(-1)!.seq).toBeLessThan(
+      limitedDetail.events[0]!.seq,
+    );
   });
 
   it("loads canonical child conversations through the ordinary detail route", async () => {
@@ -262,7 +299,7 @@ describe("dashboard canonical-event mock routes", () => {
       await parentResponse.json(),
     );
     const childIds = parent.events.flatMap((event) =>
-      event.data.type === "subagent_started"
+      event.data.type === "subagent" && event.data.status === "running"
         ? [event.data.childConversationId]
         : [],
     );

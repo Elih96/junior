@@ -4,7 +4,10 @@ import {
   apiErrorSchema,
   actorDirectoryReportSchema,
   actorProfileReportSchema,
+  conversationDetailQuerySchema,
   conversationDetailReportSchema,
+  conversationEventPageSchema,
+  conversationEventsQuerySchema,
   conversationFeedQuerySchema,
   conversationFeedSchema,
   conversationParamsSchema,
@@ -16,6 +19,7 @@ import {
 } from "@sentry/junior/api/schema";
 import {
   readMockConversationDetail,
+  readMockConversationEvents,
   readMockConversationFeed,
   readMockConversationStats,
   readMockLocationDetail,
@@ -73,13 +77,38 @@ export function createMockReportingApi(): Hono {
   app.get("/conversations/stats", () =>
     jsonResponse(conversationStatsReportSchema, readMockConversationStats()),
   );
-  app.get("/conversations/:conversationId", (c) => {
+  app.get("/conversations/:conversationId/events", (c) => {
     const params = conversationParamsSchema.safeParse(c.req.param());
+    const query = conversationEventsQuerySchema.safeParse(c.req.query());
     if (!params.success) {
       return errorResponse("Invalid route parameters.", 400);
     }
+    if (!query.success) {
+      return errorResponse("Invalid query parameters.", 400);
+    }
+    if (!readMockConversationDetail(params.data.conversationId)) {
+      return errorResponse("Conversation not found.", 404);
+    }
+    const report = readMockConversationEvents(
+      params.data.conversationId,
+      query.data.before,
+      query.data.limit,
+    );
+    return report
+      ? jsonResponse(conversationEventPageSchema, report)
+      : errorResponse("Invalid conversation cursor.", 400);
+  });
+  app.get("/conversations/:conversationId", (c) => {
+    const params = conversationParamsSchema.safeParse(c.req.param());
+    const query = conversationDetailQuerySchema.safeParse(c.req.query());
+    if (!params.success) {
+      return errorResponse("Invalid route parameters.", 400);
+    }
+    if (!query.success) {
+      return errorResponse("Invalid query parameters.", 400);
+    }
     const { conversationId } = params.data;
-    const report = readMockConversationDetail(conversationId);
+    const report = readMockConversationDetail(conversationId, query.data.limit);
     return report
       ? jsonResponse(conversationDetailReportSchema, report)
       : errorResponse("Conversation not found.", 404);

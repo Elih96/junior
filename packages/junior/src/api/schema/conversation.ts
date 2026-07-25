@@ -22,6 +22,19 @@ export const conversationParamsSchema = z
   .object({ conversationId: z.string().min(1) })
   .strict();
 
+export const conversationDetailQuerySchema = z
+  .object({
+    limit: z.coerce.number().int().min(1).max(1_000).default(500),
+  })
+  .strict();
+
+export const conversationEventsQuerySchema = z
+  .object({
+    before: z.string().min(1),
+    limit: z.coerce.number().int().min(1).max(1_000).default(500),
+  })
+  .strict();
+
 export const conversationFeedQuerySchema = z
   .object({
     actorEmail: z
@@ -99,35 +112,30 @@ const conversationReportMessageHandledEventDataSchema = z
   })
   .strict();
 
-const conversationReportToolStartedEventDataSchema = z
-  .object({
-    type: z.literal("tool_started"),
-    toolCallId: z.string().min(1),
-    name: z.string().min(1),
-  })
-  .strict();
-
 const conversationReportToolCallSchema = z
   .object({
     toolCallId: z.string().min(1),
     name: z.string().min(1),
+    status: z.enum(["running", "completed", "error"]),
+    startedAt: z.string().datetime().optional(),
+    startedSeq: z.number().int().nonnegative().optional(),
     input: z.unknown().optional(),
+    output: z.unknown().optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((call, context) => {
+    if ((call.startedAt === undefined) !== (call.startedSeq === undefined)) {
+      context.addIssue({
+        code: "custom",
+        message: "tool start sequence and timestamp must be provided together",
+      });
+    }
+  });
 
 const conversationReportToolCallsEventDataSchema = z
   .object({
     type: z.literal("tool_calls"),
     calls: z.array(conversationReportToolCallSchema).min(1),
-  })
-  .strict();
-
-const conversationReportToolResultEventDataSchema = z
-  .object({
-    type: z.literal("tool_result"),
-    toolCallId: z.string().min(1),
-    outcome: z.enum(["completed", "error"]),
-    output: z.unknown().optional(),
   })
   .strict();
 
@@ -166,20 +174,15 @@ const conversationReportHandoffEventDataSchema = z
   })
   .strict();
 
-const conversationReportSubagentStartedEventDataSchema = z
+const conversationReportSubagentEventDataSchema = z
   .object({
-    type: z.literal("subagent_started"),
+    type: z.literal("subagent"),
+    startedSeq: z.number().int().nonnegative(),
+    startedAt: z.string().datetime(),
     childConversationId: z.string().min(1),
     subagentKind: z.string().min(1),
     parentToolCallId: z.string().min(1).optional(),
-  })
-  .strict();
-
-const conversationReportSubagentEndedEventDataSchema = z
-  .object({
-    type: z.literal("subagent_ended"),
-    startedSeq: z.number().int().nonnegative(),
-    outcome: z.enum(["success", "error", "aborted"]),
+    status: z.enum(["running", "completed", "error", "aborted"]),
   })
   .strict();
 
@@ -187,14 +190,11 @@ const conversationReportSubagentEndedEventDataSchema = z
 export const conversationReportEventDataSchema = z.discriminatedUnion("type", [
   conversationReportMessageEventDataSchema,
   conversationReportMessageHandledEventDataSchema,
-  conversationReportToolStartedEventDataSchema,
   conversationReportToolCallsEventDataSchema,
-  conversationReportToolResultEventDataSchema,
   conversationReportTurnLifecycleEventDataSchema,
   conversationReportCompactionEventDataSchema,
   conversationReportHandoffEventDataSchema,
-  conversationReportSubagentStartedEventDataSchema,
-  conversationReportSubagentEndedEventDataSchema,
+  conversationReportSubagentEventDataSchema,
 ]);
 
 /** One ordered, privacy-safe canonical event projected for API consumers. */
@@ -230,79 +230,90 @@ export const conversationModelUsageSchema = z
   })
   .strict();
 
+/** Enforce event ordering and history visibility across paginated wire payloads. */
+function validateConversationEvents(
+  report: {
+    eventHistory: z.infer<typeof conversationEventHistorySchema>;
+    events: z.infer<typeof conversationReportEventSchema>[];
+  },
+  context: z.RefinementCtx,
+): void {
+  if (report.eventHistory.status === "expired" && report.events.length > 0) {
+    context.addIssue({
+      code: "custom",
+      path: ["events"],
+      message: "expired event history must not contain events",
+    });
+  }
+  for (let index = 1; index < report.events.length; index += 1) {
+    if (report.events[index]!.seq <= report.events[index - 1]!.seq) {
+      context.addIssue({
+        code: "custom",
+        path: ["events", index, "seq"],
+        message: "report event sequences must be strictly increasing",
+      });
+    }
+  }
+  for (const [index, event] of report.events.entries()) {
+    if (event.data.type === "message") {
+      if (
+        report.eventHistory.status === "redacted" &&
+        event.data.redacted !== true
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: ["events", index, "data"],
+          message: "redacted event history must redact messages",
+        });
+      }
+      if (
+        report.eventHistory.status === "available" &&
+        event.data.redacted === true
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: ["events", index, "data"],
+          message: "available event history must expose messages",
+        });
+      }
+    }
+    if (
+      report.eventHistory.status === "redacted" &&
+      event.data.type === "tool_calls" &&
+      event.data.calls.some(
+        (call) => call.input !== undefined || call.output !== undefined,
+      )
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["events", index, "data"],
+        message: "redacted event history must redact tool payloads",
+      });
+    }
+  }
+}
+
 export const conversationDetailReportSchema = conversationSummaryReportSchema
   .extend({
     modelUsage: z.array(conversationModelUsageSchema).optional(),
     events: z.array(conversationReportEventSchema),
     eventHistory: conversationEventHistorySchema,
+    previousCursor: z.string().min(1).optional(),
     generatedAt: z.string(),
     sentryConversationUrl: z.string().optional(),
   })
   .strict()
-  .superRefine((report, context) => {
-    if (report.eventHistory.status === "expired" && report.events.length > 0) {
-      context.addIssue({
-        code: "custom",
-        path: ["events"],
-        message: "expired event history must not contain events",
-      });
-    }
-    for (let index = 1; index < report.events.length; index += 1) {
-      if (report.events[index]!.seq <= report.events[index - 1]!.seq) {
-        context.addIssue({
-          code: "custom",
-          path: ["events", index, "seq"],
-          message: "report event sequences must be strictly increasing",
-        });
-      }
-    }
-    for (const [index, event] of report.events.entries()) {
-      if (event.data.type === "message") {
-        if (
-          report.eventHistory.status === "redacted" &&
-          event.data.redacted !== true
-        ) {
-          context.addIssue({
-            code: "custom",
-            path: ["events", index, "data"],
-            message: "redacted event history must redact messages",
-          });
-        }
-        if (
-          report.eventHistory.status === "available" &&
-          event.data.redacted === true
-        ) {
-          context.addIssue({
-            code: "custom",
-            path: ["events", index, "data"],
-            message: "available event history must expose messages",
-          });
-        }
-      }
-      if (
-        report.eventHistory.status === "redacted" &&
-        event.data.type === "tool_calls" &&
-        event.data.calls.some((call) => call.input !== undefined)
-      ) {
-        context.addIssue({
-          code: "custom",
-          path: ["events", index, "data"],
-          message: "redacted event history must redact tool inputs",
-        });
-      }
-      if (
-        report.eventHistory.status === "redacted" &&
-        event.data.type === "tool_result" &&
-        event.data.output !== undefined
-      ) {
-        context.addIssue({
-          code: "custom",
-          path: ["events", index, "data"],
-          message: "redacted event history must redact tool outputs",
-        });
-      }
-    }
-  });
+  .superRefine(validateConversationEvents);
+
+export const conversationEventPageSchema = z
+  .object({
+    events: z.array(conversationReportEventSchema),
+    eventHistory: conversationEventHistorySchema,
+    previousCursor: z.string().min(1).optional(),
+    generatedAt: z.string(),
+  })
+  .strict()
+  .superRefine(validateConversationEvents);
 
 export const conversationFeedSchema = z
   .object({
@@ -376,6 +387,7 @@ export type ConversationEventHistory = z.infer<
 export type ConversationDetailReport = z.infer<
   typeof conversationDetailReportSchema
 >;
+export type ConversationEventPage = z.infer<typeof conversationEventPageSchema>;
 export type ConversationFeed = z.infer<typeof conversationFeedSchema>;
 export type ConversationStatsItem = z.infer<typeof conversationStatsItemSchema>;
 export type ConversationMetricDay = z.infer<typeof conversationMetricDaySchema>;
