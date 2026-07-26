@@ -3,6 +3,7 @@ import {
   definePluginTool,
   PluginToolInputError,
   pluginToolResultSchema,
+  toolApprovalModeSchema,
   zodTool,
 } from "@sentry/junior-plugin-api";
 import { z } from "zod";
@@ -15,6 +16,25 @@ const countResultSchema = pluginToolResultSchema.extend({
 });
 
 describe("definePluginTool", () => {
+  it("preserves the declared approval mode", () => {
+    const tool = definePluginTool({
+      approvalMode: "review",
+      description: "Schedule a meeting.",
+      inputSchema: z.object({}),
+      outputSchema: countResultSchema,
+      execute: async () =>
+        ({
+          ok: true,
+          status: "success",
+          data: { count: 1 },
+          count: 1,
+        }) as const,
+    });
+
+    expect(tool.approvalMode).toBe("review");
+    expect(toolApprovalModeSchema.safeParse("unexpected").success).toBe(false);
+  });
+
   it("projects Zod input schemas to JSON Schema and parses tool arguments", async () => {
     const execute = vi.fn(
       async (input: { count: number }) =>

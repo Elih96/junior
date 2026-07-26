@@ -28,8 +28,12 @@ const demoToolResultSchema = pluginToolResultSchema.extend({
   status: z.literal("success"),
 });
 
-function demoPluginTool(description = "Demo tool") {
+function demoPluginTool(
+  description = "Demo tool",
+  approvalMode?: "auto" | "review" | "approve",
+) {
   return definePluginTool({
+    approvalMode,
     description,
     inputSchema: z.object({}),
     outputSchema: demoToolResultSchema,
@@ -412,7 +416,7 @@ describe("agent plugin hooks", () => {
           tools(ctx) {
             expect(ctx.actor).toEqual(TEST_ACTOR);
             return {
-              demoTool: demoPluginTool(),
+              demoTool: demoPluginTool("Demo tool", "review"),
             };
           },
         },
@@ -438,6 +442,7 @@ describe("agent plugin hooks", () => {
         id: "agent-demo",
         description: "Agent demo",
       });
+      expect(tools.agentDemo_demoTool?.approvalMode).toBe("review");
     } finally {
       setPlugins(previous);
     }
