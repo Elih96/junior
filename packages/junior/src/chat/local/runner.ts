@@ -54,6 +54,13 @@ import {
 import type { ConversationTurnFailureCode } from "@/chat/conversations/history";
 import { persistConversationMessages } from "@/chat/conversations/messages";
 import { persistWithRetry } from "@/chat/services/persist-retry";
+import { completeAuthPauseTurn } from "@/chat/runtime/auth-pause-state";
+import { recordAuthorizationCompleted } from "@/chat/conversations/projection";
+import {
+  authorizationId,
+  type OAuthAuthorization,
+} from "@/chat/oauth-authorization";
+import type { SandboxEgressSignalTransport } from "@/chat/sandbox/egress/signals";
 
 const SENTRY_EVENT_ID_PATTERN = /^[a-f0-9]{32}$/i;
 
@@ -82,9 +89,15 @@ export type LocalToolResult = ToolExecutionReport;
 
 export interface LocalAgentTurnDeps {
   agentRunner: AgentRunner;
+  /** Complete local OAuth callback lifecycle; omit to disable interactive auth. */
+  authorization?: OAuthAuthorization & {
+    cancel: () => void;
+    wait: () => Promise<void>;
+  };
   /** Post-delivery Pi/session persistence boundary. */
   completeDeliveredTurn?: typeof completeDeliveredTurn;
   deliverReply: (reply: LocalAgentReply) => Promise<void>;
+  sandboxEgressSignals?: SandboxEgressSignalTransport;
   /** Pre-agent durable Pi projection boundary. */
   loadPiMessages?: typeof loadLocalPiMessages;
   /** Injectable failure capture boundary for deterministic runtime integration tests. */
@@ -117,17 +130,24 @@ function localTurnId(): string {
   return `local-turn-${randomUUID()}`;
 }
 
+function localRunId(): string {
+  return `local-run-${randomUUID()}`;
+}
+
 function captureLocalBoundaryFailure(args: {
   capture: typeof logException;
   conversationId: string;
   error: unknown;
   failureCode: ConversationTurnFailureCode;
-  turnId: string;
+  runId?: string;
 }): string | undefined {
   const eventId = args.capture(
     args.error,
     LOCAL_FAILURE_EVENT_NAMES[args.failureCode],
-    { conversationId: args.conversationId, runId: args.turnId },
+    {
+      conversationId: args.conversationId,
+      ...(args.runId ? { runId: args.runId } : {}),
+    },
     { "app.ai.failure_code": args.failureCode },
     "Local agent turn failed at its owning runtime boundary",
   );
@@ -219,6 +239,8 @@ export async function runLocalAgentTurn(
   let failureCode: ConversationTurnFailureCode = "persistence_failed";
   let modelFailureEventId: string | undefined;
   let modelFailureCaptureAttempted = false;
+  let currentRunId: string | undefined;
+  let completionSliceId = 1;
   const localActor = {
     fullName: "Local CLI",
     platform: "local" as const,
@@ -266,66 +288,123 @@ export async function runLocalAgentTurn(
       conversationId: input.conversationId,
     });
     failureCode = "agent_run_failed";
-    const outcome = await deps.agentRunner.run({
-      conversationId: input.conversationId,
-      turnId,
-      runId: turnId,
-      input: {
-        messageText: text,
-        conversationContext: buildConversationContext(conversation, {
-          excludeMessageId: userMessageId,
-        }),
-        piMessages,
-      },
-      routing: {
-        credentialContext: {
-          actor: { platform: "system", name: "local-cli" },
+    const runAgent = async (messages: PiMessage[] | undefined) => {
+      currentRunId = localRunId();
+      const authorization = deps.authorization
+        ? {
+            createState: deps.authorization.createState,
+            deliver: deps.authorization.deliver,
+          }
+        : undefined;
+      return await deps.agentRunner.run({
+        conversationId: input.conversationId,
+        turnId,
+        runId: currentRunId,
+        input: {
+          messageText: text,
+          conversationContext: buildConversationContext(conversation, {
+            excludeMessageId: userMessageId,
+          }),
+          piMessages: messages,
         },
-        destination,
-        source,
-        actor: localActor,
-        surface: "internal",
-      },
-      policy: {
-        authorizationFlowMode: "disabled",
-      },
-      state: {
-        artifactState: artifacts,
+        routing: {
+          credentialContext: {
+            actor: { type: "user", userId: "local-cli" },
+          },
+          destination,
+          source,
+          actor: localActor,
+          surface: "internal",
+        },
+        authorization,
+        policy: {
+          authorizationFlowMode: deps.authorization
+            ? "interactive"
+            : "disabled",
+          sandboxEgressSignals: deps.sandboxEgressSignals,
+        },
+        state: {
+          artifactState: artifacts,
+          pendingAuth: conversation.processing.pendingAuth,
+          sandboxRef,
+        },
+        observers: {
+          onStatus: async (status) => {
+            await deps.onStatus?.(status.text);
+          },
+          onToolInvocation: async (invocation) => {
+            await deps.onToolInvocation?.(invocation);
+          },
+          onToolResult: async (result) => {
+            await deps.onToolResult?.(result);
+          },
+        },
+        delivery: {
+          onAssistantMessage: deliverAssistantMessage,
+        },
+        durability: {
+          onArtifactStateUpdated: async (nextArtifacts) => {
+            artifacts = nextArtifacts;
+            await persistThreadStateById(input.conversationId, {
+              artifacts,
+              conversation,
+              sandboxRef,
+            });
+          },
+          onSandboxRefChanged: async (nextSandboxRef) => {
+            sandboxRef = nextSandboxRef;
+            await persistThreadStateById(input.conversationId, {
+              artifacts,
+              conversation,
+              sandboxRef,
+            });
+          },
+          recordPendingAuth: async (pendingAuth) => {
+            conversation.processing.pendingAuth = pendingAuth;
+            await persistThreadStateById(input.conversationId, {
+              artifacts,
+              conversation,
+              sandboxRef,
+            });
+          },
+        },
+      });
+    };
+
+    let outcome = await runAgent(piMessages);
+    while (outcome.status === "awaiting_auth") {
+      const pendingAuth = conversation.processing.pendingAuth;
+      if (!pendingAuth || !deps.authorization) {
+        throw new Error(
+          "Local OAuth requires an active callback server and authorization delivery.",
+        );
+      }
+      completeAuthPauseTurn({ conversation, sessionId: turnId });
+      await persistThreadStateById(input.conversationId, {
+        artifacts,
+        conversation,
         sandboxRef,
-      },
-      observers: {
-        onStatus: async (status) => {
-          await deps.onStatus?.(status.text);
-        },
-        onToolInvocation: async (invocation) => {
-          await deps.onToolInvocation?.(invocation);
-        },
-        onToolResult: async (result) => {
-          await deps.onToolResult?.(result);
-        },
-      },
-      delivery: {
-        onAssistantMessage: deliverAssistantMessage,
-      },
-      durability: {
-        onArtifactStateUpdated: async (nextArtifacts) => {
-          artifacts = nextArtifacts;
-          await persistThreadStateById(input.conversationId, {
-            artifacts,
-            conversation,
-            sandboxRef,
-          });
-        },
-        onSandboxRefChanged: async (nextSandboxRef) => {
-          sandboxRef = nextSandboxRef;
-          await persistThreadStateById(input.conversationId, {
-            artifacts,
-            conversation,
-            sandboxRef,
-          });
-        },
-      },
-    });
+      });
+      await deps.authorization.wait();
+      await recordAuthorizationCompleted({
+        conversationId: input.conversationId,
+        kind: pendingAuth.kind,
+        provider: pendingAuth.provider,
+        actorId: pendingAuth.actorId,
+        authorizationId: authorizationId({
+          sessionId: turnId,
+          kind: pendingAuth.kind,
+          provider: pendingAuth.provider,
+        }),
+      });
+      // Resuming after authorization starts the next durable session slice.
+      completionSliceId += 1;
+      outcome = await runAgent(
+        await (deps.loadPiMessages ?? loadLocalPiMessages)({
+          conversationId: input.conversationId,
+        }),
+      );
+    }
     if (outcome.status !== "completed") {
       throw new Error(`Local agent run ended with ${outcome.status}`);
     }
@@ -354,6 +433,7 @@ export async function runLocalAgentTurn(
       userMessageId,
     });
   } catch (error) {
+    deps.authorization?.cancel();
     const failureEventId =
       modelFailureCaptureAttempted && failureCode === "agent_run_failed"
         ? modelFailureEventId
@@ -362,7 +442,7 @@ export async function runLocalAgentTurn(
             conversationId: input.conversationId,
             error,
             failureCode,
-            turnId,
+            runId: currentRunId,
           });
     try {
       markTurnFailed({
@@ -384,7 +464,7 @@ export async function runLocalAgentTurn(
         conversationId: input.conversationId,
         error: persistenceError,
         failureCode: "persistence_failed",
-        turnId,
+        runId: currentRunId,
       });
       await lifecycle.fail({
         conversationId: input.conversationId,
@@ -408,6 +488,7 @@ export async function runLocalAgentTurn(
     throw error;
   }
 
+  deps.authorization?.cancel();
   try {
     await persistThreadStateById(input.conversationId, {
       artifacts: completedState.artifacts ?? artifacts,
@@ -421,7 +502,7 @@ export async function runLocalAgentTurn(
       await (deps.completeDeliveredTurn ?? completeDeliveredTurn)({
         conversationId: input.conversationId,
         sessionId: turnId,
-        sliceId: 1,
+        sliceId: completionSliceId,
         messages: reply.piMessages,
         modelId: reply.diagnostics.modelId,
         durationMs: reply.diagnostics.durationMs,
@@ -439,7 +520,7 @@ export async function runLocalAgentTurn(
       conversationId: input.conversationId,
       error,
       failureCode: "persistence_failed",
-      turnId,
+      runId: currentRunId,
     });
     await lifecycle.fail({
       conversationId: input.conversationId,

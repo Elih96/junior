@@ -65,6 +65,7 @@ import { scheduleAgentContinue } from "@/chat/services/agent-continue";
 import type { AgentRunResult } from "@/chat/services/turn-result";
 import type { AgentRunner } from "@/chat/runtime/agent-runner";
 import { requireSlackDestination } from "@/chat/destination";
+import { relayLocalOAuthCallback } from "@/chat/local/oauth-relay";
 
 interface OAuthCallbackOptions {
   agentRunner: AgentRunner;
@@ -73,9 +74,11 @@ interface OAuthCallbackOptions {
 /**
  * OAuth callback contract for `@sentry/junior`.
  *
- * Providers redirect users to a concrete GET endpoint (`/api/oauth/callback/:provider`).
- * We complete token exchange synchronously for correctness, then use `waitUntil(...)`
- * for best-effort Slack side effects so the browser response returns quickly.
+ * Providers redirect users to `/api/oauth/callback/:provider`. A public signed
+ * callback relays to the owning CLI; the loopback callback exchanges and stores
+ * the local credential while the CLI owns continuation. Slack callbacks
+ * exchange credentials synchronously, then use `waitUntil(...)` for
+ * best-effort resume side effects.
  */
 function htmlErrorResponse(
   title: string,
@@ -488,6 +491,10 @@ export async function GET(
   waitUntil: WaitUntilFn,
   options: OAuthCallbackOptions,
 ): Promise<Response> {
+  const localRelay = await relayLocalOAuthCallback(request);
+  if (localRelay) {
+    return localRelay;
+  }
   const providerConfig = pluginCatalogRuntime.getOAuthConfig(provider);
   if (!providerConfig) {
     return htmlErrorResponse(
@@ -512,13 +519,13 @@ export async function GET(
     if (errorParam === "access_denied") {
       return htmlErrorResponse(
         "Authorization declined",
-        `You declined the ${providerLabel} authorization request. Return to Slack and ask Junior to connect your ${providerLabel} account again if you change your mind.`,
+        `You declined the ${providerLabel} authorization request. Return to Junior and connect your ${providerLabel} account again if you change your mind.`,
         400,
       );
     }
     return htmlErrorResponse(
       "Authorization failed",
-      `${providerLabel} returned an error: ${errorParam}. Return to Slack and try again.`,
+      `${providerLabel} returned an error: ${errorParam}. Return to Junior and try again.`,
       400,
     );
   }
@@ -537,7 +544,7 @@ export async function GET(
   if (!stored) {
     return htmlErrorResponse(
       "Link expired",
-      `This authorization link has expired (links are valid for 10 minutes). Return to Slack and ask Junior to connect your ${providerLabel} account again to get a new link.`,
+      `This authorization link has expired (links are valid for 10 minutes). Return to Junior and connect your ${providerLabel} account again to get a new link.`,
       400,
     );
   }
@@ -625,7 +632,7 @@ export async function GET(
   if (!hasRequiredOAuthScope(parsedTokenResponse.scope, requestedScope)) {
     return htmlErrorResponse(
       "Connection failed",
-      `The ${providerLabel} authorization did not grant the access Junior requires. Return to Slack and ask Junior to connect your ${providerLabel} account again.`,
+      `The ${providerLabel} authorization did not grant the access Junior requires. Return to Junior and connect your ${providerLabel} account again.`,
       400,
     );
   }
@@ -649,16 +656,24 @@ export async function GET(
     ...(account ? { account } : {}),
   });
 
-  waitUntil(async () => {
-    try {
-      await publishAppHomeView(getSlackClient(), stored.userId, userTokenStore);
-    } catch {
-      // best effort
-    }
-  });
+  if (stored.destination?.platform !== "local") {
+    waitUntil(async () => {
+      try {
+        await publishAppHomeView(
+          getSlackClient(),
+          stored.userId,
+          userTokenStore,
+        );
+      } catch {
+        // best effort
+      }
+    });
+  }
 
   const resumesAgentTurn = Boolean(
-    stored.resumeConversationId && stored.resumeSessionId,
+    stored.destination?.platform !== "local" &&
+    stored.resumeConversationId &&
+    stored.resumeSessionId,
   );
   if (resumesAgentTurn) {
     waitUntil(async () => {
@@ -701,9 +716,12 @@ export async function GET(
     );
   }
 
-  const statusMessage = resumesAgentTurn
-    ? "Your request is being processed in Slack."
-    : "You can close this tab and return to Slack.";
+  const statusMessage =
+    stored.destination?.platform === "local"
+      ? "Your request is continuing in the local Junior client."
+      : resumesAgentTurn
+        ? "Your request is being processed in Slack."
+        : "You can close this tab and return to Slack.";
   const html = `<!DOCTYPE html>
 <html>
 <head><title>${providerLabel} Connected</title></head>

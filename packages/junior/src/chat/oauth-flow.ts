@@ -16,7 +16,11 @@ import {
   postSlackEphemeralMessage,
   postSlackMessage,
 } from "@/chat/slack/outbound";
-import { formatOAuthAuthorizationMessage } from "@/chat/oauth-authorization-message";
+import type {
+  OAuthAuthorization,
+  OAuthAuthorizationRequest,
+} from "@/chat/oauth-authorization";
+import { formatOAuthAuthorizationMessage } from "@/chat/slack/oauth-authorization-message";
 import { isRecord } from "@/chat/coerce";
 import { getStateAdapter } from "@/chat/state/adapter";
 
@@ -44,6 +48,7 @@ type OAuthFlowInput = {
   resumeConversationId?: string;
   resumeSessionId?: string;
   scope?: string;
+  authorization?: OAuthAuthorization;
 };
 
 const OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
@@ -207,6 +212,28 @@ export async function deliverPrivateMessage(input: {
   }
 }
 
+/** Present one OAuth request through the active surface's private delivery. */
+export async function deliverOAuthAuthorization(
+  request: OAuthAuthorizationRequest,
+  input: {
+    authorization?: OAuthAuthorization;
+    channelId?: string;
+    threadTs?: string;
+    userId: string;
+  },
+): Promise<PrivateDeliveryResult> {
+  if (input.authorization) {
+    await input.authorization.deliver(request);
+    return "in_context";
+  }
+  return await deliverPrivateMessage({
+    channelId: input.channelId,
+    threadTs: input.threadTs,
+    userId: input.userId,
+    text: formatOAuthAuthorizationMessage(request),
+  });
+}
+
 /** Initiate an OAuth authorization code flow for a provider and deliver the auth link to the user. */
 export async function startOAuthFlow(
   provider: string,
@@ -239,7 +266,9 @@ export async function startOAuthFlow(
     };
   }
 
-  const state = randomBytes(32).toString("hex");
+  const state = input.authorization
+    ? await input.authorization.createState()
+    : randomBytes(32).toString("hex");
   const requestedScope = input.scope ?? providerConfig.scope;
 
   await getStateAdapter().set(
@@ -290,18 +319,20 @@ export async function startOAuthFlow(
   );
 
   const authorizationUrl = `${providerConfig.authorizeEndpoint}?${authorizeParams.toString()}`;
+  const authorizationRequest = {
+    authorizationUrl,
+    label: `Click here to link your ${formatProviderLabel(provider)} account`,
+    completionText: input.resumeSessionId
+      ? "Once you've authorized, Junior will continue automatically."
+      : "Once you've authorized, you'll see a confirmation in Slack.",
+  };
   return {
     ok: true,
-    delivery: await deliverPrivateMessage({
+    delivery: await deliverOAuthAuthorization(authorizationRequest, {
+      authorization: input.authorization,
       channelId: input.channelId,
       threadTs: input.threadTs,
       userId: input.actorId,
-      text: formatOAuthAuthorizationMessage({
-        authorizationUrl,
-        label: `Click here to link your ${formatProviderLabel(provider)} account`,
-        completionText:
-          "Once you've authorized, you'll see a confirmation in Slack.",
-      }),
     }),
   };
 }

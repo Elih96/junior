@@ -34,6 +34,7 @@ export async function createMcpOAuthClientProvider(input: {
   toolChannelId?: string;
   configuration?: Record<string, unknown>;
   artifactState?: ThreadArtifactsState;
+  createAuthorizationState?: () => Promise<string>;
 }): Promise<StateBackedMcpOAuthClientProvider> {
   requirePluginWithMcp(input.provider);
 
@@ -44,7 +45,9 @@ export async function createMcpOAuthClientProvider(input: {
     );
   }
 
-  const authSessionId = randomUUID();
+  const authSessionId = input.createAuthorizationState
+    ? await input.createAuthorizationState()
+    : randomUUID();
 
   return new StateBackedMcpOAuthClientProvider(
     authSessionId,

@@ -10,12 +10,14 @@ export async function runMcpOauthCallbackRoute(args: {
   state: string;
   code: string;
   agentRunner?: AgentRunner;
+  expectBackgroundWork?: boolean;
+  relayed?: boolean;
 }) {
   waitUntilCallbacks.length = 0;
   const { GET } = await import("@/handlers/mcp-oauth-callback");
   const response = await GET(
     new Request(
-      `https://junior.example.com/api/oauth/callback/mcp/${args.provider}?state=${encodeURIComponent(args.state)}&code=${encodeURIComponent(args.code)}`,
+      `https://junior.example.com/api/oauth/callback/mcp/${args.provider}?state=${encodeURIComponent(args.state)}&code=${encodeURIComponent(args.code)}${args.relayed ? "&jr_local_relay=complete" : ""}`,
       { method: "GET" },
     ),
     args.provider,
@@ -23,10 +25,19 @@ export async function runMcpOauthCallbackRoute(args: {
     { agentRunner: args.agentRunner ?? realAgentRunner },
   );
   const callbacks = waitUntilCallbacks.splice(0, waitUntilCallbacks.length);
+  if (args.expectBackgroundWork === false && callbacks.length > 0) {
+    throw new Error(
+      `MCP OAuth callback route registered unexpected waitUntil() work for provider "${args.provider}"`,
+    );
+  }
   for (const callback of callbacks) {
     await callback();
   }
-  if (response.status === 200 && callbacks.length === 0) {
+  if (
+    response.status === 200 &&
+    callbacks.length === 0 &&
+    args.expectBackgroundWork !== false
+  ) {
     throw new Error(
       `MCP OAuth callback route returned 200 without registering waitUntil() work for provider "${args.provider}"`,
     );
@@ -39,6 +50,8 @@ export async function completeMcpOauthCallbackRoute(args: {
   provider: string;
   authSessionId: string;
   agentRunner?: AgentRunner;
+  expectBackgroundWork?: boolean;
+  relayed?: boolean;
 }) {
   const { getMcpAuthSession } = await import("@/chat/mcp/auth-store");
   const session = await getMcpAuthSession(args.authSessionId);
@@ -63,5 +76,9 @@ export async function completeMcpOauthCallbackRoute(args: {
     state,
     code,
     ...(args.agentRunner ? { agentRunner: args.agentRunner } : {}),
+    ...(args.expectBackgroundWork === false
+      ? { expectBackgroundWork: false }
+      : {}),
+    ...(args.relayed ? { relayed: true } : {}),
   });
 }

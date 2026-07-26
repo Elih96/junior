@@ -189,10 +189,12 @@ describe("local agent runner", () => {
     expect(generateReply).toHaveBeenCalledWith(
       expect.objectContaining({
         input: expect.objectContaining({ messageText: "hello" }),
-        policy: expect.objectContaining({ authorizationFlowMode: "disabled" }),
+        policy: expect.objectContaining({
+          authorizationFlowMode: "disabled",
+        }),
         routing: expect.objectContaining({
           credentialContext: {
-            actor: { platform: "system", name: "local-cli" },
+            actor: { type: "user", userId: "local-cli" },
           },
           destination: {
             platform: "local",
@@ -267,6 +269,88 @@ describe("local agent runner", () => {
     expect(history[completed]?.data).toMatchObject({
       type: "turn_completed",
       outcome: "success",
+    });
+  });
+
+  it("waits for local OAuth and resumes the same turn", async () => {
+    const conversationId = normalizeLocalConversationId({
+      alias: "oauth-resume",
+      cwd: "/tmp/local-agent-runner-oauth-resume",
+    });
+    expect(conversationId).toBeDefined();
+    const requests: Parameters<AgentRunner["run"]>[0][] = [];
+    const deliverAuthorizationRequest =
+      vi.fn<NonNullable<LocalAgentTurnDeps["authorization"]>["deliver"]>();
+    const waitForAuthorization = vi.fn(async () => undefined);
+    const completeDeliveredTurn = vi.fn(async () => undefined);
+
+    await runLocalAgentTurn(
+      {
+        conversationId: conversationId!,
+        message: "upload the image",
+      },
+      {
+        agentRunner: {
+          run: async (request) => {
+            requests.push(request);
+            if (requests.length === 1) {
+              await request.durability?.recordPendingAuth?.({
+                kind: "plugin",
+                provider: "github",
+                actorId: "local-cli",
+                sessionId: request.turnId,
+                linkSentAtMs: Date.now(),
+              });
+              await request.authorization?.deliver({
+                authorizationUrl: "https://github.com/login/oauth/authorize",
+                completionText: "Once authorized, this request will continue.",
+                label: "Connect GitHub",
+              });
+              return {
+                status: "awaiting_auth",
+                providerDisplayName: "GitHub",
+              };
+            }
+            await deliverAssistantText(request, "uploaded");
+            return completedAgentRun(
+              successReply("uploaded", {
+                piMessages: [
+                  {
+                    role: "assistant",
+                    content: [{ type: "text", text: "uploaded" }],
+                  },
+                ] as PiMessage[],
+              }),
+            );
+          },
+        },
+        authorization: {
+          cancel: vi.fn(),
+          createState: vi.fn(async () => "local-oauth-state"),
+          deliver: deliverAuthorizationRequest,
+          wait: waitForAuthorization,
+        },
+        completeDeliveredTurn,
+        deliverReply: async () => undefined,
+      },
+    );
+
+    expect(deliverAuthorizationRequest).toHaveBeenCalledOnce();
+    expect(waitForAuthorization).toHaveBeenCalledOnce();
+    expect(requests).toHaveLength(2);
+    expect(requests[0]?.turnId).toBe(requests[1]?.turnId);
+    expect(requests[0]?.runId).not.toBe(requests[1]?.runId);
+    expect(completeDeliveredTurn).toHaveBeenCalledWith(
+      expect.objectContaining({ sliceId: 2 }),
+    );
+    expect(requests[0]?.policy).toMatchObject({
+      authorizationFlowMode: "interactive",
+    });
+    expect(requests[0]?.authorization).toBeDefined();
+    expect(requests[1]?.state?.pendingAuth).toMatchObject({
+      kind: "plugin",
+      provider: "github",
+      actorId: "local-cli",
     });
   });
 
@@ -400,11 +484,18 @@ describe("local agent runner", () => {
     const rawError = "raw-run-error-sentinel token=secret";
     const eventId = "11111111111111111111111111111111";
     const capture = vi.fn().mockReturnValue(eventId);
+    const cancelAuthorization = vi.fn();
 
     await expect(
       runLocalAgentTurn(
         { conversationId: conversationId!, message: "please try" },
         {
+          authorization: {
+            cancel: cancelAuthorization,
+            createState: vi.fn(async () => "local-oauth-state"),
+            deliver: vi.fn(),
+            wait: vi.fn(),
+          },
           agentRunner: {
             run: async () => {
               throw new Error(rawError);
@@ -423,6 +514,10 @@ describe("local agent runner", () => {
       eventId,
     });
     expect(capture).toHaveBeenCalledOnce();
+    expect(capture.mock.calls[0]?.[2]).toMatchObject({
+      runId: expect.stringMatching(/^local-run-[0-9a-f-]{36}$/),
+    });
+    expect(cancelAuthorization).toHaveBeenCalledOnce();
     expect(JSON.stringify(lifecycle)).not.toContain(rawError);
   });
 

@@ -2,9 +2,9 @@
  * MCP authorization pause orchestration.
  *
  * This module turns an MCP client auth challenge into Junior's paused-run
- * model: create provider auth state, deliver or reuse a private Slack link,
- * record pending auth, and abort the agent so the OAuth callback can resume the
- * same session.
+ * model: create provider auth state, privately present or reuse its link,
+ * record pending auth, and abort the agent so the OAuth callback can resume
+ * the same session.
  */
 import type { OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
 import type { Destination, Source } from "@sentry/junior-plugin-api";
@@ -14,8 +14,14 @@ import {
   getMcpAuthSession,
   patchMcpAuthSession,
 } from "@/chat/mcp/auth-store";
-import { formatOAuthAuthorizationMessage } from "@/chat/oauth-authorization-message";
-import { deliverPrivateMessage, formatProviderLabel } from "@/chat/oauth-flow";
+import {
+  authorizationId,
+  type OAuthAuthorization,
+} from "@/chat/oauth-authorization";
+import {
+  deliverOAuthAuthorization,
+  formatProviderLabel,
+} from "@/chat/oauth-flow";
 import {
   abandonReplacedPendingAuth,
   canReusePendingAuthLink,
@@ -60,6 +66,7 @@ export interface McpAuthOrchestrationInput {
     pendingAuth: ConversationPendingAuthState | undefined,
   ) => void | Promise<void>;
   authorizationFlowMode?: AuthorizationFlowMode;
+  authorization?: OAuthAuthorization;
 }
 
 export interface McpAuthOrchestration {
@@ -68,14 +75,6 @@ export interface McpAuthOrchestration {
   ) => Promise<OAuthClientProvider | undefined>;
   onAuthorizationRequired: (provider: string) => Promise<boolean>;
   getPendingPause: () => McpAuthorizationPauseError | undefined;
-}
-
-function authorizationId(args: {
-  kind: "mcp";
-  provider: string;
-  sessionId: string;
-}): string {
-  return `${args.sessionId}:${args.kind}:${args.provider}`;
 }
 
 /** Create MCP authorization orchestration for a single agent run. */
@@ -113,6 +112,7 @@ export function createMcpAuthOrchestration(
       ...(input.toolChannelId ? { toolChannelId: input.toolChannelId } : {}),
       configuration: input.getConfiguration(),
       artifactState: input.getArtifactState(),
+      createAuthorizationState: input.authorization?.createState,
     });
     authSessionIdsByProvider.set(plugin.manifest.name, provider.authSessionId);
     return provider;
@@ -188,16 +188,17 @@ export function createMcpAuthOrchestration(
         );
       }
       await recordPendingAuth(nextPendingAuth);
-      const delivery = await deliverPrivateMessage({
+      const authorizationRequest = {
+        authorizationUrl: authSession.authorizationUrl,
+        label: `Click here to link your ${providerLabel} MCP access`,
+        completionText:
+          "Once you've authorized, Junior will continue automatically.",
+      };
+      const delivery = await deliverOAuthAuthorization(authorizationRequest, {
+        authorization: input.authorization,
         channelId: authSession.channelId,
         threadTs: authSession.threadTs,
         userId: authSession.userId,
-        text: formatOAuthAuthorizationMessage({
-          authorizationUrl: authSession.authorizationUrl,
-          label: `Click here to link your ${providerLabel} MCP access`,
-          completionText:
-            "Once you've authorized, this thread will continue automatically.",
-        }),
       });
       if (!delivery) {
         await deleteMcpAuthSession(authSessionId);

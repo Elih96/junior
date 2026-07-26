@@ -92,8 +92,7 @@ not replace local QA evidence from running the client or agent.
 
 ## OAuth Flow QA (MCP and Plugin)
 
-Junior has two OAuth pause/resume flows, both resumed by HTTP callbacks into a
-Slack thread:
+Junior has two OAuth pause/resume flows:
 
 - Plugin (non-MCP) OAuth: sandbox egress `auth_required` signal resumes via
   `/api/oauth/callback/<provider>`. In `apps/example` the `sentry` plugin is
@@ -102,22 +101,44 @@ Slack thread:
   `/api/oauth/callback/mcp/<provider>`. In `apps/example` the `linear`,
   `notion`, and `hex` plugins use remote MCP URLs.
 
-The local CLI cannot exercise the pause or the resume: the local runner sets
-`authorizationFlowMode: "disabled"`, so an auth challenge ends the turn with a
-terminal authorization failure instead of a private link plus `pendingAuth`.
-Local chat only proves that terminal surface, for example:
+The local CLI prints the private authorization URL, waits for the provider
+callback, and resumes the same turn as the `local-cli` user. Keep `pnpm dev`
+running so the configured public callback and tunnel can verify the signed
+local state and redirect the browser to the CLI's loopback listener.
+
+Before starting the chat command:
+
+1. Keep one `pnpm dev` process running in the foreground.
+2. Confirm only one Cloudflare tunnel for this development hostname is active.
+3. Probe both callback hops. Each request should reach Junior and return `400`
+   because the probe intentionally omits OAuth state:
+
+```sh
+curl -sS -o /dev/null -w '%{http_code}\n' \
+  http://127.0.0.1:3000/api/oauth/callback/mcp/linear
+curl -sS -o /dev/null -w '%{http_code}\n' \
+  https://junior-dev.sentry.cool/api/oauth/callback/mcp/linear
+```
+
+Do not present an authorization URL until both probes return `400`. A public
+`502` means the tunnel is running without a reachable local server; restart the
+dev command and re-run both probes before creating a fresh OAuth attempt.
 
 ```sh
 pnpm cli -- chat -p "Use the linear skill to list Linear teams."
 ```
 
-Expect a reply reporting that authorization failed, with no OAuth link.
+Expect an authorization URL on stderr. Complete the provider flow in a browser;
+the same CLI process should then continue the blocked request and print its
+reply without requiring the prompt again.
 
-Use the integration tests as the deterministic check for resume behavior:
+Use the integration tests as the deterministic check for both local and Slack
+resume behavior:
 
 ```sh
-pnpm --filter @sentry/junior exec vitest run tests/integration/oauth-callback-slack.test.ts
-pnpm --filter @sentry/junior exec vitest run tests/integration/mcp-oauth-callback-slack.test.ts tests/integration/mcp-auth-runtime-slack.test.ts
+pnpm --filter @sentry/junior exec vitest run tests/integration/local-agent-runner.test.ts
+pnpm --filter @sentry/junior exec vitest run tests/integration/oauth-callback.test.ts
+pnpm --filter @sentry/junior exec vitest run tests/integration/mcp-oauth-callback.test.ts tests/integration/mcp-auth-runtime-slack.test.ts
 ```
 
 For SQL conversation storage changes, verify the resumed turn rebuilds context
@@ -139,6 +160,10 @@ SQL conversation storage cutover; run `pnpm cli -- upgrade`, then rerun.
 If Redis errors appear during ordinary local QA, check whether
 `JUNIOR_STATE_ADAPTER=redis` was set; local chat normally defaults to memory
 state.
+If OAuth returns `502`, verify port 3000 is listening and remove stale duplicate
+dev servers or tunnel clients before retrying. If the provider says the
+authorization expired, discard that URL and start a fresh chat attempt after
+the callback health checks pass.
 
 If the model answer is too loose to prove the behavior, use a narrower prompt,
 an exact-output prompt, interactive mode, or a direct plugin CLI command. If the

@@ -17,6 +17,7 @@ import {
   consumeSandboxEgressPermissionDeniedSignal,
   createSandboxEgressCredentialToken,
 } from "@/chat/sandbox/egress/session";
+import type { SandboxEgressSignalTransport } from "@/chat/sandbox/egress/signals";
 import { formatSandboxCommandResult } from "@/chat/sandbox/command-result";
 import type { SandboxEgressTracePropagationConfig } from "@/chat/sandbox/egress/tracing";
 import type { CredentialContext } from "@/chat/credentials/context";
@@ -79,6 +80,7 @@ export interface SandboxOptions {
   traceContext?: LogContext;
   tracePropagation?: SandboxEgressTracePropagationConfig;
   credentialEgress?: CredentialContext;
+  egressSignals?: SandboxEgressSignalTransport;
   prepare?: (workspace: SandboxWorkspace) => void | Promise<void>;
   onSandboxRefChanged?: (sandboxRef: SandboxRef) => void | Promise<void>;
 }
@@ -150,6 +152,30 @@ export function createSandbox(options: SandboxOptions): SandboxAccess {
       token,
     });
     return token;
+  };
+  const clearEgressSignals = async (egressId: string): Promise<void> => {
+    if (!options.egressSignals) {
+      await clearSandboxEgressSignals(egressId);
+      return;
+    }
+    await options.egressSignals.clear(
+      sandboxEgressCredentialTokenFor(egressId),
+    );
+  };
+  const consumeEgressSignals = async (egressId: string) => {
+    if (options.egressSignals) {
+      return await options.egressSignals.consume(
+        sandboxEgressCredentialTokenFor(egressId),
+      );
+    }
+    const [authRequired, permissionDenied] = await Promise.all([
+      consumeSandboxEgressAuthRequiredSignal(egressId),
+      consumeSandboxEgressPermissionDeniedSignal(egressId),
+    ]);
+    return {
+      ...(authRequired ? { authRequired } : {}),
+      ...(permissionDenied ? { permissionDenied } : {}),
+    };
   };
   const runtime = createSandboxRuntime({
     sandboxRef: options.sandboxRef,
@@ -225,7 +251,7 @@ export function createSandbox(options: SandboxOptions): SandboxAccess {
     });
     const { bash: executeBash, sessionId: activeSessionId } =
       await runtime.tools();
-    await clearSandboxEgressSignals(activeSessionId);
+    await clearEgressSignals(activeSessionId);
     const result = await withSandboxToolSpan(
       "bash",
       "process.exec",
@@ -273,12 +299,10 @@ export function createSandbox(options: SandboxOptions): SandboxAccess {
     // mask the underlying CLI's non-zero exit with the pipe tail's exit code (0),
     // preventing the signal from ever being read. The egress signal is a
     // side-channel from the network layer — not a property of shell exit status —
-    // and `clearSandboxEgressSignals` runs before each execution to prevent
+    // and the signal store is cleared before each execution to prevent
     // cross-command leakage.
-    const authRequired =
-      await consumeSandboxEgressAuthRequiredSignal(activeSessionId);
-    const permissionDenied =
-      await consumeSandboxEgressPermissionDeniedSignal(activeSessionId);
+    const { authRequired, permissionDenied } =
+      await consumeEgressSignals(activeSessionId);
 
     return formatSandboxCommandResult({
       ok: result.exitCode === 0,

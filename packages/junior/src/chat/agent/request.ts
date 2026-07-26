@@ -19,7 +19,9 @@ import type { PiMessage } from "@/chat/pi/messages";
 import type { Actor } from "@/chat/actor";
 import type { SandboxRef } from "@/chat/sandbox/ref";
 import type { SandboxEgressTracePropagationConfig } from "@/chat/sandbox/egress/tracing";
+import type { SandboxEgressSignalTransport } from "@/chat/sandbox/egress/signals";
 import type { AuthorizationFlowMode } from "@/chat/services/auth-pause";
+import type { OAuthAuthorization } from "@/chat/oauth-authorization";
 import type { AssistantStatusSpec } from "@/chat/slack/assistant-thread/status";
 import type { SlackConversationContext } from "@/chat/slack/conversation-context";
 import type { ThreadArtifactsState } from "@/chat/state/artifacts";
@@ -108,6 +110,8 @@ export interface AgentRunPolicy {
   skillDirs?: string[];
   /** Per-slice override for app-owned sandbox egress trace propagation. */
   sandboxTracePropagation?: SandboxEgressTracePropagationConfig;
+  /** Per-slice sandbox egress signal storage override. */
+  sandboxEgressSignals?: SandboxEgressSignalTransport;
   toolOverrides?: {
     imageGenerate?: ImageGenerateToolDeps;
     webFetch?: WebFetchToolDeps;
@@ -182,6 +186,8 @@ export interface AgentRunRequest {
   runId?: string;
   input: AgentRunInput;
   routing: AgentRunRouting;
+  /** Surface-owned OAuth state and private delivery capabilities. */
+  authorization?: OAuthAuthorization;
   policy?: AgentRunPolicy;
   state?: AgentRunState;
   observers?: AgentRunObservers;

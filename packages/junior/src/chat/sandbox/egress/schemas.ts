@@ -73,6 +73,13 @@ export const sandboxEgressPermissionDeniedSignalSchema = z
   })
   .strict();
 
+export const sandboxEgressSignalsResponseSchema = z
+  .object({
+    auth_required: sandboxEgressAuthRequiredSignalSchema.optional(),
+    permission_denied: sandboxEgressPermissionDeniedSignalSchema.optional(),
+  })
+  .strict();
+
 export type SandboxEgressCredentialContext = z.output<
   typeof sandboxEgressCredentialContextSchema
 >;
@@ -86,7 +93,6 @@ export type SandboxEgressAuthRequiredSignal = z.output<
 export type SandboxEgressPermissionDeniedSignal = z.output<
   typeof sandboxEgressPermissionDeniedSignalSchema
 >;
-
 /** Parse a host-owned sandbox egress auth signal from state or tool results. */
 export function parseSandboxEgressAuthRequiredSignal(
   value: unknown,

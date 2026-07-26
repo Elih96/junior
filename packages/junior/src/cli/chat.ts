@@ -225,6 +225,10 @@ function newRunConversationId(): string {
   return conversationId;
 }
 
+function localDevServerUrl(): string {
+  return `http://127.0.0.1:${process.env.PORT?.trim() || "3000"}`;
+}
+
 /** Wire the shared local-turn setup so prompt and interactive runs stay identical. */
 async function prepareLocalChatRun(
   io: ChatIo,
@@ -233,8 +237,29 @@ async function prepareLocalChatRun(
   defaultStateAdapterForLocalChat();
   await configureLocalChatPlugins(pluginSet);
   const { runLocalAgentTurn } = await import("@/chat/local/runner");
+  const { startLocalOAuthCallbackServer } =
+    await import("@/chat/local/oauth-callback-server");
+  const { createLocalOAuthState } = await import("@/chat/local/oauth-relay");
+  const { createLocalSandboxEgressSignalTransport } =
+    await import("@/chat/local/sandbox-egress-signals");
+  const agentRunner = createAgentRunner(executeAgentRun);
+  const oauthCallback = await startLocalOAuthCallbackServer(agentRunner);
   const deps: LocalAgentTurnDeps = {
-    agentRunner: createAgentRunner(executeAgentRun),
+    agentRunner,
+    authorization: {
+      cancel: oauthCallback.cancelAuthorization,
+      createState: async () => await createLocalOAuthState(oauthCallback.port),
+      deliver: async (request) => {
+        oauthCallback.beginAuthorization(request.authorizationUrl);
+        await reportStatus(
+          io,
+          `${request.label}:\n${request.authorizationUrl}\n${request.completionText}`,
+        );
+      },
+      wait: oauthCallback.waitForAuthorization,
+    },
+    sandboxEgressSignals:
+      createLocalSandboxEgressSignalTransport(localDevServerUrl()),
     deliverReply: async (reply) => {
       await deliverReply(io, reply);
     },
@@ -245,7 +270,12 @@ async function prepareLocalChatRun(
       await reportToolResult(io, result);
     },
   };
-  return { conversationId: newRunConversationId(), runLocalAgentTurn, deps };
+  return {
+    close: oauthCallback.close,
+    conversationId: newRunConversationId(),
+    runLocalAgentTurn,
+    deps,
+  };
 }
 
 async function runPrompt(
@@ -253,28 +283,28 @@ async function runPrompt(
   io: ChatIo,
   pluginSet: JuniorPluginSet | null | undefined,
 ): Promise<number> {
-  const { conversationId, runLocalAgentTurn, deps } = await prepareLocalChatRun(
-    io,
-    pluginSet,
-  );
-  const result = await runLocalAgentTurn(
-    {
-      conversationId,
-      message: options.message,
-    },
-    deps,
-  );
-  return result.outcome === "success" ? 0 : 1;
+  const { close, conversationId, runLocalAgentTurn, deps } =
+    await prepareLocalChatRun(io, pluginSet);
+  try {
+    const result = await runLocalAgentTurn(
+      {
+        conversationId,
+        message: options.message,
+      },
+      deps,
+    );
+    return result.outcome === "success" ? 0 : 1;
+  } finally {
+    await close();
+  }
 }
 
 async function runInteractive(
   io: ChatIo,
   pluginSet: JuniorPluginSet | null | undefined,
 ): Promise<void> {
-  const { conversationId, runLocalAgentTurn, deps } = await prepareLocalChatRun(
-    io,
-    pluginSet,
-  );
+  const { close, conversationId, runLocalAgentTurn, deps } =
+    await prepareLocalChatRun(io, pluginSet);
   const rl = readline.createInterface({
     input: io.input,
     output: io.output,
@@ -306,6 +336,7 @@ async function runInteractive(
     }
   } finally {
     rl.close();
+    await close();
   }
 }
 
