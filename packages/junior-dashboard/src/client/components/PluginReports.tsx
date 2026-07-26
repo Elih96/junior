@@ -10,6 +10,7 @@ import { Card } from "./layout/Card";
 /** Render plugin operational reports without plugin-specific UI code. */
 export function PluginReports(props: {
   emptyText?: string;
+  fallbackTitle?: string;
   range?: TimeRangeDays;
   reports: PluginOperationalReport[];
 }) {
@@ -36,7 +37,7 @@ export function PluginReports(props: {
 
   return (
     <div className="grid gap-3">
-      <div className="flex items-end justify-between gap-4 px-1">
+      <div className="px-1">
         <div>
           <div className="font-mono text-[0.62rem] uppercase tracking-[0.16em] text-cyan-200/65">
             Live signals
@@ -45,12 +46,10 @@ export function PluginReports(props: {
             Operational reports
           </h2>
         </div>
-        <div className="font-mono text-[0.62rem] text-white/30">
-          {props.reports.length} reporting
-        </div>
       </div>
       {props.reports.map((report) => (
         <PluginReportView
+          fallbackTitle={props.fallbackTitle}
           key={report.pluginName}
           range={props.range}
           report={report}
@@ -61,10 +60,16 @@ export function PluginReports(props: {
 }
 
 function PluginReportView(props: {
+  fallbackTitle?: string;
   range?: TimeRangeDays;
   report: PluginOperationalReport;
 }) {
-  const title = props.report.title ?? props.report.pluginName;
+  const reportTitle =
+    props.report.title === props.report.pluginName
+      ? undefined
+      : props.report.title;
+  const title = reportTitle ?? props.fallbackTitle ?? props.report.pluginName;
+  const metrics = props.report.metrics ?? [];
   return (
     <Card>
       <div className="flex items-start justify-between gap-4 border-b border-white/[0.06] px-5 py-4">
@@ -82,20 +87,27 @@ function PluginReportView(props: {
           </div>
         ) : null}
       </div>
-      {props.report.metrics?.length ? (
+      {metrics.length ? (
         <div
           className={cn(
-            "grid gap-px bg-white/[0.055] sm:grid-cols-2",
-            props.report.metrics.length === 3
+            "grid gap-px bg-white/[0.055]",
+            metrics.length === 1 ? "grid-cols-1" : "grid-cols-2",
+            metrics.length === 3
               ? "lg:grid-cols-3"
-              : "lg:grid-cols-4",
+              : metrics.length === 5
+                ? "lg:grid-cols-5"
+                : metrics.length >= 4
+                  ? "lg:grid-cols-4"
+                  : undefined,
           )}
         >
-          {props.report.metrics.map((metric, index) => (
+          {metrics.map((metric) => (
             <div
               className={cn(
                 "min-w-0 bg-[#09090b] px-4 py-4",
-                index > 0 && "hidden sm:block",
+                metrics.length > 1 &&
+                  metrics.length % 2 === 1 &&
+                  "last:col-span-2 lg:last:col-span-1",
                 summaryToneClass(metric.tone),
               )}
               key={metric.label}
@@ -159,50 +171,67 @@ function PluginReportRecordSet(props: {
           Report records are unavailable because no fields were declared.
         </div>
       ) : (
-        <div className="overflow-x-hidden border-t border-white/[0.05] sm:overflow-x-auto">
-          <table className="w-full table-fixed border-collapse text-left sm:min-w-[36rem] sm:table-auto">
-            <thead className="bg-black/15 font-mono text-[0.58rem] uppercase tracking-[0.1em] text-white/25">
-              <tr>
-                {fields.map((field, index) => (
-                  <th
-                    className={cn(
-                      "border-b border-white/[0.055] px-3 py-2.5 font-medium sm:w-auto sm:px-5",
-                      index === 0 ? "w-1/2" : index === 1 ? "w-1/6" : "w-1/3",
-                      index > 2 && "hidden sm:table-cell",
-                    )}
-                    key={field.key}
-                    scope="col"
-                  >
-                    {field.label}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {records.map((record) => (
-                <tr
-                  className={cn(
-                    "transition-colors hover:bg-white/[0.025]",
-                    rowToneClass(record.tone),
-                  )}
-                  key={record.id}
-                >
-                  {fields.map((field, index) => (
-                    <td
-                      className={cn(
-                        "max-w-72 truncate border-b border-white/[0.05] px-3 py-3 font-mono text-[0.7rem] text-white/55 sm:px-5",
-                        index > 2 && "hidden sm:table-cell",
-                      )}
-                      key={field.key}
-                    >
+        <>
+          <div className="grid gap-2 border-t border-white/[0.05] p-3 sm:hidden">
+            {records.map((record) => (
+              <div
+                className={cn(
+                  "grid gap-3 rounded-md border border-white/[0.06] bg-black/15 p-3",
+                  rowToneClass(record.tone),
+                )}
+                key={record.id}
+              >
+                {fields.map((field) => (
+                  <div key={field.key}>
+                    <div className="font-mono text-[0.52rem] uppercase tracking-[0.1em] text-white/25">
+                      {field.label}
+                    </div>
+                    <div className="mt-1 break-words font-mono text-[0.68rem] leading-relaxed text-white/60">
                       {record.values[field.key] ?? ""}
-                    </td>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ))}
+          </div>
+          <div className="hidden overflow-x-auto border-t border-white/[0.05] sm:block">
+            <table className="w-full min-w-[36rem] border-collapse text-left">
+              <thead className="bg-black/15 font-mono text-[0.58rem] uppercase tracking-[0.1em] text-white/25">
+                <tr>
+                  {fields.map((field) => (
+                    <th
+                      className="border-b border-white/[0.055] px-5 py-2.5 font-medium"
+                      key={field.key}
+                      scope="col"
+                    >
+                      {field.label}
+                    </th>
                   ))}
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+              </thead>
+              <tbody>
+                {records.map((record) => (
+                  <tr
+                    className={cn(
+                      "transition-colors hover:bg-white/[0.025]",
+                      rowToneClass(record.tone),
+                    )}
+                    key={record.id}
+                  >
+                    {fields.map((field) => (
+                      <td
+                        className="max-w-72 truncate border-b border-white/[0.05] px-5 py-3 font-mono text-[0.7rem] text-white/55"
+                        key={field.key}
+                      >
+                        {record.values[field.key] ?? ""}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
       )}
     </div>
   );
