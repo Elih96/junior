@@ -1,4 +1,25 @@
 # Changelog
+## 0.115.0
+
+### Breaking Changes 🛠
+
+- (dashboard) Add dedicated System plugin pages by @dcramer in [#1058](https://github.com/getsentry/junior/pull/1058)
+
+### New Features ✨
+
+- (dashboard) Show continuation summaries by @dcramer in [#1056](https://github.com/getsentry/junior/pull/1056)
+- (slack) Isolate cross-actor follow-up turns by @dcramer in [#1057](https://github.com/getsentry/junior/pull/1057)
+- (tools) Declare approval modes by @dcramer in [#1055](https://github.com/getsentry/junior/pull/1055)
+
+### Bug Fixes 🐛
+
+- (cli) Continue local chat after account sign-in by @dcramer in [#1054](https://github.com/getsentry/junior/pull/1054)
+- (github) Show median PR cost in ops repo grid by @sentry-junior in [#1049](https://github.com/getsentry/junior/pull/1049)
+
+### Internal Changes 🔧
+
+- Cap code files at 1,000 lines by @dcramer in [#1060](https://github.com/getsentry/junior/pull/1060)
+
 ## 0.114.0
 
 ### New Features ✨
