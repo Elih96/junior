@@ -2,6 +2,7 @@ import {
   getAgentTurnSessionRecord,
   getAgentTurnSessionRecordForResume,
   upsertAgentTurnSessionRecord,
+  type AgentDispatchOutcome,
   type AgentTurnSessionRecord,
   type AgentTurnSurface,
 } from "@/chat/state/turn-session";
@@ -124,6 +125,7 @@ export async function persistRunningSessionRecord(args: {
   channelName?: string;
   conversationId: string;
   destination?: Destination;
+  dispatchId?: string;
   source?: Source;
   sessionId: string;
   sliceId: number;
@@ -156,6 +158,9 @@ export async function persistRunningSessionRecord(args: {
       cumulativeUsage: latestSessionRecord?.cumulativeUsage,
       ...((args.destination ?? latestSessionRecord?.destination)
         ? { destination: args.destination ?? latestSessionRecord?.destination }
+        : {}),
+      ...((args.dispatchId ?? latestSessionRecord?.dispatchId)
+        ? { dispatchId: args.dispatchId ?? latestSessionRecord?.dispatchId }
         : {}),
       ...((args.source ?? latestSessionRecord?.source)
         ? { source: args.source ?? latestSessionRecord?.source }
@@ -220,8 +225,13 @@ export async function persistCompletedSessionRecord(args: {
   currentDurationMs?: number;
   currentUsage?: AgentTurnUsage;
   destination?: Destination;
+  dispatchId?: string;
+  dispatchOutcome?: AgentDispatchOutcome;
+  errorMessage?: string;
   /** Source-confirmed destination visibility from the current event's signal. */
   destinationVisibility?: ConversationPrivacy;
+  /** Provider-owned identifier returned after visible delivery is accepted. */
+  resultMessageId?: string;
   source?: Source;
   sessionId: string;
   /** Defaults to the latest stored slice when the deliverer does not know it. */
@@ -267,6 +277,22 @@ export async function persistCompletedSessionRecord(args: {
     ),
     ...((args.destination ?? latestSessionRecord?.destination)
       ? { destination: args.destination ?? latestSessionRecord?.destination }
+      : {}),
+    ...((args.dispatchId ?? latestSessionRecord?.dispatchId)
+      ? { dispatchId: args.dispatchId ?? latestSessionRecord?.dispatchId }
+      : {}),
+    ...((args.dispatchOutcome ?? latestSessionRecord?.dispatchOutcome)
+      ? {
+          dispatchOutcome:
+            args.dispatchOutcome ?? latestSessionRecord?.dispatchOutcome,
+        }
+      : {}),
+    ...(args.errorMessage ? { errorMessage: args.errorMessage } : {}),
+    ...((args.resultMessageId ?? latestSessionRecord?.resultMessageId)
+      ? {
+          resultMessageId:
+            args.resultMessageId ?? latestSessionRecord?.resultMessageId,
+        }
       : {}),
     ...((args.source ?? latestSessionRecord?.source)
       ? { source: args.source ?? latestSessionRecord?.source }
@@ -315,12 +341,16 @@ export async function completeDeliveredTurn(args: {
   conversationId: string;
   destination: Destination;
   destinationVisibility?: ConversationPrivacy;
+  dispatchId?: string;
+  dispatchOutcome?: AgentDispatchOutcome;
+  errorMessage?: string;
   durationMs?: number;
   loadedSkillNames?: string[];
   messages: PiMessage[];
   modelId: string;
   actor?: Actor;
   reasoningLevel?: string;
+  resultMessageId?: string;
   sessionId: string;
   sliceId: number;
   source: Source;
@@ -335,6 +365,10 @@ export async function completeDeliveredTurn(args: {
     currentUsage: args.usage,
     destination: args.destination,
     destinationVisibility: args.destinationVisibility,
+    dispatchId: args.dispatchId,
+    dispatchOutcome: args.dispatchOutcome,
+    errorMessage: args.errorMessage,
+    resultMessageId: args.resultMessageId,
     source: args.source,
     sessionId: args.sessionId,
     sliceId: args.sliceId,
@@ -360,6 +394,7 @@ export async function persistAuthPauseSessionRecord(args: {
   currentDurationMs?: number;
   currentUsage?: AgentTurnUsage;
   destination?: Destination;
+  dispatchId?: string;
   source?: Source;
   messages: PiMessage[];
   loadedSkillNames?: string[];
@@ -398,6 +433,9 @@ export async function persistAuthPauseSessionRecord(args: {
       ),
       ...((args.destination ?? latestSessionRecord?.destination)
         ? { destination: args.destination ?? latestSessionRecord?.destination }
+        : {}),
+      ...((args.dispatchId ?? latestSessionRecord?.dispatchId)
+        ? { dispatchId: args.dispatchId ?? latestSessionRecord?.dispatchId }
         : {}),
       ...((args.source ?? latestSessionRecord?.source)
         ? { source: args.source ?? latestSessionRecord?.source }
@@ -452,6 +490,7 @@ interface ContinuationRecordInput {
   currentDurationMs?: number;
   currentUsage?: AgentTurnUsage;
   destination?: Destination;
+  dispatchId?: string;
   source?: Source;
   messages: PiMessage[];
   loadedSkillNames?: string[];
@@ -506,6 +545,9 @@ export async function persistContinuationSessionRecord(
               destination: args.destination ?? latestSessionRecord?.destination,
             }
           : {}),
+        ...((args.dispatchId ?? latestSessionRecord?.dispatchId)
+          ? { dispatchId: args.dispatchId ?? latestSessionRecord?.dispatchId }
+          : {}),
         ...((args.source ?? latestSessionRecord?.source)
           ? { source: args.source ?? latestSessionRecord?.source }
           : {}),
@@ -548,6 +590,9 @@ export async function persistContinuationSessionRecord(
       cumulativeUsage,
       ...((args.destination ?? latestSessionRecord?.destination)
         ? { destination: args.destination ?? latestSessionRecord?.destination }
+        : {}),
+      ...((args.dispatchId ?? latestSessionRecord?.dispatchId)
+        ? { dispatchId: args.dispatchId ?? latestSessionRecord?.dispatchId }
         : {}),
       ...((args.source ?? latestSessionRecord?.source)
         ? { source: args.source ?? latestSessionRecord?.source }
@@ -605,6 +650,7 @@ export async function persistYieldSessionRecord(args: {
   currentDurationMs?: number;
   currentUsage?: AgentTurnUsage;
   destination?: Destination;
+  dispatchId?: string;
   source?: Source;
   messages: PiMessage[];
   loadedSkillNames?: string[];
@@ -641,6 +687,9 @@ export async function persistYieldSessionRecord(args: {
       ),
       ...((args.destination ?? latestSessionRecord?.destination)
         ? { destination: args.destination ?? latestSessionRecord?.destination }
+        : {}),
+      ...((args.dispatchId ?? latestSessionRecord?.dispatchId)
+        ? { dispatchId: args.dispatchId ?? latestSessionRecord?.dispatchId }
         : {}),
       ...((args.source ?? latestSessionRecord?.source)
         ? { source: args.source ?? latestSessionRecord?.source }

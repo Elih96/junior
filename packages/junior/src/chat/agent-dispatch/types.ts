@@ -5,9 +5,13 @@ import type {
   SlackDestination,
 } from "@sentry/junior-plugin-api";
 import type {
+  CredentialContext,
   CredentialSubject,
   CredentialSystemActor,
 } from "@/chat/credentials/context";
+import type { AgentRunRouting } from "@/chat/agent/request";
+import type { AgentTurnSurface } from "@/chat/state/turn-session";
+import type { ChannelConfigurationService } from "@/chat/configuration/types";
 
 export type DispatchStatus =
   | "pending"
@@ -30,7 +34,6 @@ export interface BoundDispatchOptions extends Omit<
 
 export interface DispatchRecord {
   actor: CredentialSystemActor;
-  attempt: number;
   createdAtMs: number;
   credentialSubject?: CredentialSubject;
   destination: SlackDestination;
@@ -39,16 +42,12 @@ export interface DispatchRecord {
   id: string;
   idempotencyKey: string;
   input: string;
-  lastCallbackAtMs?: number;
-  leaseExpiresAtMs?: number;
-  maxAttempts: number;
   metadata?: Record<string, string>;
   plugin: string;
   resultMessageTs?: string;
   source: Source;
   status: DispatchStatus;
   updatedAtMs: number;
-  version: number;
 }
 
 export interface DispatchProjection {
@@ -58,12 +57,33 @@ export interface DispatchProjection {
   status: DispatchStatus;
 }
 
-export interface DispatchCallback {
-  expectedVersion: number;
-  id: string;
-}
-
 export interface DispatchCreateResult {
   record: DispatchRecord;
   status: "created" | "already_exists";
+}
+
+export type DispatchTurnOutcome =
+  | "awaiting_resume"
+  | "blocked"
+  | "completed"
+  | "failed";
+
+/** Facts returned by one attempt to advance a dispatched turn. */
+export interface DispatchTurnResult {
+  errorMessage?: string;
+  outcome?: DispatchTurnOutcome;
+  resultMessageTs?: string;
+}
+
+/** Dispatch-owned authority supplied to the shared turn runtime. */
+export interface DispatchTurnContext {
+  authorizationFlowMode: "disabled";
+  channelConfiguration: ChannelConfigurationService;
+  credentialContext: CredentialContext;
+  destinationVisibility: DestinationVisibility;
+  dispatch: NonNullable<AgentRunRouting["dispatch"]>;
+  skipProviderDefaultConfig: true;
+  source: Source;
+  surface: Extract<AgentTurnSurface, "api">;
+  turnId: string;
 }
