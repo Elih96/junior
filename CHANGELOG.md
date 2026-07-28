@@ -1,4 +1,10 @@
 # Changelog
+## 0.116.1
+
+### Bug Fixes 🐛
+
+- (sandbox) Install ripgrep from pinned release by @dcramer in [#1090](https://github.com/getsentry/junior/pull/1090)
+
 ## 0.116.0
 
 ### Breaking Changes 🛠
