@@ -1,4 +1,23 @@
 # Changelog
+## 0.117.0
+
+### New Features ✨
+
+- (agent) Add workspace image inspection by @dcramer in [#1098](https://github.com/getsentry/junior/pull/1098)
+- (plugins) Add structured turn context by @dcramer in [#1089](https://github.com/getsentry/junior/pull/1089)
+
+### Bug Fixes 🐛
+
+- (chat) Continue active turns after compaction by @dcramer in [#1095](https://github.com/getsentry/junior/pull/1095)
+- (oauth) Harden provider errors and callbacks by @jstar0 in [#1079](https://github.com/getsentry/junior/pull/1079)
+- (sandbox) Install ripgrep through SPAL by @dcramer in [#1092](https://github.com/getsentry/junior/pull/1092)
+- Make agent name configurable by @sentry-junior in [#1096](https://github.com/getsentry/junior/pull/1096)
+
+### Internal Changes 🔧
+
+- (deps-dev) Bump undici from 7.25.0 to 7.28.0 by @dependabot in [#1084](https://github.com/getsentry/junior/pull/1084)
+- (sandbox) Simplify snapshot dependency resolution by @dcramer in [#1097](https://github.com/getsentry/junior/pull/1097)
+
 ## 0.116.1
 
 ### Bug Fixes 🐛
