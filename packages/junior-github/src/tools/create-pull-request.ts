@@ -17,6 +17,7 @@ import { gitHubPullRequestSubscribable } from "../resource-events/pull-request.j
 import { appendGitHubRequesterAttribution } from "../tool-support/attribution.js";
 const GITHUB_PULL_REQUEST_CREATE_IDEMPOTENCY_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const GITHUB_PULL_REQUEST_CREATE_LOCK_TTL_MS = 60_000;
+const RESOURCE_LINK_LABEL_MAX_LENGTH = 256;
 
 class GitHubPullRequestCreateRejectedError extends Error {
   status: number;
@@ -332,6 +333,26 @@ function gitHubPullRequestToolResult(
   return { ...result, ...(subscribable ? { subscribable } : {}) };
 }
 
+async function annotatePullRequest(
+  ctx: ToolRegistrationHookContext,
+  input: CreateGitHubPullRequestInput,
+  result: GitHubPullRequestResult,
+): Promise<void> {
+  const repo = parseRepo(input.repo);
+  const label =
+    `${repo.owner}/${repo.name} #${result.number}: ${nonEmptyString(input.title, "title")}`.slice(
+      0,
+      RESOURCE_LINK_LABEL_MAX_LENGTH,
+    );
+  await ctx.annotations?.upsert({
+    kind: "resource_link",
+    key: `${repo.owner.toLowerCase()}/${repo.name.toLowerCase()}#${result.number}`,
+    label,
+    url: result.url,
+    status: input.draft ? "draft" : "open",
+  });
+}
+
 function gitHubPullRequestStructuredResult(
   input: CreateGitHubPullRequestInput,
   result: GitHubPullRequestResult,
@@ -370,12 +391,15 @@ export function createGitHubPullRequestTool(ctx: ToolRegistrationHookContext) {
         async () => {
           const state = createPullRequestState(await ctx.state.get(key));
           if (state?.status === "completed") {
+            const completedInput = state.input ?? parsedInput;
+            const completedResult = {
+              number: state.number,
+              url: state.url,
+            };
+            await annotatePullRequest(ctx, completedInput, completedResult);
             return gitHubPullRequestStructuredResult(
-              state.input ?? parsedInput,
-              {
-                number: state.number,
-                url: state.url,
-              },
+              completedInput,
+              completedResult,
             );
           }
           if (state?.status === "pending") {
@@ -414,6 +438,7 @@ export function createGitHubPullRequestTool(ctx: ToolRegistrationHookContext) {
                 { cause: error },
               );
             }
+            await annotatePullRequest(ctx, parsedInput, result);
             return gitHubPullRequestStructuredResult(parsedInput, result);
           } catch (error) {
             if (

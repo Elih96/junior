@@ -385,9 +385,9 @@ class SqlConversationEventStore implements ConversationEventStore {
 
     const overflow = rows.length > query.limit;
     const pageRows = overflow ? rows.slice(0, query.limit) : rows;
-    const events = (
-      newestFirst ? [...pageRows].reverse() : pageRows
-    ).map(eventFromRow);
+    const events = (newestFirst ? [...pageRows].reverse() : pageRows).map(
+      eventFromRow,
+    );
 
     if (events.length === 0) {
       return { events, hasOlder: false, hasNewer: false };

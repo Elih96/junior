@@ -1,4 +1,10 @@
 import { useState } from "react";
+import {
+  GitMerge,
+  GitPullRequest,
+  GitPullRequestClosed,
+  TriangleAlert,
+} from "lucide-react";
 import { Link } from "react-router";
 import type { ConversationDetailReport } from "@sentry/junior/api/schema";
 import type { ConversationFeed } from "@sentry/junior/api/schema";
@@ -113,6 +119,7 @@ export function ConversationPage(props: {
             ) : null}
           </div>
           <ConversationStats conversation={conversation} detail={detail.data} />
+          <ConversationAnnotations detail={detail.data} />
         </header>
 
         {detail.isPending ? (
@@ -168,6 +175,75 @@ export function ConversationPage(props: {
         target={subagentTarget}
       />
     </div>
+  );
+}
+
+function ConversationAnnotations(props: {
+  detail: ConversationDetailReport | undefined;
+}) {
+  const links = props.detail?.annotations?.filter(
+    (annotation) => annotation.kind === "resource_link",
+  );
+  if (!links?.length) return null;
+  return (
+    <div className="border-t border-white/[0.07] pt-4 md:col-span-2">
+      <div className="mb-2 font-mono text-[0.62rem] uppercase tracking-[0.16em] text-cyan-200/65">
+        Pull requests
+      </div>
+      <div className="flex flex-wrap gap-2">
+        {links.map((link) => (
+          <a
+            className="inline-flex items-center gap-2 rounded-lg border border-cyan-300/15 bg-cyan-300/[0.055] px-3 py-2 text-sm text-cyan-50 no-underline"
+            href={link.url}
+            key={`${link.plugin}:${link.key}`}
+            rel="noreferrer"
+            target="_blank"
+          >
+            {link.status ? <PullRequestStatus status={link.status} /> : null}
+            <span>{link.label}</span>
+          </a>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function PullRequestStatus(props: {
+  status: "open" | "draft" | "closed" | "merged" | "warning";
+}) {
+  const status = {
+    open: {
+      className: "text-[#3fb950]",
+      Icon: GitPullRequest,
+      label: "Open pull request",
+    },
+    draft: {
+      className: "text-[#8c959f]",
+      Icon: GitPullRequest,
+      label: "Draft pull request",
+    },
+    closed: {
+      className: "text-[#f85149]",
+      Icon: GitPullRequestClosed,
+      label: "Closed pull request",
+    },
+    merged: {
+      className: "text-[#a371f7]",
+      Icon: GitMerge,
+      label: "Merged pull request",
+    },
+    warning: {
+      className: "text-[#d29922]",
+      Icon: TriangleAlert,
+      label: "Pull request needs attention",
+    },
+  }[props.status];
+
+  return (
+    <span className={status.className} title={status.label}>
+      <status.Icon aria-hidden="true" size={16} strokeWidth={2.25} />
+      <span className="sr-only">{status.label}</span>
+    </span>
   );
 }
 

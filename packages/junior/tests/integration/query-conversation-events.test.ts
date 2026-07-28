@@ -164,18 +164,20 @@ describe("queryConversationEvents", () => {
       conversationId: CURRENT_CONVERSATION_ID,
       visibility: "public",
     });
-    await getDb().insert(juniorConversationEvents).values({
-      conversationId: CURRENT_CONVERSATION_ID,
-      seq: 0,
-      historyVersion: 1,
-      schemaVersion: 2,
-      type: "handoff",
-      payload: {
-        modelId: "future/model",
-        replacementHistory: [{ message: { role: "user" } }],
-      },
-      createdAt: new Date(1),
-    });
+    await getDb()
+      .insert(juniorConversationEvents)
+      .values({
+        conversationId: CURRENT_CONVERSATION_ID,
+        seq: 0,
+        historyVersion: 1,
+        schemaVersion: 2,
+        type: "handoff",
+        payload: {
+          modelId: "future/model",
+          replacementHistory: [{ message: { role: "user" } }],
+        },
+        createdAt: new Date(1),
+      });
 
     const page = await executeTool({
       conversation_id: CURRENT_CONVERSATION_ID,
