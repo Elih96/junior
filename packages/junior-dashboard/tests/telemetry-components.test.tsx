@@ -1171,6 +1171,7 @@ describe("dashboard canonical-event components", () => {
     );
     expect(loadingHtml).not.toContain("Loading plugin stats.");
     expect(loadingHtml).toContain(">GitHub<");
+    expect(loadingHtml).toContain('href="/system/plugins/github"');
     expect(loadingHtml).not.toContain(
       "This plugin does not expose operational activity yet.",
     );
@@ -1269,7 +1270,7 @@ describe("dashboard canonical-event components", () => {
     );
 
     expect(html).toContain('aria-label="System navigation"');
-    expect(html).toContain('href="/system/plugins/github"');
+    expect(html).not.toContain('href="/system/plugins/github"');
     expect(html).toContain('href="/system/plugins/scheduler"');
     expect(html).toContain(">Scheduler<");
     expect(html).toContain(">active tasks<");

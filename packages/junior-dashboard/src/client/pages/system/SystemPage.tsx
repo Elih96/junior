@@ -37,6 +37,9 @@ export function SystemPage(props: { data: SystemData }) {
     reports,
     skills: props.data.skills,
   });
+  const reportingPlugins = props.data.pluginReportsLoading
+    ? plugins
+    : plugins.filter((plugin) => plugin.reports.length);
   const pathname = normalizeSystemPath(location.pathname);
   const plugin = plugins.find(
     (candidate) => systemPluginPath(candidate.name) === pathname,
@@ -56,7 +59,7 @@ export function SystemPage(props: { data: SystemData }) {
     <div
       className={cn(
         dashboardContainerClass,
-        "grid min-w-0 gap-4 px-4 py-4 sm:gap-6 sm:px-8 sm:py-8",
+        "grid min-w-0 content-start gap-4 px-4 py-4 sm:gap-6 sm:px-8 sm:py-8",
       )}
     >
       <PageHeader
@@ -71,7 +74,10 @@ export function SystemPage(props: { data: SystemData }) {
       />
 
       <div className="grid min-w-0 items-start gap-4 sm:gap-6 lg:grid-cols-[13rem_minmax(0,1fr)]">
-        <SystemNavigation plugins={plugins} />
+        <SystemNavigation
+          plugins={plugins}
+          reportingPlugins={reportingPlugins}
+        />
         <div className="grid min-w-0 gap-4 sm:gap-6">
           {plugin ? (
             <PluginSystemPage data={props.data} plugin={plugin} range={range} />
