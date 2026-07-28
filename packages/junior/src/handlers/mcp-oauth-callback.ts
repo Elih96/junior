@@ -17,6 +17,7 @@ import {
   type McpAuthSessionState,
 } from "@/chat/mcp/auth-store";
 import { finalizeMcpAuthorization } from "@/chat/mcp/oauth";
+import { getMcpProviderErrorAttributes } from "@/chat/mcp/errors";
 import { logException, logWarn } from "@/chat/logging";
 import type { AgentRunResult } from "@/chat/services/turn-result";
 import type { AgentRunner } from "@/chat/runtime/agent-runner";
@@ -129,7 +130,13 @@ function htmlResponse(
             "Your MCP access is connected. Junior will continue the paused request in the local client.",
         }
       : CALLBACK_PAGES[kind];
-  return htmlCallbackResponse(page.title, page.message, page.status);
+  const footerMessage =
+    kind === "success" && !options?.local
+      ? "You can close this tab and return to Slack."
+      : undefined;
+  return htmlCallbackResponse(page.title, page.message, page.status, {
+    footerMessage,
+  });
 }
 
 async function persistCompletedReplyState(
@@ -628,7 +635,10 @@ export async function GET(
       callbackError,
       "mcp_oauth_callback_failed",
       {},
-      { "app.credential.provider": provider },
+      {
+        "app.credential.provider": provider,
+        ...getMcpProviderErrorAttributes(callbackError),
+      },
       "Failed to process MCP OAuth callback",
     );
     return htmlResponse("failure");

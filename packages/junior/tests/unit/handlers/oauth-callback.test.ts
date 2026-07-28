@@ -422,9 +422,17 @@ describe("oauth callback handler", () => {
     );
 
     expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(response.headers.get("referrer-policy")).toBe("no-referrer");
+    expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(response.headers.get("content-security-policy")).toContain(
+      "frame-ancestors 'none'",
+    );
     const body = await response.text();
     expect(body).toContain("<!DOCTYPE html>");
     expect(body).toContain("Sentry account connected");
+    expect(body).toContain("You can close this tab and return to Slack.");
+    expect(body).not.toContain("You can close this tab and return to Junior.");
 
     const stored = (await getStoredTokens("U456", "sentry")) as {
       accessToken: string;
@@ -739,5 +747,7 @@ describe("oauth callback handler", () => {
     expect(response.status).toBe(200);
     const body = await response.text();
     expect(body).toContain("being processed in Slack");
+    expect(body).toContain("You can close this tab and return to Slack.");
+    expect(body).not.toContain("You can close this tab and return to Junior.");
   });
 });

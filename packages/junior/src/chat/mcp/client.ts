@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { Client } from "@modelcontextprotocol/sdk/client";
 import {
   UnauthorizedError,
@@ -8,7 +9,13 @@ import {
   StreamableHTTPError,
 } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { setSpanAttributes } from "@/chat/logging";
+import { fetchWithBoundedOAuthErrorBodies } from "@/chat/oauth-response";
 import type { PluginDefinition } from "@/chat/plugins/types";
+import {
+  McpProviderError,
+  type McpProviderErrorPhase,
+  toMcpProviderError,
+} from "./errors";
 
 type ListedTool = Awaited<ReturnType<Client["listTools"]>>["tools"][number];
 type ToolCallResult = Awaited<ReturnType<Client["callTool"]>>;
@@ -63,17 +70,31 @@ type HostManagedSessionProvider = OAuthClientProvider & {
   saveMcpServerSessionId?: (sessionId: string | undefined) => Promise<void>;
 };
 
+function isMissingSessionError(error: unknown): boolean {
+  return (
+    error instanceof StreamableHTTPError &&
+    (error.code === 404 || /Session not found/i.test(error.message))
+  );
+}
+
 export class PluginMcpClient {
   private client?: Client;
   private clientPromise?: Promise<Client>;
   private lastAttemptedTransportSessionId?: string;
+  private readonly providerStatusStore = new AsyncLocalStorage<{
+    status?: number;
+  }>();
   private transport?: StreamableHTTPClientTransport;
   private listedTools?: ListedTool[];
+  private readonly resourceHost?: string;
 
   constructor(
     private readonly plugin: PluginDefinition,
     private readonly options: PluginMcpClientOptions = {},
-  ) {}
+  ) {
+    const url = plugin.manifest.mcp?.url;
+    this.resourceHost = url ? new URL(url).hostname : undefined;
+  }
 
   async listTools(): Promise<ListedTool[]> {
     if (this.listedTools) {
@@ -88,7 +109,8 @@ export class PluginMcpClient {
 
       do {
         const result = await this.wrapAuth(
-          client.listTools(cursor ? { cursor } : undefined),
+          () => client.listTools(cursor ? { cursor } : undefined),
+          "list_tools",
         );
         await this.syncTransportSessionId();
         for (const tool of result.tools) {
@@ -130,10 +152,12 @@ export class PluginMcpClient {
         });
       }
       const result = await this.wrapAuth(
-        client.callTool({
-          name,
-          arguments: args ?? {},
-        }),
+        () =>
+          client.callTool({
+            name,
+            arguments: args ?? {},
+          }),
+        "call_tool",
       );
       await this.syncTransportSessionId();
       return result;
@@ -156,7 +180,7 @@ export class PluginMcpClient {
       }
 
       await this.clearStoredTransportSessionId();
-      await this.disposeClient();
+      await this.cleanupClientAfterFailure();
       return await operation();
     }
   }
@@ -197,7 +221,12 @@ export class PluginMcpClient {
     this.lastAttemptedTransportSessionId = sessionId;
     const transport = new StreamableHTTPClientTransport(new URL(mcp.url), {
       ...(Object.keys(requestInit).length > 0 ? { requestInit } : {}),
-      ...(this.options.fetch ? { fetch: this.options.fetch } : {}),
+      fetch: fetchWithBoundedOAuthErrorBodies(this.options.fetch, (status) => {
+        const store = this.providerStatusStore.getStore();
+        if (store) {
+          store.status = status;
+        }
+      }),
       ...(this.options.authProvider
         ? { authProvider: this.options.authProvider }
         : {}),
@@ -210,39 +239,51 @@ export class PluginMcpClient {
     this.transport = transport;
 
     try {
-      await this.wrapAuth(client.connect(transport));
+      await this.wrapAuth(() => client.connect(transport), "connect");
       this.client = client;
       await this.syncTransportSessionId();
       return client;
     } catch (error) {
       await this.syncTransportSessionId();
-      await this.disposeClient();
+      await this.cleanupClientAfterFailure();
       throw error;
     }
   }
 
-  private async wrapAuth<T>(promise: Promise<T>): Promise<T> {
-    try {
-      return await promise;
-    } catch (error) {
-      if (error instanceof McpAuthorizationRequiredError) {
-        throw error;
+  private async wrapAuth<T>(
+    operation: () => Promise<T>,
+    phase: McpProviderErrorPhase,
+  ): Promise<T> {
+    const store: { status?: number } = {};
+    return await this.providerStatusStore.run(store, async () => {
+      try {
+        return await operation();
+      } catch (error) {
+        if (error instanceof McpAuthorizationRequiredError) {
+          throw error;
+        }
+        if (error instanceof UnauthorizedError) {
+          throw new McpAuthorizationRequiredError(
+            this.plugin.manifest.name,
+            `MCP authorization required for plugin "${this.plugin.manifest.name}"`,
+          );
+        }
+        throw toMcpProviderError(error, {
+          phase,
+          provider: this.plugin.manifest.name,
+          missingSession: isMissingSessionError(error) || undefined,
+          resourceHost: this.resourceHost,
+          status: store.status,
+        });
       }
-      if (error instanceof UnauthorizedError) {
-        throw new McpAuthorizationRequiredError(
-          this.plugin.manifest.name,
-          `MCP authorization required for plugin "${this.plugin.manifest.name}"`,
-        );
-      }
-      throw error;
-    }
+    });
   }
 
   private async shouldResetMissingSession(error: unknown): Promise<boolean> {
     if (
       !(
-        error instanceof StreamableHTTPError &&
-        (error.code === 404 || /Session not found/i.test(error.message))
+        (error instanceof McpProviderError && error.missingSession) ||
+        isMissingSessionError(error)
       )
     ) {
       return false;
@@ -255,15 +296,38 @@ export class PluginMcpClient {
     );
   }
 
-  private async disposeClient(): Promise<void> {
+  private resetClientState(): StreamableHTTPClientTransport | undefined {
     const transport = this.transport;
     this.listedTools = undefined;
     this.transport = undefined;
     this.client = undefined;
     this.clientPromise = undefined;
+    return transport;
+  }
+
+  private async cleanupClientAfterFailure(): Promise<void> {
+    const transport = this.resetClientState();
+    if (!transport) {
+      return;
+    }
+    try {
+      await transport.close();
+    } catch {}
+  }
+
+  private async disposeClient(): Promise<void> {
+    const transport = this.resetClientState();
 
     if (transport) {
-      await transport.close();
+      try {
+        await transport.close();
+      } catch (error) {
+        throw toMcpProviderError(error, {
+          phase: "close",
+          provider: this.plugin.manifest.name,
+          resourceHost: this.resourceHost,
+        });
+      }
     }
   }
 

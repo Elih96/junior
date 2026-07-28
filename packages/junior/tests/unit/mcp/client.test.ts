@@ -3,12 +3,14 @@ import type { OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.
 
 const {
   callToolMock,
+  closeMock,
   connectMock,
   listToolsMock,
   setSpanAttributesMock,
   transportOptions,
 } = vi.hoisted(() => ({
   callToolMock: vi.fn(),
+  closeMock: vi.fn(),
   connectMock: vi.fn(),
   listToolsMock: vi.fn(),
   setSpanAttributesMock: vi.fn(),
@@ -40,20 +42,25 @@ vi.mock("@modelcontextprotocol/sdk/client/streamableHttp.js", () => {
   }
 
   class StreamableHTTPClientTransport {
+    fetch?: typeof fetch;
     protocolVersion?: string;
     sessionId?: string;
 
     constructor(
       _url: URL,
       options?: {
+        fetch?: typeof fetch;
         sessionId?: string;
       },
     ) {
+      this.fetch = options?.fetch;
       this.sessionId = options?.sessionId;
       transportOptions.push({ ...(options ?? {}) });
     }
 
-    async close() {}
+    async close() {
+      return await closeMock();
+    }
 
     setProtocolVersion(version: string) {
       this.protocolVersion = version;
@@ -97,6 +104,7 @@ import {
   McpAuthorizationRequiredError,
   PluginMcpClient,
 } from "@/chat/mcp/client";
+import { McpProviderError } from "@/chat/mcp/errors";
 
 function buildPlugin() {
   return {
@@ -147,6 +155,8 @@ function buildAuthProvider() {
 describe("PluginMcpClient", () => {
   beforeEach(() => {
     callToolMock.mockReset();
+    closeMock.mockReset();
+    closeMock.mockResolvedValue(undefined);
     connectMock.mockReset();
     listToolsMock.mockReset();
     setSpanAttributesMock.mockReset();
@@ -226,22 +236,118 @@ describe("PluginMcpClient", () => {
     );
   });
 
-  it("does not relabel raw 401 transport failures as auth challenges", async () => {
+  it("sanitizes raw 401 transport failures without treating them as auth challenges", async () => {
     const authProvider = buildAuthProvider();
     authProvider.getMcpServerSessionId.mockResolvedValue(undefined);
     authProvider.saveMcpServerSessionId.mockResolvedValue(undefined);
+    const providerText = "SENSITIVE_CANARY";
+    const closeProviderText = "SENSITIVE_CLOSE_CANARY";
     connectMock.mockRejectedValueOnce(
-      new StreamableHTTPError(
-        401,
-        "Server returned 401 after successful authentication",
-      ),
+      new StreamableHTTPError(401, providerText),
     );
+    closeMock.mockRejectedValueOnce(new Error(closeProviderText));
 
     const client = new PluginMcpClient(buildPlugin(), { authProvider });
+    const error = await client.listTools().catch((caught: unknown) => caught);
 
-    await expect(client.listTools()).rejects.toBeInstanceOf(
-      StreamableHTTPError,
+    expect(error).toBeInstanceOf(McpProviderError);
+    expect(error).toMatchObject({
+      phase: "connect",
+      provider: "notion",
+      resourceHost: "mcp.notion.com",
+      status: 401,
+    });
+    expect((error as Error & { cause?: unknown }).cause).toBeUndefined();
+    expect(JSON.stringify(error)).not.toContain(providerText);
+    expect(JSON.stringify(error)).not.toContain(closeProviderText);
+    expect((error as Error).message).not.toContain(providerText);
+    expect((error as Error).message).not.toContain(closeProviderText);
+  });
+
+  it("keeps MCP provider status scoped to each concurrent operation", async () => {
+    const authProvider = buildAuthProvider();
+    authProvider.getMcpServerSessionId.mockResolvedValue(undefined);
+    authProvider.saveMcpServerSessionId.mockResolvedValue(undefined);
+    connectMock.mockResolvedValue(undefined);
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      return new Response("provider failed", {
+        status: url.includes("first") ? 503 : 429,
+      });
+    });
+    let firstFetched: (() => void) | undefined;
+    const firstFetchDone = new Promise<void>((resolve) => {
+      firstFetched = resolve;
+    });
+    let releaseFirst: (() => void) | undefined;
+    const releaseFirstError = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+
+    callToolMock.mockImplementation(
+      async (
+        transport: { fetch?: typeof fetch } | undefined,
+        args: { name: string },
+      ) => {
+        if (!transport?.fetch) {
+          throw new Error("missing fetch");
+        }
+        if (args.name === "first") {
+          await transport.fetch("https://mcp.notion.com/first");
+          firstFetched?.();
+          await releaseFirstError;
+          throw new Error("first failed");
+        }
+
+        await firstFetchDone;
+        await transport.fetch("https://mcp.notion.com/second");
+        releaseFirst?.();
+        throw new Error("second failed");
+      },
     );
+
+    const client = new PluginMcpClient(buildPlugin(), {
+      authProvider,
+      fetch: fetchMock,
+    });
+
+    const [first, second] = await Promise.allSettled([
+      client.callTool("first", undefined),
+      client.callTool("second", undefined),
+    ]);
+
+    expect(first).toMatchObject({
+      status: "rejected",
+      reason: expect.objectContaining({ status: 503 }),
+    });
+    expect(second).toMatchObject({
+      status: "rejected",
+      reason: expect.objectContaining({ status: 429 }),
+    });
+  });
+
+  it("sanitizes transport close failures before cleanup telemetry", async () => {
+    const authProvider = buildAuthProvider();
+    authProvider.getMcpServerSessionId.mockResolvedValue(undefined);
+    authProvider.saveMcpServerSessionId.mockResolvedValue(undefined);
+    connectMock.mockResolvedValue(undefined);
+    listToolsMock.mockResolvedValue({ tools: [], nextCursor: undefined });
+    const providerText = "SENSITIVE_CLOSE_CANARY";
+    closeMock.mockRejectedValueOnce(new Error(providerText));
+
+    const client = new PluginMcpClient(buildPlugin(), { authProvider });
+    await client.listTools();
+    const error = await client.close().catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(McpProviderError);
+    expect(error).toMatchObject({
+      phase: "close",
+      provider: "notion",
+      resourceHost: "mcp.notion.com",
+    });
+    expect((error as Error & { cause?: unknown }).cause).toBeUndefined();
+    expect(JSON.stringify(error)).not.toContain(providerText);
+    expect((error as Error).message).not.toContain(providerText);
   });
 
   it("sends an empty arguments object for no-argument MCP tool calls", async () => {
@@ -286,8 +392,9 @@ describe("PluginMcpClient", () => {
       .mockResolvedValueOnce("stale-session")
       .mockResolvedValue(undefined);
     authProvider.saveMcpServerSessionId.mockResolvedValue(undefined);
+    closeMock.mockRejectedValueOnce(new Error("SENSITIVE_CLOSE_CANARY"));
     connectMock
-      .mockRejectedValueOnce(new StreamableHTTPError(404, "Session not found"))
+      .mockRejectedValueOnce(new StreamableHTTPError(400, "Session not found"))
       .mockImplementationOnce(async (transport: { sessionId?: string }) => {
         transport.sessionId = "fresh-session";
       });
@@ -305,10 +412,18 @@ describe("PluginMcpClient", () => {
     const client = new PluginMcpClient(buildPlugin(), { authProvider });
 
     await expect(client.listTools()).resolves.toHaveLength(1);
+    expect(closeMock).toHaveBeenCalledTimes(1);
     expect(authProvider.saveMcpServerSessionId).toHaveBeenCalledWith(undefined);
     expect(transportOptions).toEqual([
-      { authProvider, sessionId: "stale-session" },
-      { authProvider },
+      expect.objectContaining({
+        authProvider,
+        fetch: expect.any(Function),
+        sessionId: "stale-session",
+      }),
+      expect.objectContaining({
+        authProvider,
+        fetch: expect.any(Function),
+      }),
     ]);
   });
 
