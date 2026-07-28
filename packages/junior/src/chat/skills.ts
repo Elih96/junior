@@ -235,7 +235,6 @@ export interface Skill extends SkillMetadata {
 
 export interface SkillInvocation {
   skillName: string;
-  args: string;
 }
 
 export interface DiscoverSkillsOptions {
@@ -427,7 +426,23 @@ export async function discoverSkills(
   return sorted;
 }
 
-/** Extract a skill invocation (name + args) from a user message, or return null if none matches. */
+function isCommonEnvironmentVariable(name: string): boolean {
+  return [
+    "HOME",
+    "LANG",
+    "PATH",
+    "PWD",
+    "SHELL",
+    "TEMP",
+    "TERM",
+    "TMP",
+    "TMPDIR",
+    "USER",
+    "XDG_CONFIG_HOME",
+  ].includes(name.toUpperCase());
+}
+
+/** Extract an explicit skill invocation from a user message. */
 export function parseSkillInvocation(
   messageText: string,
   availableSkills: SkillMetadata[],
@@ -435,18 +450,25 @@ export function parseSkillInvocation(
   const trimmed = messageText.trim();
   const escapePattern = (value: string) =>
     value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const slashMatch =
-    /(?:^|\s)\/([a-z0-9]+(?:-[a-z0-9]+)*)(?:\s+([\s\S]*))?/i.exec(trimmed);
+  const slashMatch = /(?:^|\s)\/([a-z0-9]+(?:-[a-z0-9]+)*)/i.exec(trimmed);
   if (slashMatch) {
     const skillName = slashMatch[1].toLowerCase();
     if (!availableSkills.some((skill) => skill.name === skillName)) {
       return null;
     }
 
-    return {
-      skillName,
-      args: (slashMatch[2] ?? "").trim(),
-    };
+    return { skillName };
+  }
+
+  const dollarPattern = /(?:^|\s)\$([a-z0-9]+(?:-[a-z0-9]+)*)/gi;
+  for (const match of trimmed.matchAll(dollarPattern)) {
+    const skillName = match[1].toLowerCase();
+    if (isCommonEnvironmentVariable(skillName)) {
+      continue;
+    }
+    if (availableSkills.some((skill) => skill.name === skillName)) {
+      return { skillName };
+    }
   }
 
   const namedSkill = availableSkills.find((skill) => {
@@ -470,7 +492,6 @@ export function parseSkillInvocation(
 
   return {
     skillName: namedSkill.name,
-    args: trimmed,
   };
 }
 

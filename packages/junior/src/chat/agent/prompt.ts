@@ -9,6 +9,11 @@
 import { isDeepStrictEqual } from "node:util";
 import { renderCurrentInstruction } from "@/chat/current-instruction";
 import {
+  sandboxSkillDir,
+  sandboxSkillFile,
+  sandboxSkillPathResolution,
+} from "@/chat/sandbox/paths";
+import {
   buildPluginSystemPromptContributions,
   buildSystemPrompt,
   buildTurnContextPrompt,
@@ -24,13 +29,14 @@ import {
 } from "@/chat/pi/transcript";
 import { serializeGenAiAttribute, type LogContext } from "@/chat/logging";
 import type { ConversationPrivacy } from "@/chat/conversation-privacy";
-import type { SkillInvocation, SkillMetadata } from "@/chat/skills";
+import type { Skill, SkillMetadata } from "@/chat/skills";
 import type { ActiveMcpCatalogSummary } from "@/chat/tool-support/skill/mcp-tool-summary";
 import type { ToolRuntimeContext } from "@/chat/tools/types";
 import type { AnyToolDefinition } from "@/chat/tools/definition";
 import { isUserActor, type Actor } from "@/chat/actor";
 import type { ThreadArtifactsState } from "@/chat/state/artifacts";
 import type { PluginTurnContext } from "@/chat/plugins/prompt";
+import { escapeXml } from "@/chat/xml";
 import type {
   AgentRunInput,
   AgentRunInstructionActor,
@@ -99,6 +105,19 @@ export function buildUserTurnText(
     renderThreadContextForPrompt(trimmedContext),
     "",
     currentInstruction,
+  ].join("\n");
+}
+
+/** Render an explicitly selected skill as instructions for the current turn. */
+export function renderExplicitSkillInstructions(skill: Skill): string {
+  return [
+    "<skill>",
+    `<name>${escapeXml(skill.name)}</name>`,
+    `<path>${escapeXml(sandboxSkillFile(skill.name))}</path>`,
+    `<working_directory>${escapeXml(sandboxSkillDir(skill.name))}</working_directory>`,
+    `<path_resolution>${escapeXml(sandboxSkillPathResolution(skill.name))}</path_resolution>`,
+    skill.body,
+    "</skill>",
   ].join("\n");
 }
 
@@ -401,7 +420,7 @@ export async function assemblePrompt(args: {
   conversationPrivacy?: ConversationPrivacy;
   existingSessionPiMessages?: PiMessage[];
   existingTurnStartMessageIndex?: number;
-  invocation: SkillInvocation | null;
+  explicitSkill: Skill | null;
   priorPiMessages?: PiMessage[];
   resumedFromSessionRecord: boolean;
   routing: AgentRunRouting;
@@ -420,6 +439,17 @@ export async function assemblePrompt(args: {
     args.existingTurnStartMessageIndex !== undefined;
   const shouldPromptAgent =
     !args.resumedFromSessionRecord || !hasPromptCheckpoint;
+  const requestContentParts: UserContentPart[] = [
+    ...(args.explicitSkill
+      ? [
+          {
+            type: "text" as const,
+            text: renderExplicitSkillInstructions(args.explicitSkill),
+          },
+        ]
+      : []),
+    ...args.userContentParts,
+  ];
   // Every re-prompt shape must trim a trailing checkpointed copy of the same
   // user prompt, including redelivery of the same inbound message after a
   // lost input commit against a still-`running` record; otherwise the prompt
@@ -427,7 +457,7 @@ export async function assemblePrompt(args: {
   const promptHistoryMessages = shouldPromptAgent
     ? withoutTrailingUncheckpointedUserPrompt(
         args.priorPiMessages,
-        args.userContentParts,
+        requestContentParts,
       )
     : args.existingSessionPiMessages!;
   const replayedPromptContent =
@@ -435,7 +465,7 @@ export async function assemblePrompt(args: {
       ? checkpointedPromptContent({
           messages: args.existingSessionPiMessages,
           turnStartMessageIndex: args.existingTurnStartMessageIndex,
-          userContentParts: args.userContentParts,
+          userContentParts: requestContentParts,
         })
       : undefined;
   const needsBootstrapContextForPrompt =
@@ -475,7 +505,6 @@ export async function assemblePrompt(args: {
                 source,
               }
             : undefined,
-          invocation: args.invocation,
           actor: isUserActor(args.currentActor) ? args.currentActor : undefined,
           artifactState: args.artifactState,
           configuration: args.configurationValues,
@@ -486,7 +515,7 @@ export async function assemblePrompt(args: {
     : [];
   const promptContentParts = replayedPromptContent ?? [
     ...turnContextParts,
-    ...args.userContentParts,
+    ...requestContentParts,
   ];
 
   const inputMessages = [

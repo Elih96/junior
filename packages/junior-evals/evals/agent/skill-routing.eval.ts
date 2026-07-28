@@ -25,15 +25,13 @@ describeEval("Skill Invocation Control", slackEvals, (it) => {
     });
   });
 
-  it("loads a user-callable skill when the user explicitly names it", async ({
+  it("injects a user-callable skill when the user explicitly names it", async ({
     run,
   }) => {
-    await run({
+    const result = await run({
       overrides: { skill_dirs: skillDirs },
       initialEvents: [
-        mention(
-          "Use the weather-lookup skill to check the weather in San Francisco.",
-        ),
+        mention("$weather-lookup check the weather in San Francisco."),
       ],
       criteria: rubric({
         pass: [
@@ -45,6 +43,17 @@ describeEval("Skill Invocation Control", slackEvals, (it) => {
         ],
       }),
     });
+
+    expect(toolCalls(result.session)).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: "loadSkill",
+          arguments: expect.objectContaining({
+            skill_name: "weather-lookup",
+          }),
+        }),
+      ]),
+    );
   });
 
   it("auto-selects an available skill when contextually relevant", async ({
