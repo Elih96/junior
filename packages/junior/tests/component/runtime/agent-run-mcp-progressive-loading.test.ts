@@ -466,7 +466,6 @@ vi.mock("@/chat/plugins/catalog-runtime", () => {
     manifest: {
       name: "demo",
       description: "Demo plugin",
-      capabilities: [],
       configKeys: [],
       mcp: {
         transport: "http",
