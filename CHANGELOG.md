@@ -1,4 +1,41 @@
 # Changelog
+## 0.116.0
+
+### Breaking Changes 🛠
+
+- (chat) Store native agent history events by @dcramer in [#1087](https://github.com/getsentry/junior/pull/1087)
+
+### New Features ✨
+
+#### Tools
+
+- Back sandbox search with ripgrep by @dcramer in [#1086](https://github.com/getsentry/junior/pull/1086)
+- Add deferred queryConversationEvents tool by @sentry-junior in [#1072](https://github.com/getsentry/junior/pull/1072)
+- Describe approval proposals by @dcramer in [#1064](https://github.com/getsentry/junior/pull/1064)
+
+#### Other
+
+- (api) Add personal access tokens by @sentry-junior in [#1080](https://github.com/getsentry/junior/pull/1080)
+- (github) Show conversation pull requests by @sentry-junior in [#1081](https://github.com/getsentry/junior/pull/1081)
+
+### Bug Fixes 🐛
+
+#### Sandbox
+
+- Cancel file tools with agent turn by @dcramer in [#1067](https://github.com/getsentry/junior/pull/1067)
+- Keep sandbox alive during long commands by @sentry-junior in [#1071](https://github.com/getsentry/junior/pull/1071)
+
+#### Other
+
+- (context) Preserve active instruction during compaction by @sentry-junior in [#1077](https://github.com/getsentry/junior/pull/1077)
+- (dashboard) Clarify tool call metadata by @sentry-junior in [#1070](https://github.com/getsentry/junior/pull/1070)
+- (tools) Bound readFile output by @dcramer in [#1085](https://github.com/getsentry/junior/pull/1085)
+
+### Internal Changes 🔧
+
+- (dispatch) Route dispatches through conversation work by @dcramer in [#1059](https://github.com/getsentry/junior/pull/1059)
+- (plugins) Remove declared capabilities by @sentry-junior in [#1083](https://github.com/getsentry/junior/pull/1083)
+
 ## 0.115.0
 
 ### Breaking Changes 🛠
