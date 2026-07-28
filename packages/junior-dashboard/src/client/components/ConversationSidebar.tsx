@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Archive, MessageSquareText, Search } from "lucide-react";
+import { Archive, MessageSquareText } from "lucide-react";
 import { Link } from "react-router";
 
 import { useArchiveConversation } from "../conversations/queries";
@@ -13,6 +13,7 @@ import {
 import { cn } from "../styles";
 import type { Conversation } from "../types";
 import { EmptyTelemetry } from "./EmptyTelemetry";
+import { SearchInput } from "./SearchInput";
 
 /** Render the compact personal conversation picker used by the home workspace. */
 export function ConversationSidebar(props: {
@@ -33,30 +34,22 @@ export function ConversationSidebar(props: {
           Your trail
         </div>
         <div className="flex items-end justify-between gap-3">
-          <h2 className="m-0 font-display text-xl font-medium leading-tight text-white">
+          <h2 className="m-0 font-display text-xl font-medium leading-tight text-dashboard-text">
             Conversations
           </h2>
-          <div className="rounded border border-white/[0.08] bg-black/20 px-2.5 py-1 font-mono text-[0.62rem] text-white/40">
+          <div className="rounded border border-white/[0.08] bg-black/20 px-2.5 py-1 font-mono text-[0.62rem] text-dashboard-text-muted">
             {props.loading ? "…" : props.conversations.length}
           </div>
         </div>
       </div>
       <div className="px-3 pb-3">
-        <div className="relative">
-          <Search
-            aria-hidden="true"
-            className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-white/25"
-            size={14}
-          />
-          <input
-            aria-label="Search your conversations"
-            className="h-10 w-full rounded-lg border border-white/[0.08] bg-black/20 pl-9 pr-3 font-mono text-[0.74rem] text-white/80 outline-none transition-colors placeholder:text-white/20 hover:border-white/15 focus:border-cyan-300/35 focus:ring-2 focus:ring-cyan-300/10"
-            onChange={(event) => props.onQueryChange(event.currentTarget.value)}
-            placeholder="Search conversations…"
-            type="search"
-            value={props.query}
-          />
-        </div>
+        <SearchInput
+          label="Search your conversations"
+          onChange={props.onQueryChange}
+          placeholder="Search conversations…"
+          size="default"
+          value={props.query}
+        />
       </div>
       <div className="min-h-0 overflow-y-auto overscroll-contain px-2 pb-2">
         {props.error ? (
@@ -122,11 +115,11 @@ function ConversationSidebarRow(props: {
               status === "idle" && "bg-white/25",
             )}
           />
-          <div className="truncate font-display text-[0.92rem] font-medium leading-tight text-white/90">
+          <div className="truncate font-display text-[0.92rem] font-medium leading-tight text-dashboard-text">
             {title}
           </div>
         </div>
-        <div className="ml-3.5 mt-1.5 flex min-w-0 items-center gap-1.5 font-mono text-[0.62rem] leading-tight text-white/30">
+        <div className="ml-3.5 mt-1.5 flex min-w-0 items-center gap-1.5 font-mono text-[0.62rem] leading-tight text-dashboard-text-muted">
           <span className="shrink-0">
             {formatRelativeTime(props.conversation.lastSeenAt)}
           </span>
@@ -141,7 +134,7 @@ function ConversationSidebarRow(props: {
       <button
         aria-label={`Archive ${title}`}
         className={cn(
-          "pointer-events-none absolute right-2 top-1/2 z-10 grid size-8 -translate-y-1/2 place-items-center rounded-md border border-white/15 bg-[#111719] text-white/60 opacity-0 shadow-[-8px_0_12px_rgba(9,12,14,0.8)] transition hover:border-white/30 hover:text-white focus:pointer-events-auto focus:opacity-100 focus:outline-none focus:ring-2 focus:ring-cyan-300/35 group-focus-within:pointer-events-auto group-focus-within:opacity-100 group-hover:pointer-events-auto group-hover:opacity-100",
+          "pointer-events-none absolute right-2 top-1/2 z-10 grid size-8 -translate-y-1/2 place-items-center rounded-md border border-white/15 bg-[#111719] text-dashboard-text-muted opacity-0 shadow-[-8px_0_12px_rgba(9,12,14,0.8)] transition hover:border-white/30 hover:text-dashboard-text focus:pointer-events-auto focus:opacity-100 focus:outline-none focus:ring-2 focus:ring-cyan-300/35 group-focus-within:pointer-events-auto group-focus-within:opacity-100 group-hover:pointer-events-auto group-hover:opacity-100",
           archive.error && "border-rose-300/30 text-rose-200/80",
         )}
         disabled={archive.isPending}
@@ -177,7 +170,7 @@ function ArchivedConversationNotice(props: {
     <div className="absolute bottom-3 left-3 right-3 z-20 rounded-lg border border-white/15 bg-[#111719] px-3 py-2.5 shadow-[0_12px_32px_rgba(0,0,0,0.45)]">
       <div className="flex min-w-0 items-center gap-3">
         <div
-          className="min-w-0 flex-1 truncate font-mono text-[0.68rem] text-white/65"
+          className="min-w-0 flex-1 truncate font-mono text-[0.68rem] text-dashboard-text-muted"
           role="status"
         >
           {title} archived
