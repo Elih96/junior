@@ -396,6 +396,32 @@ describe("dashboard routes", () => {
     expect(html).toContain("__JUNIOR_DASHBOARD_BASE_PATH__");
   });
 
+  it("renders the configured agent name from the dashboard shell", async () => {
+    const app = createDashboardApp({ agentName: "Marky", authRequired: false });
+
+    const shell = await app.fetch(new Request("http://localhost/"));
+    const html = await shell.text();
+    expect(html).toContain("<title>Marky</title>");
+    expect(html).toContain("Loading Marky");
+    expect(html).toContain('__JUNIOR_DASHBOARD_AGENT_NAME__ = "Marky"');
+  });
+
+  it("escapes the configured agent name in HTML and inline JavaScript", async () => {
+    const app = createDashboardApp({
+      agentName: '</script><script>alert("xss")</script>',
+      authRequired: false,
+    });
+
+    const response = await app.fetch(new Request("http://localhost/"));
+    const html = await response.text();
+
+    expect(html).not.toContain('</script><script>alert("xss")</script>');
+    expect(html).toContain(
+      "&lt;/script&gt;&lt;script&gt;alert(&quot;xss&quot;)&lt;/script&gt;",
+    );
+    expect(html).toContain("\\u003c/script>\\u003cscript>alert");
+  });
+
   it("renders React Router dashboard page routes", async () => {
     const app = dashboard({
       user: {

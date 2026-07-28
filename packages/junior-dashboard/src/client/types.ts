@@ -94,9 +94,7 @@ export type TranscriptViewMessage = {
   timestamp?: number;
 };
 
-export type ConversationTranscript = ConversationDetailReport & {
-  assistantLabel?: string;
-};
+export type ConversationTranscript = ConversationDetailReport;
 
 export type Conversation = {
   archivedAt?: string;
