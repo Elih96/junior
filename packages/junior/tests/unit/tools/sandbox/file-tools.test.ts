@@ -10,6 +10,7 @@ import { createGrepTool, grepFiles } from "@/chat/tools/sandbox/grep";
 import { listDir } from "@/chat/tools/sandbox/list-dir";
 import { sliceFileContent } from "@/chat/tools/sandbox/read-file";
 import type { SandboxFileSystem } from "@/chat/tools/sandbox/file-utils";
+import type { SandboxCommandRunner } from "@/chat/tools/sandbox/file-utils";
 import { ToolInputError } from "@/chat/tools/execution/tool-input-error";
 
 function workspacePath(filePath: string): string {
@@ -283,6 +284,153 @@ describe("sandbox file tools", () => {
         },
       },
     });
+  });
+
+  it("runs findFiles through ripgrep with ignore-aware argv", async () => {
+    const memory = createMemoryFs({
+      "src/app.ts": "content\n",
+      "src/nested/test.ts": "content\n",
+    });
+    const calls: Parameters<SandboxCommandRunner>[0][] = [];
+    const runCommand: SandboxCommandRunner = async (input) => {
+      calls.push(input);
+      return {
+        exitCode: 0,
+        stderr: "",
+        stdout: "nested/test.ts\0",
+      };
+    };
+
+    const result = await findFiles({
+      fs: memory.fs,
+      path: "src",
+      pattern: "nested/*.ts",
+      runCommand,
+    });
+
+    expect(calls).toEqual([
+      {
+        cmd: "rg",
+        args: [
+          "--files",
+          "--null",
+          "--hidden",
+          "--sort=path",
+          "--glob",
+          "nested/*.ts",
+          "--glob",
+          "!**/.git/**",
+          "--glob",
+          "!**/node_modules/**",
+          "--",
+          ".",
+        ],
+        cwd: workspacePath("src"),
+      },
+    ]);
+    expect(result.details).toMatchObject({
+      ok: true,
+      data: {
+        files: ["nested/test.ts"],
+        file_count: 1,
+      },
+    });
+  });
+
+  it("parses bounded ripgrep JSON without shell interpolation", async () => {
+    const memory = createMemoryFs({
+      "src/nested/app.ts": "before\nneedle\nafter\n",
+    });
+    const calls: Parameters<SandboxCommandRunner>[0][] = [];
+    const event = (type: "context" | "match", line: number, text: string) =>
+      JSON.stringify({
+        type,
+        data: {
+          path: { text: "nested/app.ts" },
+          lines: { text: `${text}\n` },
+          line_number: line,
+        },
+      });
+    const runCommand: SandboxCommandRunner = async (input) => {
+      calls.push(input);
+      return {
+        exitCode: 0,
+        stderr: "",
+        stdout: [
+          event("context", 1, "before"),
+          event("match", 2, "needle"),
+          event("context", 3, "after"),
+        ].join("\n"),
+      };
+    };
+
+    const result = await grepFiles({
+      context: 1,
+      fs: memory.fs,
+      glob: "nested/*.ts",
+      literal: true,
+      path: "src",
+      pattern: "needle'; exit 9; '",
+      runCommand,
+    });
+
+    expect(calls[0]).toMatchObject({
+      cmd: "rg",
+      cwd: workspacePath("src"),
+    });
+    const args = calls[0]?.args ?? [];
+    expect(args).toContain("--fixed-strings");
+    expect(args).toContain("nested/*.ts");
+    expect(args).toContain("needle'; exit 9; '");
+    expect(args.indexOf("nested/*.ts")).toBeLessThan(
+      args.indexOf("!**/.git/**"),
+    );
+    expect(args.indexOf("nested/*.ts")).toBeLessThan(
+      args.indexOf("!**/node_modules/**"),
+    );
+    expect(result.details).toMatchObject({
+      ok: true,
+      data: {
+        lines: [
+          "nested/app.ts-1- before",
+          "nested/app.ts:2: needle",
+          "nested/app.ts-3- after",
+        ],
+        match_count: 1,
+      },
+    });
+  });
+
+  it("preserves ripgrep input and sandbox lifecycle failures", async () => {
+    const memory = createMemoryFs({
+      "src/app.ts": "content\n",
+    });
+    const invalidRegex: SandboxCommandRunner = async () => ({
+      exitCode: 2,
+      stderr: "regex parse error: unclosed character class",
+      stdout: "",
+    });
+
+    await expect(
+      grepFiles({
+        fs: memory.fs,
+        path: "src",
+        pattern: "[invalid",
+        runCommand: invalidRegex,
+      }),
+    ).rejects.toThrow(ToolInputError);
+
+    const lifecycleFailure = new Error("sandbox_stopped");
+    await expect(
+      findFiles({
+        fs: memory.fs,
+        path: "src",
+        pattern: "*.ts",
+        runCommand: async () => {
+          throw lifecycleFailure;
+        },
+      }),
+    ).rejects.toBe(lifecycleFailure);
   });
 
   it("prepares grep string booleans like the previous TypeBox schema", () => {

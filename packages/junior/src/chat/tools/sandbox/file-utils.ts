@@ -1,12 +1,23 @@
 import path from "node:path";
 import { SANDBOX_WORKSPACE_ROOT } from "@/chat/sandbox/paths";
-import type { SandboxFileSystem } from "@/chat/sandbox/workspace";
+import type {
+  SandboxCommandInput,
+  SandboxCommandResult,
+  SandboxFileSystem,
+} from "@/chat/sandbox/workspace";
 import { ToolInputError } from "@/chat/tools/execution/tool-input-error";
 import { makeStructuredToolResult } from "@/chat/tool-support/structured-result";
 
 export type { SandboxFileSystem };
+export type SandboxCommandRunner = (
+  input: SandboxCommandInput,
+) => Promise<SandboxCommandResult>;
 
 export const MAX_TEXT_CHARS = 60_000;
+export const RIPGREP_EXCLUDED_GLOBS = [
+  "!**/.git/**",
+  "!**/node_modules/**",
+] as const;
 const SKIPPED_DIRECTORIES = new Set([".git", "node_modules"]);
 
 export type TextSearchResultDetails =
@@ -174,6 +185,20 @@ export function resolveWorkspacePath(
     );
   }
   return normalized;
+}
+
+/** Anchor ripgrep paths and globs to the requested search root. */
+export function getRipgrepSearchLocation(
+  root: string,
+  rootIsDirectory: boolean,
+): { cwd: string; target: string } {
+  if (rootIsDirectory) {
+    return { cwd: root, target: "." };
+  }
+  return {
+    cwd: path.posix.dirname(root),
+    target: path.posix.basename(root),
+  };
 }
 
 /** Share bounded workspace traversal across search tools so their skip rules stay aligned. */
