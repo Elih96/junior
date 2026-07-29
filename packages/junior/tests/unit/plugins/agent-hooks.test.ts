@@ -995,6 +995,7 @@ describe("agent plugin hooks", () => {
   });
 
   it("collects API route apps from configured plugins", async () => {
+    let hasViewerActorResolver = false;
     const previous = setPlugins([
       defineJuniorPlugin({
         manifest: {
@@ -1003,7 +1004,8 @@ describe("agent plugin hooks", () => {
           description: "Agent demo",
         },
         hooks: {
-          apiRoutes() {
+          apiRoutes(ctx) {
+            hasViewerActorResolver = typeof ctx.viewer.actors === "function";
             return {
               fetch: () => new Response("api demo"),
             };
@@ -1016,6 +1018,7 @@ describe("agent plugin hooks", () => {
 
       expect(routes).toHaveLength(1);
       expect(routes[0]?.pluginName).toBe("agent-demo");
+      expect(hasViewerActorResolver).toBe(true);
       const response = await routes[0]!.app.fetch(
         new Request("http://localhost/demo"),
       );
