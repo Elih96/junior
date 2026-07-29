@@ -8,7 +8,10 @@
  */
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 import type { OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
-import type { ToolAnnotations } from "@sentry/junior-plugin-api";
+import type {
+  PluginMcpToolResult,
+  ToolAnnotations,
+} from "@sentry/junior-plugin-api";
 import {
   logWarn,
   serializeGenAiAttribute,
@@ -269,7 +272,15 @@ export interface McpToolManagerOptions {
 }
 
 export interface ManagedMcpToolResult {
+  /**
+   * Internal bridge for direct model calls, which need placeholder content
+   * while the wrapper boundary receives a content-free discriminated result.
+   */
+  authorizationPending?: boolean;
   content: Array<TextContent | ImageContent>;
+  /** Original provider content before model-visible result normalization. */
+  providerContent?: Array<TextContent | ImageContent>;
+  structuredContent?: unknown;
 }
 
 export interface ManagedMcpToolDescriptor {
@@ -362,6 +373,7 @@ export class McpToolManager {
     try {
       const client = await this.getClient(plugin);
       const tools = this.filterListedTools(plugin, await client.listTools());
+      this.assertWrappedToolsAvailable(plugin, tools);
       this.toolsByProvider.set(
         provider,
         tools.map((tool) => this.toManagedTool(plugin, client, tool)),
@@ -428,8 +440,30 @@ export class McpToolManager {
       );
     }
 
-    const allowedToolSet = new Set(allowedTools);
-    return tools.filter((tool) => allowedToolSet.has(tool.name));
+    const loadedToolSet = new Set([
+      ...allowedTools,
+      ...(plugin.manifest.mcp?.wrappedTools ?? []),
+    ]);
+    return tools.filter((tool) => loadedToolSet.has(tool.name));
+  }
+
+  private assertWrappedToolsAvailable(
+    plugin: PluginDefinition,
+    tools: PluginMcpListedTool[],
+  ): void {
+    const wrappedTools = plugin.manifest.mcp?.wrappedTools ?? [];
+    if (wrappedTools.length === 0) {
+      return;
+    }
+    const availableToolNames = new Set(tools.map((tool) => tool.name));
+    const missingTools = wrappedTools.filter(
+      (toolName) => !availableToolNames.has(toolName),
+    );
+    if (missingTools.length > 0) {
+      throw new Error(
+        `Plugin ${plugin.manifest.name} MCP discovery missing wrapped tools: ${missingTools.join(", ")}`,
+      );
+    }
   }
 
   private async getClient(plugin: PluginDefinition): Promise<PluginMcpClient> {
@@ -539,8 +573,15 @@ export class McpToolManager {
                 });
               }
 
+              const providerContent = boundMcpContent(
+                toAgentToolContent(result),
+              );
               return {
                 content: toModelVisibleMcpContent(result),
+                providerContent,
+                ...(result.structuredContent !== undefined
+                  ? { structuredContent: result.structuredContent }
+                  : {}),
               };
             } catch (error) {
               if (
@@ -558,7 +599,9 @@ export class McpToolManager {
                 // and let the aborted turn park cleanly instead of surfacing a
                 // spurious tool failure to the model.
                 return {
+                  authorizationPending: true,
                   content: parkedContent,
+                  providerContent: parkedContent,
                 };
               }
               const errorAttributes = {
@@ -625,10 +668,67 @@ export class McpToolManager {
         continue;
       }
 
-      resolved.push(...(this.toolsByProvider.get(provider) ?? []));
+      const wrappedTools = new Set(
+        this.pluginsByProvider.get(provider)?.manifest.mcp?.wrappedTools ?? [],
+      );
+      resolved.push(
+        ...(this.toolsByProvider.get(provider) ?? []).filter(
+          (tool) => !wrappedTools.has(tool.rawName),
+        ),
+      );
     }
 
     return resolved;
+  }
+
+  /** Call one active provider tool declared for plugin-owned wrapping. */
+  async callWrappedTool(
+    provider: string,
+    rawName: string,
+    args: Record<string, unknown>,
+    options?: { toolCallId?: string },
+  ): Promise<PluginMcpToolResult> {
+    if (!this.activeProviders.has(provider)) {
+      throw new McpToolError(`MCP provider is not active: ${provider}`);
+    }
+    const wrappedTools = new Set(
+      this.pluginsByProvider.get(provider)?.manifest.mcp?.wrappedTools ?? [],
+    );
+    if (!wrappedTools.has(rawName)) {
+      throw new McpToolError(
+        `Plugin ${provider} cannot call unwrapped MCP tool ${rawName}`,
+      );
+    }
+    const tool = (this.toolsByProvider.get(provider) ?? []).find(
+      (candidate) => candidate.rawName === rawName,
+    );
+    if (!tool) {
+      throw new McpToolError(
+        `MCP provider ${provider} does not expose tool ${rawName}`,
+      );
+    }
+    let result: ManagedMcpToolResult;
+    try {
+      result = await tool.execute(args, {
+        conversationPrivacy: "private",
+        ...(options?.toolCallId ? { toolCallId: options.toolCallId } : {}),
+      });
+    } catch (error) {
+      if (error instanceof McpToolError) {
+        return { status: "error", message: error.message };
+      }
+      throw error;
+    }
+    if (result.authorizationPending) {
+      return { status: "authorization_pending" };
+    }
+    return {
+      status: "success",
+      content: result.providerContent ?? result.content,
+      ...(result.structuredContent !== undefined
+        ? { structuredContent: result.structuredContent }
+        : {}),
+    };
   }
 
   private toToolDescriptor(tool: ManagedMcpTool): ManagedMcpToolDescriptor {

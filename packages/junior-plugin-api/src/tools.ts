@@ -67,6 +67,57 @@ export interface PluginEgress {
   }): Promise<Response>;
 }
 
+export type PluginMcpContent =
+  | { type: "text"; text: string }
+  | { type: "image"; data: string; mimeType: string };
+
+/** Successful raw provider result returned to a plugin-owned wrapper tool. */
+export type PluginMcpToolSuccess = {
+  content: PluginMcpContent[];
+  status: "success";
+  structuredContent?: unknown;
+};
+
+/** Handled provider authorization pause with no provider result to consume. */
+export type PluginMcpAuthorizationPending = {
+  status: "authorization_pending";
+};
+
+/** Definitive provider rejection; transport and session failures still throw. */
+export type PluginMcpToolError = {
+  message: string;
+  status: "error";
+};
+
+export type PluginMcpToolResult =
+  | PluginMcpAuthorizationPending
+  | PluginMcpToolError
+  | PluginMcpToolSuccess;
+
+/** Access to this plugin's hosted MCP provider without exposing credentials. */
+export interface PluginMcp {
+  /**
+   * Call a provider tool declared in `wrappedTools`.
+   *
+   * The host activates the provider when needed. Successful calls return the
+   * provider's original content, provider rejections return an error result,
+   * and authorization pauses return no tool content. Transport failures throw.
+   */
+  callTool(input: {
+    arguments?: Record<string, unknown>;
+    name: string;
+    toolCallId?: string;
+  }): Promise<PluginMcpToolResult>;
+  /**
+   * Activate the provider before wrapper-owned state changes.
+   *
+   * Ordinary wrappers can call `callTool` directly. Durable mutation wrappers
+   * may prepare first so an initial authorization pause happens before they
+   * record pending work.
+   */
+  prepare(): Promise<"authorization_pending" | "ready">;
+}
+
 export interface SandboxPrepareHookContext extends PluginContext {
   actor?: Actor;
   sandbox: PluginSandbox;
@@ -350,6 +401,7 @@ interface BaseToolRegistrationHookContext extends PluginContext {
   annotations?: PluginAnnotations;
   embedder: PluginEmbedder;
   egress: PluginEgress;
+  mcp?: PluginMcp;
   model: PluginModel;
   state: PluginState;
   userText?: string;

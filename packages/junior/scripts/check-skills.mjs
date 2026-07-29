@@ -159,10 +159,16 @@ async function resolveWorkspaceRoot(cwd) {
   }
 }
 
-async function resolveWorkspacePackageSkillRoots() {
+async function resolveWorkspaceSkillRoots() {
   const workspaceRoot = await resolveWorkspaceRoot(process.cwd());
   if (!workspaceRoot) {
     return [];
+  }
+
+  const roots = [];
+  const repoSkillsRoot = path.join(workspaceRoot, "skills");
+  if (await pathIsDirectory(repoSkillsRoot)) {
+    roots.push(repoSkillsRoot);
   }
 
   const packagesRoot = path.join(workspaceRoot, "packages");
@@ -170,10 +176,9 @@ async function resolveWorkspacePackageSkillRoots() {
   try {
     packageEntries = await fs.readdir(packagesRoot, { withFileTypes: true });
   } catch {
-    return [];
+    return unique(roots);
   }
 
-  const roots = [];
   for (const entry of packageEntries) {
     if (!entry.isDirectory()) {
       continue;
@@ -215,12 +220,8 @@ async function resolvePluginSkillRoots() {
   }
 
   const packagedRoots = await resolvePackagedPluginSkillRoots();
-  const workspacePackageRoots = await resolveWorkspacePackageSkillRoots();
-  return uniqueRealPaths([
-    ...localRoots,
-    ...packagedRoots,
-    ...workspacePackageRoots,
-  ]);
+  const workspaceRoots = await resolveWorkspaceSkillRoots();
+  return uniqueRealPaths([...localRoots, ...packagedRoots, ...workspaceRoots]);
 }
 
 function resolveSkillRoots() {
