@@ -6,10 +6,14 @@
  * a local destination, and only commits assistant delivery after the CLI sink
  * accepts each completed tool-free assistant message.
  */
-import type { AgentRunResult } from "@/chat/services/turn-result";
+import {
+  getAssistantMessageText,
+  type AgentRunResult,
+} from "@/chat/services/turn-result";
 import { randomUUID } from "node:crypto";
 import type { AgentRunner } from "@/chat/runtime/agent-runner";
 import type { PiMessage } from "@/chat/pi/messages";
+import type { AssistantMessage } from "@earendil-works/pi-ai";
 import {
   createLocalSource,
   localDestinationSchema,
@@ -45,7 +49,10 @@ import {
 import { coerceThreadArtifactsState } from "@/chat/state/artifacts";
 import { coerceThreadConversationState } from "@/chat/state/conversation";
 import { hydrateConversationMessages } from "@/chat/conversations/messages";
-import { loadProjection } from "@/chat/conversations/projection";
+import {
+  commitAcceptedReply,
+  loadProjection,
+} from "@/chat/conversations/projection";
 import { getConversationEventStore } from "@/chat/db";
 import {
   ConversationTurnLifecycleService,
@@ -249,27 +256,37 @@ export async function runLocalAgentTurn(
   };
   let assistantMessageDelivered = false;
   /** Print and record one completed assistant message in local conversation order. */
-  const deliverAssistantMessage = async (message: {
-    text: string;
-  }): Promise<void> => {
-    if (!message.text.trim()) {
+  const deliverAssistantMessage = async (
+    reply: AssistantMessage | string,
+  ): Promise<void> => {
+    const message = typeof reply === "string" ? undefined : reply;
+    const text =
+      typeof reply === "string" ? reply : getAssistantMessageText(reply);
+    if (!text?.trim()) {
       return;
     }
     failureCode = "delivery_failed";
-    await deps.deliverReply({ text: message.text });
+    await deps.deliverReply({ text });
     assistantMessageDelivered = true;
-    recordDeliveredAssistantMessage({
+    const recordedMessageId = recordDeliveredAssistantMessage({
       conversation,
       sessionId: turnId,
-      text: message.text,
+      text,
       userMessageId,
     });
     try {
       await persistWithRetry(() =>
-        persistConversationMessages({
-          conversation,
-          conversationId: input.conversationId,
-        }),
+        message
+          ? commitAcceptedReply({
+              agentMessage: message,
+              conversation,
+              conversationMessageId: recordedMessageId,
+              conversationId: input.conversationId,
+            })
+          : persistConversationMessages({
+              conversation,
+              conversationId: input.conversationId,
+            }),
       );
     } catch (error) {
       logException(
@@ -339,9 +356,7 @@ export async function runLocalAgentTurn(
             await deps.onToolResult?.(result);
           },
         },
-        delivery: {
-          onAssistantMessage: deliverAssistantMessage,
-        },
+        delivery: deliverAssistantMessage,
         durability: {
           onArtifactStateUpdated: async (nextArtifacts) => {
             artifacts = nextArtifacts;
@@ -422,7 +437,7 @@ export async function runLocalAgentTurn(
     modelFailureEventId = finalized.eventId;
 
     if (reply.diagnostics.outcome !== "success") {
-      await deliverAssistantMessage({ text: reply.text });
+      await deliverAssistantMessage(reply.text);
     }
 
     completedState = buildDeliveredTurnStatePatch({

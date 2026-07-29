@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import type { AgentRunResult } from "@/chat/services/turn-result";
+import {
+  getAssistantMessageText,
+  type AgentRunResult,
+} from "@/chat/services/turn-result";
 import {
   defineJuniorPlugin,
   type PluginRunContext,
@@ -13,8 +16,9 @@ import {
   type LocalToolResult,
 } from "@/chat/local/runner";
 import type { PiMessage } from "@/chat/pi/messages";
+import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { AgentRunner } from "@/chat/runtime/agent-runner";
-import { persistCompletedSessionRecord } from "@/chat/services/turn-session-record";
+import { persistRunningSessionRecord } from "@/chat/services/turn-session-record";
 import {
   getPersistedSandboxState,
   getPersistedThreadState,
@@ -43,7 +47,7 @@ function userPiMessage(text: string, timestamp = 1): PiMessage {
   } as PiMessage;
 }
 
-function assistantPiMessage(text: string, timestamp = 1): PiMessage {
+function assistantPiMessage(text: string, timestamp = 1): AssistantMessage {
   return {
     role: "assistant",
     content: [{ type: "text", text }],
@@ -66,7 +70,7 @@ function assistantPiMessage(text: string, timestamp = 1): PiMessage {
     },
     stopReason: "stop",
     timestamp,
-  } as PiMessage;
+  };
 }
 
 function successReply(
@@ -123,20 +127,31 @@ type FlatAgentRunRequest = ReturnType<typeof flattenAgentRunRequestForTest>;
 async function deliverAssistantText(
   request: Parameters<AgentRunner["run"]>[0],
   text: string,
+  message: AssistantMessage = assistantPiMessage(text),
+  historyBeforeMessage?: PiMessage[],
 ): Promise<void> {
   if (!request.delivery) {
     throw new Error("local test runner requires assistant delivery");
   }
-  await request.delivery.onAssistantMessage({ text });
+  if (historyBeforeMessage) {
+    await commitMessages({
+      conversationId: request.conversationId,
+      messages: historyBeforeMessage,
+    });
+  }
+  if (getAssistantMessageText(message) !== text) {
+    throw new Error("fake delivery text must match its assistant message");
+  }
+  await request.delivery(message);
 }
 
-async function persistCompletedSessionForFakeReply(
+async function persistRunningSessionForFakeReply(
   context: FlatAgentRunRequest,
   piMessages: PiMessage[],
 ): Promise<void> {
   const conversationId = context.conversationId;
   const sessionId = context.turnId;
-  await persistCompletedSessionRecord({
+  await persistRunningSessionRecord({
     modelId: "fake-local-agent",
     conversationId,
     destination: context.destination,
@@ -145,7 +160,8 @@ async function persistCompletedSessionForFakeReply(
     source: context.source,
     sessionId,
     sliceId: 1,
-    allMessages: piMessages,
+    messages: piMessages.slice(0, -1),
+    logContext: {},
     surface: context.surface,
     turnStartMessageIndex: context.piMessages?.length ?? 0,
   });
@@ -798,12 +814,18 @@ describe("local agent runner", () => {
             run: async (request) => {
               const context = flattenAgentRunRequestForTest(request);
 
-              const piMessages = [
+              const replyMessage = assistantPiMessage("captured", 2);
+              const piMessages: PiMessage[] = [
                 userPiMessage("capture this local turn"),
-                assistantPiMessage("captured", 2),
+                replyMessage,
               ];
-              await persistCompletedSessionForFakeReply(context, piMessages);
-              await deliverAssistantText(request, "captured");
+              await persistRunningSessionForFakeReply(context, piMessages);
+              await deliverAssistantText(
+                request,
+                "captured",
+                replyMessage,
+                piMessages.slice(0, -1),
+              );
               return completedAgentRun(
                 successReply("captured", {
                   piMessages,
@@ -1050,12 +1072,18 @@ describe("local agent runner", () => {
     });
     expect(conversationId).toBeDefined();
 
-    const generatedMessages = [
+    const generatedMessage = assistantPiMessage("persisted visible output", 2);
+    const generatedMessages: PiMessage[] = [
       userPiMessage("hello"),
-      assistantPiMessage("persisted pi output", 2),
+      generatedMessage,
     ];
     const generateReply = vi.fn<AgentRunner["run"]>(async (request) => {
-      await deliverAssistantText(request, "persisted visible output");
+      await deliverAssistantText(
+        request,
+        "persisted visible output",
+        generatedMessage,
+        generatedMessages.slice(0, -1),
+      );
       return completedAgentRun(
         successReply("persisted visible output", {
           piMessages: generatedMessages,
@@ -1107,9 +1135,10 @@ describe("local agent runner", () => {
     });
     expect(conversationId).toBeDefined();
 
-    const generatedMessages = [
+    const generatedMessage = assistantPiMessage("visible reply", 2);
+    const generatedMessages: PiMessage[] = [
       userPiMessage("hello"),
-      assistantPiMessage("visible reply", 2),
+      generatedMessage,
     ];
     const delivered: LocalAgentReply[] = [];
     let taskRuns = 0;
@@ -1146,11 +1175,16 @@ describe("local agent runner", () => {
               run: async (request) => {
                 const context = flattenAgentRunRequestForTest(request);
 
-                await persistCompletedSessionForFakeReply(
+                await persistRunningSessionForFakeReply(
                   context,
                   generatedMessages,
                 );
-                await deliverAssistantText(request, "visible reply");
+                await deliverAssistantText(
+                  request,
+                  "visible reply",
+                  generatedMessage,
+                  generatedMessages.slice(0, -1),
+                );
                 return completedAgentRun(
                   successReply("visible reply", {
                     piMessages: generatedMessages,

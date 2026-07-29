@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createSlackSource, type Destination } from "@sentry/junior-plugin-api";
 import { renderCurrentInstruction } from "@/chat/current-instruction";
 import type { PiMessage } from "@/chat/pi/messages";
+import { extractAssistantText } from "@/chat/pi/transcript";
 import { readConversationDetail } from "@/api/conversations/detail";
 
 const { agentMode, compactionState, counters, sessionLogState } = vi.hoisted(
@@ -901,10 +902,8 @@ describe("provider retry composition", () => {
         source: TEST_SOURCE,
         actor: { platform: "slack", teamId: "T123", userId: "U123" },
       },
-      delivery: {
-        onAssistantMessage: (message) => {
-          delivered.push(message);
-        },
+      delivery: (message) => {
+        delivered.push({ text: extractAssistantText(message) });
       },
       durability: {
         drainSteeringMessages: async (inject) => {
@@ -941,10 +940,8 @@ describe("provider retry composition", () => {
         source: TEST_SOURCE,
         actor: { platform: "slack", teamId: "T123", userId: "U123" },
       },
-      delivery: {
-        onAssistantMessage: (message) => {
-          delivered.push(message);
-        },
+      delivery: (message) => {
+        delivered.push({ text: extractAssistantText(message) });
       },
       durability: { shouldYield: () => true },
     });
@@ -966,10 +963,8 @@ describe("provider retry composition", () => {
         source: TEST_SOURCE,
         actor: { platform: "slack", teamId: "T123", userId: "U123" },
       },
-      delivery: {
-        onAssistantMessage: (message) => {
-          delivered.push(message);
-        },
+      delivery: (message) => {
+        delivered.push({ text: extractAssistantText(message) });
       },
       durability: {
         drainSteeringMessages: async (inject) => {

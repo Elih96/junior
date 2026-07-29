@@ -16,6 +16,10 @@ import type {
 } from "@sentry/junior-plugin-api";
 import { executeWithReplay } from "vitest-evals/replay";
 import type { JsonValue } from "vitest-evals/harness";
+import {
+  createFauxCore,
+  fauxAssistantMessage,
+} from "@earendil-works/pi-ai/providers/faux";
 import { createSlackRuntime } from "@/chat/app/factory";
 import { botConfig } from "@/chat/config";
 import { getConversationEventStore, getDb } from "@/chat/db";
@@ -1902,22 +1906,13 @@ function buildRuntimeServices(
           }
           const mockImageGeneration = scenario.overrides?.mock_image_generation;
           const replyText = replyTexts[replyState.successfulCount];
+          let scriptedStream: ReturnType<typeof createFauxCore> | undefined;
           if (typeof replyText === "string") {
-            await runRequest.durability?.onInputCommitted?.();
-            await runRequest.delivery?.onAssistantMessage({ text: replyText });
-            replyState.successfulCount += 1;
-            return completedAgentRun({
-              text: replyText,
-              diagnostics: {
-                assistantMessageCount: 1,
-                modelId: "eval-reply-text",
-                outcome: "success",
-                toolCalls: [],
-                toolErrorCount: 0,
-                toolResultCount: 0,
-                usedPrimaryText: true,
-              },
+            scriptedStream = createFauxCore({
+              api: "eval",
+              provider: "eval",
             });
+            scriptedStream.setResponses([fauxAssistantMessage(replyText)]);
           }
 
           const gatewaySnapshot = snapshotEnv([
@@ -1962,50 +1957,54 @@ function buildRuntimeServices(
               AbortSignal.timeout(replyTimeoutMs),
             ]);
             const outcome = await raceWithAbort(replySignal, () =>
-              executeAgentRun({
-                ...runRequest,
-                policy: {
-                  ...runRequest.policy,
-                  signal: replySignal,
-                  turnDeadlineAtMs: Math.min(
-                    runRequest.policy?.turnDeadlineAtMs ??
-                      Number.POSITIVE_INFINITY,
-                    Date.now() + replyTimeoutMs,
-                  ),
-                  ...(env.configuredSkillDirs.length > 0
-                    ? { skillDirs: env.configuredSkillDirs }
-                    : {}),
-                  toolOverrides,
-                },
-                observers: {
-                  ...runRequest.observers,
-                  onToolInvocation: (invocation) => {
-                    const evalInvocation = toEvalToolInvocation(invocation);
-                    observations.toolInvocations.push(evalInvocation);
-                    pendingToolInvocations.push(evalInvocation);
+              executeAgentRun(
+                {
+                  ...runRequest,
+                  policy: {
+                    ...runRequest.policy,
+                    signal: replySignal,
+                    turnDeadlineAtMs: Math.min(
+                      runRequest.policy?.turnDeadlineAtMs ??
+                        Number.POSITIVE_INFINITY,
+                      Date.now() + replyTimeoutMs,
+                    ),
+                    ...(env.configuredSkillDirs.length > 0
+                      ? { skillDirs: env.configuredSkillDirs }
+                      : {}),
+                    toolOverrides,
                   },
-                  onToolResult: (result) => {
-                    const pendingIndex = pendingToolInvocations.findIndex(
-                      (candidate) => candidate.toolCallId === result.toolCallId,
-                    );
-                    if (pendingIndex === -1) {
-                      return;
-                    }
-                    const [invocation] = pendingToolInvocations.splice(
-                      pendingIndex,
-                      1,
-                    );
-                    invocation.completed = true;
-                    invocation.ok = result.ok;
-                    if (result.error) {
-                      invocation.error = result.error;
-                    }
-                    if (result.result !== undefined) {
-                      invocation.result = result.result;
-                    }
+                  observers: {
+                    ...runRequest.observers,
+                    onToolInvocation: (invocation) => {
+                      const evalInvocation = toEvalToolInvocation(invocation);
+                      observations.toolInvocations.push(evalInvocation);
+                      pendingToolInvocations.push(evalInvocation);
+                    },
+                    onToolResult: (result) => {
+                      const pendingIndex = pendingToolInvocations.findIndex(
+                        (candidate) =>
+                          candidate.toolCallId === result.toolCallId,
+                      );
+                      if (pendingIndex === -1) {
+                        return;
+                      }
+                      const [invocation] = pendingToolInvocations.splice(
+                        pendingIndex,
+                        1,
+                      );
+                      invocation.completed = true;
+                      invocation.ok = result.ok;
+                      if (result.error) {
+                        invocation.error = result.error;
+                      }
+                      if (result.result !== undefined) {
+                        invocation.result = result.result;
+                      }
+                    },
                   },
                 },
-              }),
+                scriptedStream?.stream,
+              ),
             );
             const usage =
               outcome.status === "completed"

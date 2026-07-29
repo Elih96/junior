@@ -37,6 +37,7 @@ import type {
   WebFetchToolDeps,
   WebSearchToolDeps,
 } from "@/chat/tools/types";
+import type { AssistantMessage } from "@earendil-works/pi-ai";
 
 export interface AgentRunAttachment {
   data?: Buffer;
@@ -144,15 +145,15 @@ export interface AgentRunObservers {
   onStatus?: (status: AssistantStatusSpec) => void | Promise<void>;
 }
 
-/** One completed tool-free assistant message ready for destination delivery. */
-export interface AgentAssistantMessage {
-  text: string;
-}
-
-/** Delivers completed tool-free assistant messages in model order. */
-export interface AgentRunDelivery {
-  onAssistantMessage: (message: AgentAssistantMessage) => void | Promise<void>;
-}
+/**
+ * Delivers completed tool-free assistant messages in model order.
+ *
+ * The runner must commit the preceding agent boundary before invoking this
+ * port; the accepted reply transaction appends only this message.
+ */
+export type AgentRunDelivery = (
+  message: AssistantMessage,
+) => void | Promise<void>;
 
 /** Resume the agent turn after a transient or ambiguous delivery failure. */
 export class RetryableDeliveryError extends Error {
