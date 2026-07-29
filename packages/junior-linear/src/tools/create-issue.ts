@@ -1,16 +1,14 @@
 import {
   definePluginTool,
-  PluginToolInputError,
   type PluginMcpToolSuccess,
+  type PluginToolContent,
   type PluginToolExecuteOptions,
   type PluginToolResult,
+  type PluginToolResultEnvelope,
   type ToolRegistrationHookContext,
   pluginToolResultSchema,
 } from "@sentry/junior-plugin-api";
 import { z } from "zod";
-
-const CREATE_ISSUE_STATE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
-const CREATE_ISSUE_LOCK_TTL_MS = 60_000;
 
 const inputSchema = z
   .object({
@@ -49,46 +47,18 @@ const outputSchema = pluginToolResultSchema.extend({
   target: z.literal("createIssue"),
   data: z.object({
     issue: issueSchema.nullable(),
-    providerText: z.string(),
   }),
   issue: issueSchema.nullable(),
-  providerText: z.string(),
 });
-
-const completedStateSchema = z
-  .object({
-    createdAtMs: z.number(),
-    issue: issueSchema.nullable(),
-    providerText: z.string(),
-    status: z.literal("completed"),
-  })
-  .strict();
-
-const pendingStateSchema = z
-  .object({
-    createdAtMs: z.number(),
-    status: z.literal("pending"),
-  })
-  .strict();
-
-const stateSchema = z.union([completedStateSchema, pendingStateSchema]);
-type CreateIssueState = z.output<typeof stateSchema>;
 
 interface LinearIssueToolResult extends PluginToolResult {
   data: {
     issue: LinearIssue | null;
-    providerText: string;
   };
   issue: LinearIssue | null;
   ok: true;
-  providerText: string;
   status: "success";
   target: "createIssue";
-}
-
-function parseState(value: unknown): CreateIssueState | undefined {
-  const parsed = stateSchema.safeParse(value);
-  return parsed.success ? parsed.data : undefined;
 }
 
 function collectObjects(
@@ -118,17 +88,6 @@ function stringField(
   return undefined;
 }
 
-function providerText(result: PluginMcpToolSuccess): string {
-  return result.content
-    .filter(
-      (part): part is Extract<typeof part, { type: "text" }> =>
-        part.type === "text",
-    )
-    .map((part) => part.text)
-    .join("\n\n")
-    .trim();
-}
-
 function parseJsonText(text: string): unknown {
   try {
     return JSON.parse(text);
@@ -138,15 +97,25 @@ function parseJsonText(text: string): unknown {
 }
 
 function extractIssue(result: PluginMcpToolSuccess): LinearIssue | null {
-  const text = providerText(result);
   const objects: Record<string, unknown>[] = [];
   collectObjects(result.structuredContent, objects);
-  collectObjects(parseJsonText(text), objects);
-
-  const urlMatch = text.match(
-    /https:\/\/linear\.app\/[^\s<>)"']+\/issue\/([A-Z][A-Z0-9]*-\d+)[^\s<>)"']*/i,
+  const textParts = result.content.flatMap((part) =>
+    part.type === "text" ? [part.text] : [],
   );
-  const identifierMatch = text.match(/\b[A-Z][A-Z0-9]*-\d+\b/);
+  for (const text of textParts) {
+    collectObjects(parseJsonText(text), objects);
+  }
+
+  const urlMatch = textParts
+    .map((text) =>
+      text.match(
+        /https:\/\/linear\.app\/[^\s<>)"']+\/issue\/([A-Z][A-Z0-9]*-\d+)[^\s<>)"']*/i,
+      ),
+    )
+    .find((match) => match !== null);
+  const identifierMatch = textParts
+    .map((text) => text.match(/\b[A-Z][A-Z0-9]*-\d+\b/))
+    .find((match) => match !== null);
   const issue = {
     id: stringField(objects, "id"),
     identifier:
@@ -169,16 +138,23 @@ function extractIssue(result: PluginMcpToolSuccess): LinearIssue | null {
 
 function toolResult(
   issue: LinearIssue | null,
-  text: string,
-): LinearIssueToolResult {
-  const data = { issue, providerText: text };
+  content: PluginToolContent[],
+): PluginToolResultEnvelope<LinearIssueToolResult> {
+  const data = { issue };
   return {
-    ok: true,
-    status: "success",
-    target: "createIssue",
-    data,
-    ...data,
+    content,
+    details: {
+      ok: true,
+      status: "success",
+      target: "createIssue",
+      data,
+      ...data,
+    },
   };
+}
+
+function authorizationPendingResult(): PluginToolResultEnvelope<LinearIssueToolResult> {
+  return toolResult(null, [{ type: "text", text: "Authorization pending." }]);
 }
 
 async function annotateIssue(
@@ -197,11 +173,6 @@ async function annotateIssue(
   });
 }
 
-function required(value: string | undefined, name: string): string {
-  if (!value?.trim()) throw new PluginToolInputError(`${name} is required`);
-  return value.trim();
-}
-
 /** Create a Linear issue through the hosted MCP provider and link it to the conversation. */
 export function createLinearIssueTool(ctx: ToolRegistrationHookContext) {
   return definePluginTool({
@@ -211,7 +182,7 @@ export function createLinearIssueTool(ctx: ToolRegistrationHookContext) {
     outputSchema,
     annotations: {
       destructiveHint: false,
-      idempotentHint: true,
+      idempotentHint: false,
       openWorldHint: true,
       readOnlyHint: false,
       title: "Create Linear issue",
@@ -227,66 +198,20 @@ export function createLinearIssueTool(ctx: ToolRegistrationHookContext) {
       if (!mcp) {
         throw new Error("Linear MCP provider is unavailable.");
       }
-      const conversationId = required(ctx.conversationId, "conversationId");
-      const toolCallId = required(options.toolCallId, "toolCallId");
-      if ((await mcp.prepare()) === "authorization_pending") {
-        return toolResult(null, "Authorization pending.");
+      const result = await mcp.callTool({
+        name: "save_issue",
+        arguments: input,
+        toolCallId: options.toolCallId,
+      });
+      if (result.status === "authorization_pending") {
+        return authorizationPendingResult();
       }
-
-      const key = `createIssue:${conversationId}:${toolCallId}`;
-      return await ctx.state.withLock(
-        `${key}:lock`,
-        CREATE_ISSUE_LOCK_TTL_MS,
-        async () => {
-          const state = parseState(await ctx.state.get(key));
-          if (state?.status === "completed") {
-            await annotateIssue(ctx, state.issue);
-            return toolResult(state.issue, state.providerText);
-          }
-          if (state?.status === "pending") {
-            throw new Error(
-              "Linear issue creation for this tool call has an uncertain pending result; refusing to create a duplicate issue.",
-            );
-          }
-
-          await ctx.state.set(
-            key,
-            { status: "pending", createdAtMs: Date.now() },
-            CREATE_ISSUE_STATE_TTL_MS,
-          );
-          const result = await mcp.callTool({
-            name: "create_issue",
-            arguments: input,
-            toolCallId,
-          });
-          if (result.status === "authorization_pending") {
-            await ctx.state.delete(key);
-            return toolResult(null, "Authorization pending.");
-          }
-          if (result.status === "error") {
-            await ctx.state.delete(key);
-            throw new Error(result.message);
-          }
-          const text = providerText(result);
-          const issue = extractIssue(result);
-          const completedState: CreateIssueState = {
-            status: "completed",
-            createdAtMs: Date.now(),
-            issue,
-            providerText: text,
-          };
-          try {
-            await ctx.state.set(key, completedState, CREATE_ISSUE_STATE_TTL_MS);
-          } catch (error) {
-            throw new Error(
-              "Linear issue was created, but Junior could not persist the completed issue state.",
-              { cause: error },
-            );
-          }
-          await annotateIssue(ctx, issue);
-          return toolResult(issue, text);
-        },
-      );
+      if (result.status === "error") {
+        throw new Error(result.message);
+      }
+      const issue = extractIssue(result);
+      await annotateIssue(ctx, issue);
+      return toolResult(issue, result.content);
     },
   });
 }
