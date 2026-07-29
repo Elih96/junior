@@ -66,7 +66,11 @@ older source-thread context; it does not replace Pi history.
 
 Reporting APIs project an authorized, redacted contract from the event stream.
 Raw event payloads are internal and must not become dashboard or external API
-payloads. The deferred `queryConversationEvents` tool is the agent-facing
+payloads. Reporting keeps destination-visible `message` events separate from
+assistant reasoning. Mixed reasoning and tool history extends the existing
+`tool_calls` event with ordering metadata; reasoning-only history uses
+`assistant_message`. Tool payloads and lifecycle remain owned by `tool_calls`.
+The deferred `queryConversationEvents` tool is the agent-facing
 observational reader for that same log: it returns bounded raw events for the
 current conversation tree, or for another retained public conversation in the
 same Slack workspace.

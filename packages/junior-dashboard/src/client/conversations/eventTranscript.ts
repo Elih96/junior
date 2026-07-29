@@ -6,10 +6,18 @@ import type {
   TranscriptViewPart,
 } from "../types";
 
-type ToolCall = Extract<
-  ConversationReportEvent["data"],
-  { type: "tool_calls" }
->["calls"][number];
+type ToolCall =
+  | Extract<
+      ConversationReportEvent["data"],
+      { type: "tool_calls" }
+    >["calls"][number]
+  | Extract<
+      Extract<
+        ConversationReportEvent["data"],
+        { type: "assistant_message" }
+      >["parts"][number],
+      { type: "tool_call" }
+    >;
 
 function eventTimestamp(event: ConversationReportEvent): number {
   return Date.parse(event.createdAt);
@@ -51,6 +59,7 @@ export function conversationTranscriptMessages(
     string,
     Extract<TranscriptViewPart, { type: "tool_call" }>
   >();
+  const standaloneToolMessages = new Map<string, TranscriptViewMessage>();
   const subagents = new Map<
     string,
     Extract<TranscriptViewPart, { type: "subagent" }>
@@ -61,12 +70,16 @@ export function conversationTranscriptMessages(
 
   const ensureTool = (event: ConversationReportEvent, call: ToolCall): void => {
     if (replacedToolIds.has(call.toolCallId)) return;
+    const output = "output" in call ? call.output : undefined;
     const existing = tools.get(call.toolCallId);
     if (existing) {
       existing.name = call.name;
       existing.status = call.status;
       if (call.input !== undefined) existing.input = call.input;
-      if (call.output !== undefined) existing.output = call.output;
+      if (output !== undefined) existing.output = output;
+      if (existing.startedTimestamp === undefined && call.startedAt) {
+        existing.startedTimestamp = Date.parse(call.startedAt);
+      }
       if (call.status !== "running") {
         existing.resultTimestamp = eventTimestamp(event);
       }
@@ -79,7 +92,7 @@ export function conversationTranscriptMessages(
       name: call.name,
       status: call.status,
       ...(call.input === undefined ? {} : { input: call.input }),
-      ...(call.output === undefined ? {} : { output: call.output }),
+      ...(output === undefined ? {} : { output }),
       ...(call.status === "running"
         ? {}
         : { resultTimestamp: eventTimestamp(event) }),
@@ -92,6 +105,7 @@ export function conversationTranscriptMessages(
         : eventTimestamp(event),
     };
     tools.set(call.toolCallId, part);
+    standaloneToolMessages.set(call.toolCallId, message);
     messages.push(message);
   };
 
@@ -110,6 +124,21 @@ export function conversationTranscriptMessages(
       };
       messages.push(message);
       if (message.role === "user") latestUserMessage = message;
+      continue;
+    }
+
+    if (data.type === "assistant_message") {
+      messages.push(
+        eventMessage(
+          event,
+          "assistant",
+          data.parts.map((part) =>
+            part.redacted
+              ? { type: "reasoning", redacted: true }
+              : { type: "reasoning", text: part.text! },
+          ),
+        ),
+      );
       continue;
     }
 
@@ -153,6 +182,36 @@ export function conversationTranscriptMessages(
 
     if (data.type === "tool_calls") {
       for (const call of data.calls) ensureTool(event, call);
+      if (data.assistant) {
+        const parts: TranscriptViewPart[] = [];
+        for (const part of data.assistant.parts) {
+          if (part.type === "reasoning") {
+            parts.push(
+              part.redacted
+                ? { type: "reasoning", redacted: true }
+                : { type: "reasoning", text: part.text! },
+            );
+            continue;
+          }
+          if (replacedToolIds.has(part.toolCallId)) continue;
+          const tool = tools.get(part.toolCallId);
+          if (!tool) continue;
+
+          const standaloneMessage = standaloneToolMessages.get(part.toolCallId);
+          if (standaloneMessage) {
+            if (standaloneMessage.sourceSeq !== event.seq) {
+              tool.startedTimestamp = standaloneMessage.timestamp;
+            }
+            const messageIndex = messages.indexOf(standaloneMessage);
+            if (messageIndex >= 0) messages.splice(messageIndex, 1);
+            standaloneToolMessages.delete(part.toolCallId);
+          }
+          parts.push(tool);
+        }
+        if (parts.length > 0) {
+          messages.push(eventMessage(event, "assistant", parts));
+        }
+      }
       continue;
     }
 

@@ -92,6 +92,83 @@ describe("canonical event transcript reduction", () => {
     expect(messages[1]?.parts).toEqual([{ type: "text", redacted: true }]);
   });
 
+  it("preserves ordered reasoning and tool activity", () => {
+    const messages = conversationTranscriptMessages(
+      conversation([
+        event(0, "2026-01-01T00:00:00.000Z", {
+          type: "tool_calls",
+          calls: [
+            {
+              toolCallId: "search-1",
+              name: "search",
+              status: "running",
+            },
+          ],
+        }),
+        event(1, "2026-01-01T00:00:01.000Z", {
+          type: "tool_calls",
+          calls: [
+            {
+              toolCallId: "search-1",
+              name: "search",
+              status: "running",
+              startedAt: "2026-01-01T00:00:01.000Z",
+              startedSeq: 1,
+            },
+          ],
+          assistant: {
+            parts: [
+              { type: "reasoning", text: "Inspect the inputs." },
+              { type: "tool_call", toolCallId: "search-1" },
+              { type: "reasoning", text: "Check the result." },
+            ],
+          },
+        }),
+      ]),
+    );
+
+    expect(groupTranscriptMessages(messages)).toEqual([
+      {
+        key: "1:reasoning:0",
+        kind: "reasoning",
+        part: { type: "reasoning", text: "Inspect the inputs." },
+        timestamp: Date.parse("2026-01-01T00:00:01.000Z"),
+      },
+      {
+        key: "tool:search-1",
+        kind: "tool",
+        part: {
+          type: "tool_call",
+          id: "search-1",
+          name: "search",
+          startedTimestamp: Date.parse("2026-01-01T00:00:00.000Z"),
+          status: "running",
+        },
+        timestamp: Date.parse("2026-01-01T00:00:00.000Z"),
+      },
+      {
+        key: "1:reasoning:2",
+        kind: "reasoning",
+        part: { type: "reasoning", text: "Check the result." },
+        timestamp: Date.parse("2026-01-01T00:00:01.000Z"),
+      },
+    ]);
+  });
+
+  it("matches the visible label for redacted reasoning", () => {
+    const [entry] = groupTranscriptMessages([
+      {
+        role: "assistant",
+        sourceSeq: 1,
+        parts: [{ type: "reasoning", redacted: true }],
+      },
+    ] as TranscriptViewMessage[]);
+
+    expect(entry?.kind).toBe("reasoning");
+    expect(entry && entryMatchesSearch(entry, "reasoning")).toBe(true);
+    expect(entry && entryMatchesSearch(entry, "redacted")).toBe(true);
+  });
+
   it("adapts turn routes onto messages while keeping handoffs structural", () => {
     const messages = conversationTranscriptMessages(
       conversation([
@@ -201,6 +278,7 @@ describe("canonical event transcript reduction", () => {
               toolCallId: "search-1",
               name: "search",
               status: "running",
+              input: { query: "regression" },
             },
           ],
         }),
@@ -211,6 +289,7 @@ describe("canonical event transcript reduction", () => {
       {
         type: "tool_call",
         id: "search-1",
+        input: { query: "regression" },
         name: "search",
         status: "running",
       },
@@ -266,9 +345,144 @@ describe("canonical event transcript reduction", () => {
         name: "search",
         output: { matches: 2 },
         resultTimestamp: Date.parse("2026-01-01T00:00:03.000Z"),
+        startedTimestamp: Date.parse("2026-01-01T00:00:00.000Z"),
         status: "completed",
       },
     ]);
+  });
+
+  it("moves an earlier tool start into the ordered assistant message", () => {
+    const messages = conversationTranscriptMessages(
+      conversation([
+        event(0, "2026-01-01T00:00:00.000Z", {
+          type: "tool_calls",
+          calls: [
+            {
+              toolCallId: "search-1",
+              name: "search",
+              status: "running",
+            },
+          ],
+        }),
+        event(1, "2026-01-01T00:00:01.000Z", {
+          type: "tool_calls",
+          calls: [
+            {
+              toolCallId: "search-1",
+              name: "search",
+              status: "running",
+              startedAt: "2026-01-01T00:00:01.000Z",
+              startedSeq: 1,
+              input: { query: "regression" },
+            },
+          ],
+          assistant: {
+            parts: [
+              { type: "reasoning", text: "Inspect the inputs." },
+              { type: "tool_call", toolCallId: "search-1" },
+            ],
+          },
+        }),
+        event(2, "2026-01-01T00:00:03.000Z", {
+          type: "tool_calls",
+          calls: [
+            {
+              toolCallId: "search-1",
+              name: "search",
+              status: "completed",
+              startedSeq: 0,
+              startedAt: "2026-01-01T00:00:00.000Z",
+              output: { matches: 2 },
+            },
+          ],
+        }),
+      ]),
+    );
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0]?.parts).toEqual([
+      { type: "reasoning", text: "Inspect the inputs." },
+      {
+        type: "tool_call",
+        id: "search-1",
+        input: { query: "regression" },
+        name: "search",
+        output: { matches: 2 },
+        resultTimestamp: Date.parse("2026-01-01T00:00:03.000Z"),
+        startedTimestamp: Date.parse("2026-01-01T00:00:00.000Z"),
+        status: "completed",
+      },
+    ]);
+    expect(groupTranscriptMessages(messages)).toMatchObject([
+      { kind: "reasoning" },
+      {
+        kind: "tool",
+        timestamp: Date.parse("2026-01-01T00:00:00.000Z"),
+      },
+    ]);
+  });
+
+  it("keeps a later operational tool row after assistant reasoning", () => {
+    const messages = conversationTranscriptMessages(
+      conversation([
+        event(1, "2026-01-01T00:00:02.000Z", {
+          type: "tool_calls",
+          calls: [
+            {
+              toolCallId: "search-1",
+              name: "search",
+              status: "running",
+              startedAt: "2026-01-01T00:00:02.000Z",
+              startedSeq: 1,
+              input: { query: "regression" },
+            },
+          ],
+          assistant: {
+            parts: [
+              { type: "reasoning", text: "Inspect the inputs." },
+              { type: "tool_call", toolCallId: "search-1" },
+            ],
+          },
+        }),
+        event(2, "2026-01-01T00:00:03.000Z", {
+          type: "tool_calls",
+          calls: [
+            {
+              toolCallId: "search-1",
+              name: "search",
+              status: "running",
+              startedSeq: 0,
+              startedAt: "2026-01-01T00:00:00.000Z",
+            },
+          ],
+        }),
+        event(3, "2026-01-01T00:00:04.000Z", {
+          type: "tool_calls",
+          calls: [
+            {
+              toolCallId: "search-1",
+              name: "search",
+              status: "completed",
+              startedSeq: 0,
+              startedAt: "2026-01-01T00:00:00.000Z",
+              output: { matches: 2 },
+            },
+          ],
+        }),
+      ]),
+    );
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0]?.parts[1]).toMatchObject({
+      type: "tool_call",
+      id: "search-1",
+      startedTimestamp: Date.parse("2026-01-01T00:00:00.000Z"),
+      status: "completed",
+    });
+    expect(groupTranscriptMessages(messages)[1]).toMatchObject({
+      kind: "tool",
+      timestamp: Date.parse("2026-01-01T00:00:00.000Z"),
+    });
   });
 
   it("replaces correlated tool facts with special lifecycle rows", () => {

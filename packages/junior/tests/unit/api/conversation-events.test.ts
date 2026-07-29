@@ -102,7 +102,7 @@ describe("conversation report event projection", () => {
     ).toEqual([]);
   });
 
-  it("keeps canonical sequence order and projects tool facts from agent history", () => {
+  it("keeps canonical sequence order and projects authorized assistant activity", () => {
     const events = [
       event(
         10,
@@ -173,6 +173,18 @@ describe("conversation report event projection", () => {
               input: { query: "private query" },
             },
           ],
+          assistant: {
+            parts: [
+              {
+                type: "reasoning",
+                text: "private chain of thought",
+              },
+              {
+                type: "tool_call",
+                toolCallId: "private-tool-call-id",
+              },
+            ],
+          },
         },
       },
       {
@@ -204,7 +216,114 @@ describe("conversation report event projection", () => {
     expect(
       JSON.stringify(projected).match(/one user-facing answer/g),
     ).toHaveLength(1);
-    expect(JSON.stringify(projected)).not.toContain("private chain of thought");
+    expect(JSON.stringify(projected)).toContain("private chain of thought");
+
+    const redacted = projectConversationReportEventPage({
+      canExposePayload: false,
+      events,
+    });
+    expect(redacted[1]?.data).toEqual({
+      type: "tool_calls",
+      calls: [
+        {
+          toolCallId: "private-tool-call-id",
+          name: "search",
+          status: "running",
+          startedAt: "1970-01-01T00:00:10.000Z",
+          startedSeq: 11,
+        },
+      ],
+      assistant: {
+        parts: [
+          { type: "reasoning", redacted: true },
+          {
+            type: "tool_call",
+            toolCallId: "private-tool-call-id",
+          },
+        ],
+      },
+    });
+  });
+
+  it("projects reasoning-only assistant history as an additive event", () => {
+    const events = [
+      event(
+        1,
+        assistantMessage([
+          { type: "thinking", thinking: "Check the final answer." },
+        ]),
+      ),
+    ];
+
+    expect(
+      projectConversationReportEventPage({
+        canExposePayload: true,
+        events,
+      })[0]?.data,
+    ).toEqual({
+      type: "assistant_message",
+      parts: [{ type: "reasoning", text: "Check the final answer." }],
+    });
+    expect(
+      projectConversationReportEventPage({
+        canExposePayload: false,
+        events,
+      })[0]?.data,
+    ).toEqual({
+      type: "assistant_message",
+      parts: [{ type: "reasoning", redacted: true }],
+    });
+  });
+
+  it("drops provider-redacted thinking before reporting", () => {
+    const redactedOnly = [
+      event(
+        1,
+        assistantMessage([
+          {
+            type: "thinking",
+            thinking: "provider-private reasoning",
+            redacted: true,
+          },
+        ]),
+      ),
+    ];
+    expect(
+      projectConversationReportEventPage({
+        canExposePayload: true,
+        events: redactedOnly,
+      }),
+    ).toEqual([]);
+
+    const withTool = [
+      event(
+        1,
+        assistantMessage([
+          {
+            type: "thinking",
+            thinking: "provider-private reasoning",
+            redacted: true,
+          },
+          {
+            type: "toolCall",
+            id: "call-1",
+            name: "search",
+            arguments: { query: "visible query" },
+          },
+        ]),
+      ),
+    ];
+    const projected = projectConversationReportEventPage({
+      canExposePayload: true,
+      events: withTool,
+    });
+    expect(projected[0]?.data).toMatchObject({
+      type: "tool_calls",
+      calls: [{ toolCallId: "call-1", name: "search" }],
+    });
+    expect(JSON.stringify(projected)).not.toContain(
+      "provider-private reasoning",
+    );
   });
 
   it("projects parallel calls, structured outcomes, and safe native content", () => {
@@ -931,6 +1050,49 @@ describe("conversation report event projection", () => {
         data: {
           ...terminalTool.data,
           calls: [{ ...terminalTool.data.calls[0], startedSeq: 1 }],
+        },
+      }).success,
+    ).toBe(false);
+  });
+
+  it("matches assistant tool references by id count", () => {
+    const envelope = {
+      seq: 1,
+      createdAt: "2026-07-15T12:00:00.000Z",
+    };
+    const call = {
+      toolCallId: "call-1",
+      name: "search",
+      status: "running" as const,
+    };
+
+    expect(
+      conversationReportEventSchema.safeParse({
+        ...envelope,
+        data: {
+          type: "tool_calls",
+          calls: [call, call],
+          assistant: {
+            parts: [
+              { type: "tool_call", toolCallId: "call-1" },
+              { type: "tool_call", toolCallId: "call-1" },
+            ],
+          },
+        },
+      }).success,
+    ).toBe(true);
+    expect(
+      conversationReportEventSchema.safeParse({
+        ...envelope,
+        data: {
+          type: "tool_calls",
+          calls: [call, { ...call, toolCallId: "call-2" }],
+          assistant: {
+            parts: [
+              { type: "tool_call", toolCallId: "call-1" },
+              { type: "tool_call", toolCallId: "call-1" },
+            ],
+          },
         },
       }).success,
     ).toBe(false);

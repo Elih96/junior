@@ -133,10 +133,84 @@ const conversationReportToolCallSchema = z
     }
   });
 
+const conversationReportReasoningPartSchema = z
+  .object({
+    type: z.literal("reasoning"),
+    text: z.string().min(1).optional(),
+    redacted: z.literal(true).optional(),
+  })
+  .strict()
+  .superRefine((data, context) => {
+    if ((data.text === undefined) === (data.redacted !== true)) {
+      context.addIssue({
+        code: "custom",
+        message: "reasoning content must be text or explicitly redacted",
+      });
+    }
+  });
+
+const conversationReportAssistantToolCallPartSchema = z
+  .object({
+    type: z.literal("tool_call"),
+    toolCallId: z.string().min(1),
+  })
+  .strict();
+
+const conversationReportAssistantMetadataSchema = z
+  .object({
+    parts: z
+      .array(
+        z.discriminatedUnion("type", [
+          conversationReportReasoningPartSchema,
+          conversationReportAssistantToolCallPartSchema,
+        ]),
+      )
+      .min(1),
+  })
+  .strict();
+
 const conversationReportToolCallsEventDataSchema = z
   .object({
     type: z.literal("tool_calls"),
     calls: z.array(conversationReportToolCallSchema).min(1),
+    assistant: conversationReportAssistantMetadataSchema.optional(),
+  })
+  .strict()
+  .superRefine((data, context) => {
+    if (!data.assistant) return;
+    const callCounts = new Map<string, number>();
+    for (const call of data.calls) {
+      callCounts.set(
+        call.toolCallId,
+        (callCounts.get(call.toolCallId) ?? 0) + 1,
+      );
+    }
+    const partCounts = new Map<string, number>();
+    for (const part of data.assistant.parts) {
+      if (part.type !== "tool_call") continue;
+      partCounts.set(
+        part.toolCallId,
+        (partCounts.get(part.toolCallId) ?? 0) + 1,
+      );
+    }
+    if (
+      callCounts.size !== partCounts.size ||
+      [...callCounts].some(
+        ([toolCallId, count]) => partCounts.get(toolCallId) !== count,
+      )
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["assistant", "parts"],
+        message: "assistant tool parts must reference every call exactly once",
+      });
+    }
+  });
+
+const conversationReportAssistantMessageEventDataSchema = z
+  .object({
+    type: z.literal("assistant_message"),
+    parts: z.array(conversationReportReasoningPartSchema).min(1),
   })
   .strict();
 
@@ -233,6 +307,7 @@ const conversationReportSubagentEventDataSchema = z
 export const conversationReportEventDataSchema = z.discriminatedUnion("type", [
   conversationReportMessageEventDataSchema,
   conversationReportMessageHandledEventDataSchema,
+  conversationReportAssistantMessageEventDataSchema,
   conversationReportToolCallsEventDataSchema,
   conversationReportTurnLifecycleEventDataSchema,
   conversationReportTurnContextEventDataSchema,
@@ -333,6 +408,45 @@ function validateConversationEvents(
         code: "custom",
         path: ["events", index, "data"],
         message: "redacted event history must redact tool payloads",
+      });
+    }
+    if (
+      report.eventHistory.status === "redacted" &&
+      event.data.type === "assistant_message" &&
+      event.data.parts.some((part) => part.text !== undefined)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["events", index, "data"],
+        message: "redacted event history must redact assistant messages",
+      });
+    }
+    if (
+      report.eventHistory.status === "available" &&
+      event.data.type === "assistant_message" &&
+      event.data.parts.some((part) => part.redacted === true)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["events", index, "data"],
+        message: "available event history must expose reasoning",
+      });
+    }
+    if (
+      event.data.type === "tool_calls" &&
+      ((report.eventHistory.status === "redacted" &&
+        event.data.assistant?.parts.some(
+          (part) => part.type === "reasoning" && part.text !== undefined,
+        )) ||
+        (report.eventHistory.status === "available" &&
+          event.data.assistant?.parts.some(
+            (part) => part.type === "reasoning" && part.redacted === true,
+          )))
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["events", index, "data", "assistant"],
+        message: "assistant reasoning must match event history visibility",
       });
     }
   }

@@ -63,6 +63,14 @@ const reportingTextPartSchema = z
   .object({ type: z.literal("text"), text: z.string() })
   .passthrough();
 
+const reportingReasoningPartSchema = z
+  .object({
+    type: z.literal("thinking"),
+    thinking: z.string(),
+    redacted: z.literal(true).optional(),
+  })
+  .passthrough();
+
 const reportingMediaPartSchema = z
   .object({
     type: z.enum(["image", "audio"]),
@@ -107,7 +115,7 @@ function modelVisibleToolOutput(content: unknown[]): unknown {
   return only.type === "text" ? only.text : only;
 }
 
-/** Project native assistant tool calls into the narrow reporting contract. */
+/** Project native assistant tool calls through the existing reporting shape. */
 function reportToolCalls(args: {
   canExposePayload: boolean;
   createdAtMs: number;
@@ -134,6 +142,69 @@ function reportToolCalls(args: {
     ];
   });
   return calls.length > 0 ? { type: "tool_calls", calls } : undefined;
+}
+
+/** Project assistant reasoning with tool ids retained only for display order. */
+function reportAssistantMessage(args: {
+  canExposePayload: boolean;
+  createdAtMs: number;
+  message: unknown;
+  seq: number;
+}): ConversationReportEventData | undefined {
+  const message = reportingAssistantMessageSchema.safeParse(args.message);
+  if (!message.success) return undefined;
+
+  const hasReasoning = message.data.content.some((part) => {
+    const reasoning = reportingReasoningPartSchema.safeParse(part);
+    return (
+      reasoning.success &&
+      reasoning.data.redacted !== true &&
+      reasoning.data.thinking.trim().length > 0
+    );
+  });
+  if (!hasReasoning) return reportToolCalls(args);
+
+  const reasoningParts: Extract<
+    ConversationReportEventData,
+    { type: "assistant_message" }
+  >["parts"] = [];
+  const assistantParts: NonNullable<
+    Extract<ConversationReportEventData, { type: "tool_calls" }>["assistant"]
+  >["parts"] = [];
+  for (const part of message.data.content) {
+    const reasoning = reportingReasoningPartSchema.safeParse(part);
+    if (reasoning.success) {
+      if (
+        reasoning.data.redacted !== true &&
+        reasoning.data.thinking.trim().length > 0
+      ) {
+        const projected = {
+          type: "reasoning" as const,
+          ...(args.canExposePayload
+            ? { text: reasoning.data.thinking }
+            : { redacted: true as const }),
+        };
+        reasoningParts.push(projected);
+        assistantParts.push(projected);
+      }
+      continue;
+    }
+
+    const call = reportingToolCallPartSchema.safeParse(part);
+    if (call.success) {
+      assistantParts.push({
+        type: "tool_call" as const,
+        toolCallId: call.data.id,
+      });
+    }
+  }
+  const toolCalls = reportToolCalls(args);
+  if (toolCalls?.type === "tool_calls") {
+    return { ...toolCalls, assistant: { parts: assistantParts } };
+  }
+  return reasoningParts.length > 0
+    ? { type: "assistant_message", parts: reasoningParts }
+    : undefined;
 }
 
 /** Project a native tool result without exposing host-only result details. */
@@ -334,7 +405,7 @@ export function projectConversationReportEventPage(args: {
         ? toolStarts.get(result.data.toolCallId)
         : undefined;
       data =
-        reportToolCalls(reportArgs) ??
+        reportAssistantMessage(reportArgs) ??
         reportToolResult({
           canExposePayload: args.canExposePayload,
           message: event.data,

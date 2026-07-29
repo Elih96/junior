@@ -338,8 +338,16 @@ function transcriptPartVersion(part: TranscriptViewPart | undefined): string {
       part.type,
       part.id,
       part.status,
+      part.startedTimestamp ?? "",
       part.input === undefined ? "" : "input",
       part.output === undefined ? "" : "output",
+    ].join(":");
+  }
+  if (part.type === "reasoning") {
+    return [
+      part.type,
+      part.text?.length ?? 0,
+      part.redacted ? "redacted" : "",
     ].join(":");
   }
   if (part.type === "subagent") {
