@@ -1,4 +1,51 @@
 # Changelog
+## 0.118.0
+
+### New Features ✨
+
+#### Github
+
+- Link issues to conversations by @dcramer in [#1102](https://github.com/getsentry/junior/pull/1102)
+- Subscribe to deployment events by @dcramer in [#1094](https://github.com/getsentry/junior/pull/1094)
+
+#### Other
+
+- (docs) Redesign Junior homepage by @dcramer in [#1106](https://github.com/getsentry/junior/pull/1106)
+- (plugins) Add core-rendered user pages by @dcramer in [#1113](https://github.com/getsentry/junior/pull/1113)
+- (reporting) Record daily skill usage by @dcramer in [#1101](https://github.com/getsentry/junior/pull/1101)
+
+### Bug Fixes 🐛
+
+#### Dashboard
+
+- Forward token and stats routes by @dcramer in [#1116](https://github.com/getsentry/junior/pull/1116)
+- Tidy system plugin reporting views by @dcramer in [#1100](https://github.com/getsentry/junior/pull/1100)
+- Stringify tool argument strings by @dcramer in [#1105](https://github.com/getsentry/junior/pull/1105)
+
+#### Other
+
+- (skills) Load dollar-prefixed skill references by @dcramer in [#1099](https://github.com/getsentry/junior/pull/1099)
+
+### Documentation 📚
+
+- Use Junior mascot across homepage branding by @dcramer in [#1111](https://github.com/getsentry/junior/pull/1111)
+
+### Internal Changes 🔧
+
+#### Sandbox
+
+- Bound ripgrep searches by @dcramer in [#1117](https://github.com/getsentry/junior/pull/1117)
+- Reduce and measure search overhead by @dcramer in [#1110](https://github.com/getsentry/junior/pull/1110)
+
+#### Other
+
+- Remove a bunch of bundled skills by @dcramer in [#1120](https://github.com/getsentry/junior/pull/1120)
+
+### Other
+
+- Widen locations runtime column by @dcramer in [#1118](https://github.com/getsentry/junior/pull/1118)
+- Standardize dashboard neutral text colors by @dcramer in [#1107](https://github.com/getsentry/junior/pull/1107)
+
 ## 0.117.0
 
 ### New Features ✨
