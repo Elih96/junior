@@ -1,4 +1,19 @@
 # Changelog
+## 0.120.0
+
+### New Features ✨
+
+- (linear) Add native issue creation tool by @dcramer in [#1119](https://github.com/getsentry/junior/pull/1119)
+- (memory) Add personal memory REST management by @dcramer in [#1126](https://github.com/getsentry/junior/pull/1126)
+
+### Bug Fixes 🐛
+
+- (memory) Improve recall relevance by @dcramer in [#1127](https://github.com/getsentry/junior/pull/1127)
+
+### Internal Changes 🔧
+
+- (dashboard) Compact annotation links by @dcramer in [#1125](https://github.com/getsentry/junior/pull/1125)
+
 ## 0.119.0
 
 ### Breaking Changes 🛠
