@@ -1,4 +1,21 @@
 # Changelog
+## 0.119.0
+
+### Breaking Changes 🛠
+
+- (plugins) Standardize plugin factory names by @dcramer in [#1122](https://github.com/getsentry/junior/pull/1122)
+
+### New Features ✨
+
+- (reporting) Expose assistant reasoning events by @dcramer in [#1104](https://github.com/getsentry/junior/pull/1104)
+- (telemetry) Add GenAI message size attributes by @sentry-junior in [#1123](https://github.com/getsentry/junior/pull/1123)
+
+### Bug Fixes 🐛
+
+- (compaction) Require evidence before marking tasks complete by @sentry-junior in [#1121](https://github.com/getsentry/junior/pull/1121)
+- (prompt) Keep Slack replies brief by @sentry-junior in [#1124](https://github.com/getsentry/junior/pull/1124)
+- (slack) Normalize Canvas markdown by @dcramer in [#1115](https://github.com/getsentry/junior/pull/1115)
+
 ## 0.118.0
 
 ### New Features ✨
