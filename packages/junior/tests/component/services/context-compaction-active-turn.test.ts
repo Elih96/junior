@@ -2,11 +2,49 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PiMessage } from "@/chat/pi/messages";
 
 const ORIGINAL_ENV = { ...process.env };
+const OVERSIZED_CONTEXT_TEXT = "x".repeat(1_600_000);
 
 function user(text: string, timestamp = 1): PiMessage {
   return {
     role: "user",
     content: [{ type: "text", text }],
+    timestamp,
+  } as PiMessage;
+}
+
+function assistantWithUsage(
+  text: string,
+  {
+    totalTokens,
+    outputTokens = 0,
+    timestamp = 1,
+  }: {
+    totalTokens: number;
+    outputTokens?: number;
+    timestamp?: number;
+  },
+): PiMessage {
+  return {
+    role: "assistant",
+    content: [{ type: "text", text }],
+    api: "openai-responses",
+    provider: "openai",
+    model: "test-model",
+    usage: {
+      input: totalTokens - outputTokens,
+      output: outputTokens,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens,
+      cost: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        total: 0,
+      },
+    },
+    stopReason: "stop",
     timestamp,
   } as PiMessage;
 }
@@ -37,6 +75,68 @@ describe("active-turn context compaction", () => {
     process.env = { ...ORIGINAL_ENV };
   });
 
+  it("includes provider output in measured context usage", async () => {
+    const { compactActiveContextIfNeeded } =
+      await import("@/chat/services/context-compaction");
+    const completeText = vi.fn(
+      async () => ({ text: "Continue from the summary." }) as never,
+    );
+
+    const result = await compactActiveContextIfNeeded(
+      {
+        conversationId: "conversation-provider-usage",
+        modelId: "openai/gpt-5.4",
+        modelProfile: "standard",
+        piMessages: [
+          user("Continue the task.", 1),
+          assistantWithUsage("Work completed so far.", {
+            totalTokens: 360_001,
+            outputTokens: 160_001,
+            timestamp: 2,
+          }),
+        ],
+      },
+      { completeText },
+    );
+
+    expect(result.compacted).toBe(true);
+    expect(completeText).toHaveBeenCalledOnce();
+  });
+
+  it("ignores trailing tool details outside model input", async () => {
+    const { compactActiveContextIfNeeded } =
+      await import("@/chat/services/context-compaction");
+    const completeText = vi.fn();
+
+    const result = await compactActiveContextIfNeeded(
+      {
+        conversationId: "conversation-tool-details",
+        modelId: "openai/gpt-5.4",
+        modelProfile: "standard",
+        piMessages: [
+          user("Inspect the tool result.", 1),
+          assistantWithUsage("Reading the requested file.", {
+            totalTokens: 20_000,
+            timestamp: 2,
+          }),
+          {
+            role: "toolResult",
+            toolCallId: "read-1",
+            toolName: "readFile",
+            content: [{ type: "text", text: "Visible result." }],
+            details: { internalPayload: OVERSIZED_CONTEXT_TEXT },
+            isError: false,
+            timestamp: 3,
+          } as PiMessage,
+        ],
+      },
+      { completeText },
+    );
+
+    expect(result).toEqual({ compacted: false, reason: "below_threshold" });
+    expect(completeText).not.toHaveBeenCalled();
+  });
+
   it("replaces oversized tool history with continuation state", async () => {
     const { compactActiveContextIfNeeded } =
       await import("@/chat/services/context-compaction");
@@ -54,13 +154,17 @@ describe("active-turn context compaction", () => {
         2,
       ),
       user("Make the requested edit.", 3),
+      assistantWithUsage("I will apply the edit.", {
+        totalTokens: 20_000,
+        timestamp: 4,
+      }),
       {
         role: "toolResult",
         toolCallId: "edit-1",
         toolName: "editFile",
-        content: [{ type: "text", text: "x".repeat(1_600_000) }],
+        content: [{ type: "text", text: OVERSIZED_CONTEXT_TEXT }],
         isError: false,
-        timestamp: 4,
+        timestamp: 5,
       } as PiMessage,
     ];
     const result = await compactActiveContextIfNeeded(
@@ -72,7 +176,7 @@ describe("active-turn context compaction", () => {
           {
             message: user(
               "<current-instruction>\nAlso run the focused test.\n</current-instruction>",
-              5,
+              6,
             ),
             provenance: {
               authority: "instruction",
@@ -137,7 +241,7 @@ describe("active-turn context compaction", () => {
         reason: "capacity",
         triggerTokens: 360_000,
         inputLimitTokens: 380_000,
-        inputMessageCount: 4,
+        inputMessageCount: 5,
         retainedMessageCount: 1,
         summaryChars: 20,
       },

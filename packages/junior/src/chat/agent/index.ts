@@ -3,12 +3,11 @@
  *
  * Composition root and execution loop for one agent run slice after
  * runtime/ingress code has parsed and routed the request. Wires the phase
- * modules (session restore, skills, tools, prompt, resume), runs the Pi
- * agent with the inline provider retry loop, and translates expected run
- * endings into `AgentRunOutcome` values. It emits every completed, tool-free
- * visible assistant message through the delivery port; the result carries
- * diagnostics, artifacts, and transcript state for destination-owned
- * completion.
+ * modules (session restore, skills, tools, prompt, resume), runs the Pi agent
+ * with inline retry handling, and translates expected run endings into
+ * `AgentRunOutcome` values. It emits every completed, tool-free visible
+ * assistant message through the delivery port; the result carries diagnostics,
+ * artifacts, and transcript state for destination-owned completion.
  */
 import {
   Agent,
@@ -72,12 +71,12 @@ import { createTracedStreamFn } from "@/chat/pi/traced-stream";
 import { shouldEmitDevAgentTrace } from "@/chat/runtime/dev-agent-trace";
 import { isTurnInputCommitLostError } from "@/chat/runtime/turn";
 import type { AgentRunOutcome } from "@/chat/runtime/agent-run-outcome";
-import {
-  buildTurnResult,
-  getAssistantMessageText,
-} from "@/chat/services/turn-result";
+import { buildTurnResult } from "@/chat/services/turn-result";
+import { decideReply } from "@/chat/services/assistant-reply";
 import { isProviderRetryError } from "@/chat/services/provider-error";
 import { nextProviderRetry } from "@/chat/services/provider-retry";
+import { nextEmptyOutputContinuation } from "@/chat/services/empty-output-continuation";
+import { getDiscardedRetryUsage } from "@/chat/agent/retry-usage";
 import { annotateTurnDeadlineToolResult } from "@/chat/tool-support/turn-deadline-result";
 import {
   configuredTurnRoute,
@@ -876,8 +875,8 @@ async function executeAgentRunInPrivacyContext(
     const deliverAssistantMessage = async (
       message: Parameters<typeof extractAssistantText>[0],
     ): Promise<void> => {
-      const text = getAssistantMessageText(message);
-      if (!text || !delivery) {
+      const decision = decideReply(message);
+      if (decision.kind !== "deliver" || !delivery) {
         return;
       }
       try {
@@ -1228,9 +1227,20 @@ async function executeAgentRunInPrivacyContext(
             shouldPromptAgent && !capacityUpdate
               ? agent!.prompt(freshPromptMessage)
               : agent!.continue();
-          let retryUsage: AgentTurnUsage | undefined;
+          let discardedRetryUsage: AgentTurnUsage | undefined;
+          let providerRetryAttempt = 0;
+          let emptyOutputAttempt = 0;
+          const prepareRetry = async (messages: PiMessage[]): Promise<void> => {
+            discardedRetryUsage = addAgentTurnUsage(
+              discardedRetryUsage,
+              getDiscardedRetryUsage(agent!.state.messages, messages),
+            );
+            agent!.state.messages = messages;
+            await runResume.persistSafeBoundary(messages);
+            signal?.throwIfAborted();
+          };
           try {
-            for (let attempt = 0; ; attempt += 1) {
+            for (;;) {
               await runAgentStep(run);
               if (assistantMessageDeliveryError) {
                 throw assistantMessageDeliveryError;
@@ -1252,7 +1262,7 @@ async function executeAgentRunInPrivacyContext(
                 ? usageSummary
                 : undefined;
               const currentPhaseUsage = addAgentTurnUsage(
-                retryUsage,
+                discardedRetryUsage,
                 currentUsage,
               );
               turnUsage = addAgentTurnUsage(priorPhaseUsage, currentPhaseUsage);
@@ -1271,7 +1281,7 @@ async function executeAgentRunInPrivacyContext(
                       ],
                     }
                   : {}),
-                ...extractGenAiUsageAttributes(usageSummary),
+                ...extractGenAiUsageAttributes(currentPhaseUsage),
               });
               const pendingAuthPause = getPendingAuthPause();
               if (pendingAuthPause) {
@@ -1281,8 +1291,28 @@ async function executeAgentRunInPrivacyContext(
                 throw pendingAuthPause;
               }
 
+              const emptyOutputContinuation = nextEmptyOutputContinuation({
+                attempt: emptyOutputAttempt,
+                lastAssistant,
+                messages: agent!.state.messages,
+              });
+              if (emptyOutputContinuation.kind === "retry") {
+                emptyOutputAttempt += 1;
+                await prepareRetry(emptyOutputContinuation.messages);
+                logWarn("agent.turn.empty_output.retrying", {
+                  "app.ai.empty_output.attempt": emptyOutputAttempt,
+                });
+                run = agent!.continue();
+                continue;
+              }
+              if (emptyOutputContinuation.kind === "exhausted") {
+                logWarn("agent.turn.empty_output.exhausted", {
+                  "app.ai.empty_output.attempt": emptyOutputAttempt,
+                });
+              }
+
               const providerRetry = nextProviderRetry({
-                attempt,
+                attempt: providerRetryAttempt,
                 failure: lastAssistant,
                 messages: agent!.state.messages,
               });
@@ -1290,12 +1320,10 @@ async function executeAgentRunInPrivacyContext(
                 break;
               }
 
-              retryUsage = currentPhaseUsage;
-              agent!.state.messages = providerRetry.messages;
-              await runResume.persistSafeBoundary(providerRetry.messages);
+              providerRetryAttempt += 1;
+              await prepareRetry(providerRetry.messages);
               logWarn("agent.turn.provider.retrying");
               await sleep(providerRetry.delayMs, signal);
-              signal?.throwIfAborted();
               run = agent!.continue();
             }
           } catch (error) {

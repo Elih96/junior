@@ -15,85 +15,10 @@ import {
   isToolResultMessage,
   normalizeToolNameFromResult,
 } from "@/chat/pi/transcript";
-
-function isExecutionDeferralResponse(text: string): boolean {
-  return /\b(want me to proceed|do you want me to proceed|shall i proceed|can i proceed|should i proceed|let me do that now|give me a moment|tag me again|fresh invocation)\b/i.test(
-    text,
-  );
-}
-
-function isToolAccessDisclaimerResponse(text: string): boolean {
-  return /\b(i (don't|do not) have access to (active )?tool|tool results came back empty|prior results .* empty|cannot access .*tool|need to (run|load) .*tool .* first)\b/i.test(
-    text,
-  );
-}
-
-/** True when the model produced an escape response instead of executing. */
-function isExecutionEscapeResponse(text: string): boolean {
-  const trimmed = text.trim();
-  if (!trimmed) return false;
-  return (
-    isExecutionDeferralResponse(trimmed) ||
-    isToolAccessDisclaimerResponse(trimmed)
-  );
-}
-
-function parseJsonCandidate(text: string): unknown {
-  const trimmed = text.trim();
-  if (!trimmed) return undefined;
-
-  try {
-    return JSON.parse(trimmed) as unknown;
-  } catch {
-    const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
-    if (!fenced) return undefined;
-    try {
-      return JSON.parse(fenced[1]) as unknown;
-    } catch {
-      return undefined;
-    }
-  }
-}
-
-function isToolPayloadShape(payload: unknown): boolean {
-  if (!payload || typeof payload !== "object") return false;
-  const record = payload as Record<string, unknown>;
-
-  const type = typeof record.type === "string" ? record.type.toLowerCase() : "";
-  if (type.startsWith("tool-")) return true;
-  if (
-    type === "tool_use" ||
-    type === "tool_call" ||
-    type === "tool_result" ||
-    type === "tool_error"
-  )
-    return true;
-
-  const hasToolName =
-    typeof record.toolName === "string" || typeof record.name === "string";
-  const hasToolInput =
-    Object.prototype.hasOwnProperty.call(record, "input") ||
-    Object.prototype.hasOwnProperty.call(record, "args");
-  if (hasToolName && hasToolInput) return true;
-
-  return false;
-}
-
-/** Detect responses that are raw tool payloads leaked as text. */
-function isRawToolPayloadResponse(text: string): boolean {
-  const parsed = parseJsonCandidate(text);
-  if (Array.isArray(parsed)) {
-    return parsed.some((entry) => isToolPayloadShape(entry));
-  }
-  if (isToolPayloadShape(parsed)) {
-    return true;
-  }
-  return false;
-}
-
-const THINKING_XML_BLOCK_PATTERN =
-  /[ \t]*<thinking\b[^>]*>[\s\S]*?<\/thinking>[ \t]*(?:\r?\n)?/gi;
-const FENCED_CODE_BLOCK_PATTERN = /```[\s\S]*?```/g;
+import {
+  decideReply,
+  sanitizeAssistantText,
+} from "@/chat/services/assistant-reply";
 
 export interface AgentTurnDiagnostics {
   assistantMessageCount: number;
@@ -136,51 +61,6 @@ export interface TurnResultInput {
   modelId: string;
 }
 
-function stripThinkingXmlBlocks(text: string): string {
-  let result = "";
-  let cursor = 0;
-
-  for (const match of text.matchAll(FENCED_CODE_BLOCK_PATTERN)) {
-    const start = match.index;
-    if (start === undefined) {
-      continue;
-    }
-    result += text.slice(cursor, start).replace(THINKING_XML_BLOCK_PATTERN, "");
-    result += match[0];
-    cursor = start + match[0].length;
-  }
-
-  result += text.slice(cursor).replace(THINKING_XML_BLOCK_PATTERN, "");
-  return result;
-}
-
-function getVisibleAssistantText(rawText: string): string | undefined {
-  const text = stripThinkingXmlBlocks(rawText).trim();
-  if (
-    !text ||
-    isNoReplyMarker(text) ||
-    containsNoReplyMarker(text) ||
-    isRawToolPayloadResponse(text)
-  ) {
-    return undefined;
-  }
-  return text;
-}
-
-/** Return destination-visible text from one completed tool-free assistant message. */
-export function getAssistantMessageText(
-  message: Parameters<typeof extractAssistantText>[0],
-): string | undefined {
-  if (message.content.some((part) => part.type === "toolCall")) {
-    return undefined;
-  }
-  const text = getVisibleAssistantText(extractAssistantText(message));
-  if (!text) {
-    return undefined;
-  }
-  return isExecutionEscapeResponse(text) ? undefined : text;
-}
-
 /** Process raw agent messages into a structured AgentRunResult. */
 export function buildTurnResult(input: TurnResultInput): AgentRunResult {
   const {
@@ -199,7 +79,7 @@ export function buildTurnResult(input: TurnResultInput): AgentRunResult {
   const assistantMessages = newMessages.filter(isAssistantMessage);
   const terminalAssistantMessages = getTerminalAssistantMessages(newMessages);
 
-  const rawPrimaryText = stripThinkingXmlBlocks(
+  const rawPrimaryText = sanitizeAssistantText(
     terminalAssistantMessages
       .map((message) => extractAssistantText(message))
       .join("\n\n"),
@@ -211,8 +91,12 @@ export function buildTurnResult(input: TurnResultInput): AgentRunResult {
   const primaryText = noReplyRequested
     ? ""
     : terminalAssistantMessages
-        .map((message) => getAssistantMessageText(message))
-        .filter((text): text is string => Boolean(text))
+        .map((message) => decideReply(message))
+        .filter(
+          (output): output is { kind: "deliver"; text: string } =>
+            output.kind === "deliver",
+        )
+        .map((output) => output.text)
         .join("\n\n");
 
   const toolErrorCount = toolResults.filter((result) => result.isError).length;
@@ -270,10 +154,10 @@ export function buildTurnResult(input: TurnResultInput): AgentRunResult {
   } else {
     outcome = "execution_failure";
   }
-  const rejectedPrimaryText = Boolean(
+  const suppressedPrimaryText = Boolean(
     rawPrimaryText && !noReplyRequested && !primaryText,
   );
-  const resolvedOutcome: AgentTurnDiagnostics["outcome"] = rejectedPrimaryText
+  const resolvedOutcome: AgentTurnDiagnostics["outcome"] = suppressedPrimaryText
     ? "execution_failure"
     : outcome;
 

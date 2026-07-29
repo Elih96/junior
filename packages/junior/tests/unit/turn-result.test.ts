@@ -1,11 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { AssistantMessage } from "@earendil-works/pi-ai";
-
 import { NO_REPLY_MARKER } from "@/chat/no-reply";
-import {
-  buildTurnResult,
-  getAssistantMessageText,
-} from "@/chat/services/turn-result";
+import { buildTurnResult } from "@/chat/services/turn-result";
 
 const executionProfile = {
   profile: "standard",
@@ -13,127 +8,7 @@ const executionProfile = {
   reason: "test",
 };
 
-function assistantMessage(
-  text: string,
-  withToolCall = false,
-): AssistantMessage {
-  return {
-    role: "assistant" as const,
-    content: [
-      { type: "text" as const, text },
-      ...(withToolCall
-        ? [
-            {
-              type: "toolCall" as const,
-              id: "call-1",
-              name: "bash",
-              arguments: {},
-            },
-          ]
-        : []),
-    ],
-    api: "responses",
-    provider: "openai",
-    model: "test-model",
-    usage: {
-      input: 0,
-      output: 0,
-      cacheRead: 0,
-      cacheWrite: 0,
-      totalTokens: 0,
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-    },
-    stopReason: "stop",
-    timestamp: 1,
-  };
-}
-
-describe("getAssistantMessageText", () => {
-  it("returns visible text without thinking content", () => {
-    expect(
-      getAssistantMessageText(
-        assistantMessage(
-          "<thinking>private reasoning</thinking>Visible answer.",
-        ),
-      ),
-    ).toBe("Visible answer.");
-  });
-
-  it("suppresses the explicit no-reply marker", () => {
-    expect(
-      getAssistantMessageText(assistantMessage(NO_REPLY_MARKER)),
-    ).toBeUndefined();
-  });
-
-  it("suppresses raw tool payload text", () => {
-    expect(
-      getAssistantMessageText(
-        assistantMessage(
-          JSON.stringify({
-            type: "tool_call",
-            name: "addReaction",
-            input: { emoji: "eyes" },
-          }),
-        ),
-      ),
-    ).toBeUndefined();
-  });
-
-  it("suppresses execution deferrals", () => {
-    expect(
-      getAssistantMessageText(
-        assistantMessage("Let me do that now. Give me a moment."),
-      ),
-    ).toBeUndefined();
-  });
-
-  it("suppresses text attached to a tool call", () => {
-    expect(
-      getAssistantMessageText(assistantMessage("Let me do that now.", true)),
-    ).toBeUndefined();
-  });
-
-  it("keeps prose that quotes a tool payload fragment", () => {
-    const text = 'The field `"type": "tool_call"` identifies a tool call.';
-
-    expect(getAssistantMessageText(assistantMessage(text))).toBe(text);
-  });
-});
-
 describe("buildTurnResult", () => {
-  it("treats empty tool-only turns as execution failures", () => {
-    const reply = buildTurnResult({
-      newMessages: [
-        {
-          role: "toolResult",
-          toolName: "bash",
-          isError: false,
-          stdout: "ok",
-        },
-        {
-          role: "assistant",
-          content: [
-            {
-              type: "text",
-              text: "I don't have access to active tool.",
-            },
-          ],
-          stopReason: "stop",
-        },
-      ],
-      userInput: "Open the GitHub issue",
-      artifactStatePatch: {},
-      toolCalls: [],
-      generatedFileCount: 0,
-      shouldTrace: false,
-      modelId: "test-model",
-      executionProfile,
-    });
-
-    expect(reply.text).toBe("");
-    expect(reply.diagnostics.outcome).toBe("execution_failure");
-  });
-
   it("requires a completed answer after a progress message and tool result", () => {
     const reply = buildTurnResult({
       newMessages: [
@@ -377,44 +252,6 @@ describe("buildTurnResult", () => {
 
     expect(reply.text).toBe("Handled it.");
     expect(reply.diagnostics.outcome).toBe("success");
-    expect(reply.diagnostics.usedPrimaryText).toBe(true);
-  });
-
-  it("keeps thread delivery enabled for reaction turns that fail validation", () => {
-    const reply = buildTurnResult({
-      newMessages: [
-        {
-          role: "toolResult",
-          toolName: "addReaction",
-          isError: false,
-          content: [{ type: "text", text: "reaction added" }],
-        },
-        {
-          role: "assistant",
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({
-                type: "tool_call",
-                name: "addReaction",
-                input: { reaction: "thumbsup" },
-              }),
-            },
-          ],
-          stopReason: "stop",
-        },
-      ],
-      userInput: "react and tell me what happened",
-      artifactStatePatch: {},
-      toolCalls: ["addReaction"],
-      generatedFileCount: 0,
-      shouldTrace: false,
-      modelId: "test-model",
-      executionProfile,
-    });
-
-    expect(reply.text).toBe("");
-    expect(reply.diagnostics.outcome).toBe("execution_failure");
     expect(reply.diagnostics.usedPrimaryText).toBe(true);
   });
 

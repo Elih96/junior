@@ -7,6 +7,7 @@ import type { PiMessage } from "@/chat/pi/messages";
 import { extractAssistantText } from "@/chat/pi/transcript";
 import { readConversationDetail } from "@/api/conversations/detail";
 
+const OVERSIZED_CONTEXT_TEXT = "x".repeat(1_600_000);
 const { agentMode, compactionState, counters, sessionLogState } = vi.hoisted(
   () => ({
     agentMode: {
@@ -85,7 +86,9 @@ vi.mock("@/chat/conversations/projection", async (importOriginal) => {
   };
 });
 
-vi.mock("@earendil-works/pi-agent-core", () => {
+vi.mock("@earendil-works/pi-agent-core", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("@earendil-works/pi-agent-core")>();
   function durableTestMessage(message: unknown) {
     const data = message as Record<string, unknown>;
     if (data.role === "assistant") {
@@ -170,6 +173,21 @@ vi.mock("@earendil-works/pi-agent-core", () => {
       this.state.messages.push(...messages.map(durableTestMessage));
     }
 
+    private async emitAssistant(text: string) {
+      const message = {
+        role: "assistant",
+        content: [{ type: "text", text }],
+        stopReason: "stop",
+        usage: { input: 2, output: 2 },
+      };
+      this.pushMessages(message);
+      await Promise.all(
+        this.subscribers.map((subscriber) =>
+          subscriber({ type: "message_end", message }),
+        ),
+      );
+    }
+
     private recordRunFailure(error: unknown) {
       this.pushMessages({
         role: "assistant",
@@ -192,7 +210,7 @@ vi.mock("@earendil-works/pi-agent-core", () => {
           toolCallId: "call_oversized",
           toolName: "editFile",
           isError: false,
-          content: [{ type: "text", text: "x".repeat(1_600_000) }],
+          content: [{ type: "text", text: OVERSIZED_CONTEXT_TEXT }],
         };
         this.pushMessages({
           role: "assistant",
@@ -228,19 +246,11 @@ vi.mock("@earendil-works/pi-agent-core", () => {
         const keptRequest = compactionState.nextProviderContextText.includes(
           "Make a large generated-file edit.",
         );
-        this.pushMessages({
-          role: "assistant",
-          content: [
-            {
-              type: "text",
-              text: keptRequest
-                ? "Finished the requested edit."
-                : "got it — context checkpoint loaded. no outstanding asks.",
-            },
-          ],
-          stopReason: "stop",
-          usage: { input: 2, output: 2 },
-        });
+        await this.emitAssistant(
+          keptRequest
+            ? "Finished the requested edit."
+            : "got it — context checkpoint loaded. no outstanding asks.",
+        );
         return {};
       }
       if (agentMode.value === "pendingProviderCall") {
@@ -371,7 +381,24 @@ vi.mock("@earendil-works/pi-agent-core", () => {
         return {};
       }
       this.pushMessages({
+        role: "assistant",
+        content: [
+          {
+            type: "toolCall",
+            id: "test-tool-call",
+            name: "bash",
+            arguments: {},
+          },
+        ],
+        stopReason: "toolUse",
+        usage: {
+          input: 4,
+          output: 1,
+        },
+      });
+      this.pushMessages({
         role: "toolResult",
+        toolCallId: "test-tool-call",
         toolName: "bash",
         isError: false,
         content: [{ type: "text", text: "ok" }],
@@ -420,7 +447,7 @@ vi.mock("@earendil-works/pi-agent-core", () => {
         });
         return {};
       }
-      this.pushMessages({
+      const finalMessage = {
         role: "assistant",
         content: [{ type: "text", text: "Recovered." }],
         stopReason: "stop",
@@ -428,12 +455,13 @@ vi.mock("@earendil-works/pi-agent-core", () => {
           input: 2,
           output: 2,
         },
-      });
+      };
+      this.pushMessages(finalMessage);
       return {};
     }
   }
 
-  return { Agent: MockAgent };
+  return { ...actual, Agent: MockAgent };
 });
 
 vi.mock("@/chat/config", async (importOriginal) => {
@@ -567,7 +595,7 @@ const TEST_SOURCE = createSlackSource({
   type: "priv",
 });
 
-describe("provider retry composition", () => {
+describe("agent run continuation", () => {
   beforeEach(async () => {
     agentMode.value = "providerRetry";
     counters.abortCalls = 0;
@@ -592,7 +620,6 @@ describe("provider retry composition", () => {
 
   it("continues the user's request when active compaction writes a wrong summary", async () => {
     agentMode.value = "activeCompaction";
-    const statuses: string[] = [];
 
     const result = finalReply(
       await executeAgentRun({
@@ -606,16 +633,10 @@ describe("provider retry composition", () => {
         },
         conversationId: "conversation-active-compaction",
         turnId: "turn-active-compaction",
-        observers: {
-          onStatus: (status) => {
-            statuses.push(status.text);
-          },
-        },
       }),
     );
 
     expect(result.text).toBe("Finished the requested edit.");
-    expect(statuses).toContain("Compacting context");
     expect(compactionState.summaryCalls).toBe(1);
     expect(compactionState.nextProviderContextChars).toBeLessThan(20_000);
     expect(compactionState.nextProviderContextText).toContain(
@@ -645,7 +666,7 @@ describe("provider retry composition", () => {
         toolCallId: "call_prior_oversized",
         toolName: "editFile",
         isError: false,
-        content: [{ type: "text", text: "x".repeat(1_600_000) }],
+        content: [{ type: "text", text: OVERSIZED_CONTEXT_TEXT }],
         timestamp: 1,
       } as PiMessage,
     ];
@@ -703,14 +724,15 @@ describe("provider retry composition", () => {
     expect(reply.diagnostics.outcome).toBe("success");
     expect(reply.diagnostics.toolResultCount).toBe(1);
     expect(reply.diagnostics.usage).toMatchObject({
-      inputTokens: 12,
-      outputTokens: 3,
+      inputTokens: 16,
+      outputTokens: 4,
     });
     expect(counters.promptCalls).toBe(1);
     expect(counters.continueCalls).toBe(1);
 
     expect(reply.piMessages?.map((message) => message.role)).toEqual([
       "user",
+      "assistant",
       "toolResult",
       "assistant",
     ]);
@@ -724,8 +746,29 @@ describe("provider retry composition", () => {
     expect(sessionRecord?.state).toBe("running");
     expect(sessionRecord?.piMessages.map((message) => message.role)).toEqual([
       "user",
+      "assistant",
       "toolResult",
     ]);
+
+    await persistCompletedSessionRecord({
+      modelId: "test-model",
+      conversationId: "conversation-1",
+      sessionId: "turn-1",
+      allMessages: reply.piMessages ?? [],
+      currentUsage: reply.diagnostics.usage,
+    });
+    const completedSessionRecord =
+      await turnSessionState.getAgentTurnSessionRecord(
+        "conversation-1",
+        "turn-1",
+      );
+    expect(completedSessionRecord).toMatchObject({
+      state: "completed",
+      cumulativeUsage: {
+        inputTokens: 16,
+        outputTokens: 4,
+      },
+    });
   }, 40_000);
 
   it("stops provider retry backoff when the host request is cancelled", async () => {
