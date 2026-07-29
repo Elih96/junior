@@ -1,4 +1,16 @@
 # Changelog
+## 0.121.0
+
+### New Features ✨
+
+- (github) Watch deployments by commit by @dcramer in [#1129](https://github.com/getsentry/junior/pull/1129)
+- (memory) Add system diagnostics by @dcramer in [#1131](https://github.com/getsentry/junior/pull/1131)
+
+### Bug Fixes 🐛
+
+- (evals) Stabilize agent behavior suites by @dcramer in [#1112](https://github.com/getsentry/junior/pull/1112)
+- (memory) Persist personal recall context by @dcramer in [#1130](https://github.com/getsentry/junior/pull/1130)
+
 ## 0.120.0
 
 ### New Features ✨
