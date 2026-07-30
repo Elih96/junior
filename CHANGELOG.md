@@ -1,4 +1,28 @@
 # Changelog
+## 0.122.0
+
+### New Features ✨
+
+- (scheduler) Add personal scheduled tasks page by @dcramer in [#1135](https://github.com/getsentry/junior/pull/1135)
+
+### Bug Fixes 🐛
+
+#### Chat
+
+- Correct compaction and empty output continuation by @dcramer in [#1137](https://github.com/getsentry/junior/pull/1137)
+- Order agent history before visible replies by @dcramer in [#1128](https://github.com/getsentry/junior/pull/1128)
+
+#### Other
+
+- (linear) Wrap save_issue mutations by @dcramer in [#1136](https://github.com/getsentry/junior/pull/1136)
+- (slack) Continue after image analysis failures by @dcramer in [#1139](https://github.com/getsentry/junior/pull/1139)
+- (tools) Bound conversation event query responses by @dcramer in [#1134](https://github.com/getsentry/junior/pull/1134)
+
+### Internal Changes 🔧
+
+- (logging) Simplify structured event emission by @dcramer in [#1138](https://github.com/getsentry/junior/pull/1138)
+- Enforce higher-fidelity test boundaries by @dcramer in [#1132](https://github.com/getsentry/junior/pull/1132)
+
 ## 0.121.0
 
 ### New Features ✨
