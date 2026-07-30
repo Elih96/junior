@@ -48,6 +48,7 @@ export interface BotConfig {
   crossActorMidRunMode: CrossActorMidRunMode;
   embeddingModelId: string;
   fastModelId: string;
+  guardianModelId: string;
   imageGenerationModelId: string;
   loadingMessages: string[];
   profiles: Readonly<Record<string, ExecutionProfileConfig>>;
@@ -191,6 +192,10 @@ const DEFAULT_FAST_MODEL_ID = getModel(
   "vercel-ai-gateway",
   "anthropic/claude-haiku-4.5",
 ).id;
+const DEFAULT_GUARDIAN_MODEL_ID = getModel(
+  "vercel-ai-gateway",
+  "openai/gpt-5.6-luna",
+).id;
 const DEFAULT_HANDOFF_MODEL_ID = getModel(
   "vercel-ai-gateway",
   "openai/gpt-5.6-sol",
@@ -291,6 +296,8 @@ function readBotConfig(
   const fastModelId =
     validateGatewayModelId(env.AI_FAST_MODEL ?? env.AI_MODEL) ??
     DEFAULT_FAST_MODEL_ID;
+  const guardianModelId =
+    validateGatewayModelId(env.AI_GUARDIAN_MODEL) ?? DEFAULT_GUARDIAN_MODEL_ID;
   const handoffModelId =
     validateGatewayModelId(env.AI_HANDOFF_MODEL) ?? DEFAULT_HANDOFF_MODEL_ID;
 
@@ -310,6 +317,7 @@ function readBotConfig(
         ? undefined
         : parseTurnReasoningLevel(reasoningLevel),
     fastModelId,
+    guardianModelId,
     imageGenerationModelId:
       toOptionalTrimmed(env.AI_IMAGE_MODEL) ??
       DEFAULT_IMAGE_GENERATION_MODEL_ID,

@@ -56,7 +56,9 @@ export interface ToolHookInput {
 }
 
 export interface ToolHookResult {
+  /** Hook-injected environment values applied only during execution. */
   env: Record<string, string>;
+  /** Hook-adjusted semantic tool input, including any schema-defined `env`. */
   input: Record<string, unknown>;
 }
 
@@ -1225,8 +1227,8 @@ export function createPluginHookRunner(
       }
     },
     async beforeToolExecute(tool) {
+      const env: Record<string, string> = {};
       let nextInput = { ...tool.input };
-      const env = normalizeEnv(nextInput.env);
       // Materialize once per tool call so every plugin sees the same
       // committed-so-far set, even though it can still grow before the next call.
       const actors = input.actors?.() ?? (input.actor ? [input.actor] : []);
@@ -1249,7 +1251,7 @@ export function createPluginHookRunner(
           },
           env: {
             get(key) {
-              return env[key];
+              return env[key] ?? normalizeEnv(nextInput.env)[key];
             },
             set(key, value) {
               env[key] = value;
@@ -1275,15 +1277,11 @@ export function createPluginHookRunner(
             );
           }
           nextInput = { ...replacement };
-          Object.assign(env, normalizeEnv(nextInput.env));
         }
       }
 
       return {
-        input: {
-          ...nextInput,
-          ...(Object.keys(env).length > 0 ? { env } : {}),
-        },
+        input: nextInput,
         env,
       };
     },

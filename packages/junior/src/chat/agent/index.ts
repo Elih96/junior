@@ -51,6 +51,7 @@ import {
 import {
   instructionActors,
   instructionProvenanceFor,
+  sameActorIdentity,
   type ConversationMessageProvenance,
 } from "@/chat/conversations/provenance";
 import type { Actor } from "@/chat/actor";
@@ -64,6 +65,7 @@ import {
 import type { PiMessage } from "@/chat/pi/messages";
 import {
   extractAssistantText,
+  getUserMessageInstructionText,
   isAssistantMessage,
   retainRuntimeTurnContext,
 } from "@/chat/pi/transcript";
@@ -109,6 +111,7 @@ import {
   surfaceFromRouting,
   type AgentRunRequest,
 } from "@/chat/agent/request";
+import { actionConfirmationRetryMessages } from "@/chat/agent/action-confirmation-retry";
 import { restoreSessionRecord } from "@/chat/agent/session";
 import { discoverRunSkills, restoreSkillRuntime } from "@/chat/agent/skills";
 import {
@@ -382,6 +385,33 @@ async function executeAgentRunInPrivacyContext(
     ];
     const runActors = (): Actor[] =>
       instructionActors(committedInstructionProvenance);
+    const turnStartMessageIndex = existingSessionRecord?.turnStartMessageIndex;
+    const currentTurnMessages =
+      turnStartMessageIndex !== undefined
+        ? (existingSessionRecord?.piMessages.slice(turnStartMessageIndex) ?? [])
+        : [];
+    const currentTurnProvenance =
+      turnStartMessageIndex !== undefined
+        ? (existingSessionRecord?.piMessageProvenance?.slice(
+            turnStartMessageIndex,
+          ) ?? [])
+        : [];
+    const guardianIntentParts =
+      currentTurnMessages.flatMap((message, index) => {
+        const provenance = currentTurnProvenance[index];
+        if (
+          provenance?.authority !== "instruction" ||
+          !sameActorIdentity(provenance.actor, actor)
+        ) {
+          return [];
+        }
+        const text = getUserMessageInstructionText(message);
+        return text ? [text] : [];
+      }) ?? [];
+    if (!resumedFromSessionRecord || guardianIntentParts.length === 0) {
+      guardianIntentParts.push(userInput);
+    }
+    const currentUserIntent = (): string => guardianIntentParts.join("\n\n");
     resume = createResumeState({
       channelName: routing.slackConversation?.name,
       destination: routing.destination,
@@ -554,6 +584,7 @@ async function executeAgentRunInPrivacyContext(
     const artifactStatePatch: Partial<ThreadArtifactsState> = {};
     const toolCalls: string[] = [];
     let agent: Agent | undefined;
+    let pendingPiHookError: Error | undefined;
     // Handoff becomes live only after its replacement epoch commits. This
     // pending value then drives the one-way model/context swap at Pi's boundary.
     let pendingHandoff:
@@ -688,6 +719,9 @@ async function executeAgentRunInPrivacyContext(
       activeSkills,
       currentActor: actor,
       currentActors: runActors,
+      currentAgentMessages,
+      currentTurnMessages,
+      currentUserIntent,
       artifactStatePatch,
       availableSkills,
       configurationValues,
@@ -698,6 +732,10 @@ async function executeAgentRunInPrivacyContext(
       generatedFiles,
       invokedSkill,
       observers,
+      onFatalToolError(error) {
+        pendingPiHookError = error;
+        agent?.abort();
+      },
       onSandboxRefChanged: (sandboxRef) => {
         lastKnownSandboxRef = sandboxRef;
       },
@@ -916,6 +954,15 @@ async function executeAgentRunInPrivacyContext(
           committedInstructionProvenance.push(
             ...messages.map((message) => message.provenance),
           );
+          for (const message of messages) {
+            if (
+              message.provenance.authority === "instruction" &&
+              sameActorIdentity(message.provenance.actor, actor) &&
+              message.text.trim()
+            ) {
+              guardianIntentParts.push(message.text.trim());
+            }
+          }
           for (const message of piMessages) {
             agent!.steer(message);
           }
@@ -948,7 +995,6 @@ async function executeAgentRunInPrivacyContext(
     // Pi converts prepareNextTurn exceptions into error turns instead of
     // rejecting. Preserve Junior's yield so runAgentStep can restore it after
     // the Pi run settles without leaking Pi mechanics into the resume API.
-    let pendingPiHookError: Error | undefined;
     agent = new Agent({
       ...(apiKeyOverride ? { getApiKey: () => apiKeyOverride } : {}),
       streamFn: createTracedStreamFn({
@@ -972,10 +1018,20 @@ async function executeAgentRunInPrivacyContext(
         }
         return undefined;
       },
-      afterToolCall: async ({ result }, signal) =>
-        runResume.timedOut && signal?.aborted
-          ? annotateTurnDeadlineToolResult(result)
-          : undefined,
+      afterToolCall: async ({ result, toolCall }, signal) => {
+        const deadlineResult =
+          runResume.timedOut && signal?.aborted
+            ? annotateTurnDeadlineToolResult(result)
+            : undefined;
+        const sourceResult = deadlineResult ?? result;
+        const projectedResult = wiring.projectActionReviewResult(
+          toolCall.id,
+          sourceResult,
+        );
+        return deadlineResult || projectedResult !== result
+          ? projectedResult
+          : undefined;
+      },
       prepareNextTurnWithContext: async (nextTurn, hookSignal) => {
         try {
           const handoffUpdate = applyPendingHandoff();
@@ -998,7 +1054,7 @@ async function executeAgentRunInPrivacyContext(
             ? { ...handoffUpdate, ...capacityUpdate }
             : (capacityUpdate ?? handoffUpdate);
         } catch (error) {
-          pendingPiHookError =
+          pendingPiHookError ??=
             error instanceof Error ? error : new Error(String(error));
           throw error;
         }
@@ -1228,6 +1284,7 @@ async function executeAgentRunInPrivacyContext(
               ? agent!.prompt(freshPromptMessage)
               : agent!.continue();
           let discardedRetryUsage: AgentTurnUsage | undefined;
+          let actionConfirmationRetryUsed = false;
           let providerRetryAttempt = 0;
           let emptyOutputAttempt = 0;
           const prepareRetry = async (messages: PiMessage[]): Promise<void> => {
@@ -1289,6 +1346,16 @@ async function executeAgentRunInPrivacyContext(
                   runResume.getResumeSnapshot(currentAgentMessages()),
                 );
                 throw pendingAuthPause;
+              }
+
+              const confirmationRetry = actionConfirmationRetryUsed
+                ? undefined
+                : actionConfirmationRetryMessages(agent!.state.messages);
+              if (confirmationRetry) {
+                actionConfirmationRetryUsed = true;
+                await prepareRetry(confirmationRetry);
+                run = agent!.continue();
+                continue;
               }
 
               const emptyOutputContinuation = nextEmptyOutputContinuation({

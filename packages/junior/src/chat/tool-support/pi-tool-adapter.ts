@@ -41,6 +41,11 @@ import {
   createSearchToolsTool,
   SEARCH_TOOLS_NAME,
 } from "@/chat/tools/search-tools";
+import {
+  reviewToolAction,
+  ToolActionRejectedError,
+  type ToolActionReview,
+} from "@/chat/tool-support/action-review";
 
 /** Wrap tool definitions into Pi Agent tool objects with logging, validation, and sandbox execution. */
 export function createPiAgentTools(
@@ -58,6 +63,7 @@ export function createPiAgentTools(
   agentHooks?: PluginHookRunner,
   conversationPrivacy?: ConversationPrivacy,
   onToolResult?: (report: ToolExecutionReport) => void | Promise<void>,
+  actionReview?: ToolActionReview,
 ): AgentTool[] {
   const plannedTools = planToolExposure(tools);
   const visibleTools: Record<string, AnyToolDefinition> = {
@@ -144,8 +150,55 @@ export function createPiAgentTools(
         })
       : { input: params, env: {} };
     const toolInput = beforeTool.input;
+    const executionInput = {
+      ...toolInput,
+      ...(Object.keys(beforeTool.env).length > 0
+        ? {
+            env: {
+              ...(toolInput.env &&
+              typeof toolInput.env === "object" &&
+              !Array.isArray(toolInput.env)
+                ? toolInput.env
+                : {}),
+              ...beforeTool.env,
+            },
+          }
+        : {}),
+    };
     await onToolCall?.(toolCallId, toolName, toolInput);
-    const sandboxInput = buildSandboxInput(toolName, toolInput);
+    try {
+      const assessment = await reviewToolAction(
+        toolCallId,
+        toolName,
+        toolDef,
+        toolInput,
+        actionReview,
+        signal,
+      );
+      if (assessment) {
+        setSpanAttributes({
+          "app.guardian.decision": assessment.decision,
+          "app.guardian.risk_level": assessment.riskLevel,
+          "app.guardian.user_authorization": assessment.userAuthorization,
+        });
+      }
+    } catch (error) {
+      if (error instanceof ToolActionRejectedError) {
+        setSpanAttributes({
+          "app.guardian.decision": error.decision,
+          ...(error.riskLevel
+            ? { "app.guardian.risk_level": error.riskLevel }
+            : {}),
+          ...(error.userAuthorization
+            ? {
+                "app.guardian.user_authorization": error.userAuthorization,
+              }
+            : {}),
+        });
+      }
+      throw error;
+    }
+    const sandboxInput = buildSandboxInput(toolName, executionInput);
     const isSandbox = Boolean(sandboxTools?.supports(toolName));
     const result = isSandbox
       ? await sandboxTools!.execute({
@@ -156,7 +209,7 @@ export function createPiAgentTools(
             ? { setToolCallSpanAttributes: setSpanAttributes }
             : {}),
         })
-      : await toolDef.execute(toolInput, {
+      : await toolDef.execute(executionInput, {
           experimental_context: sandbox,
           ...(signal ? { signal } : {}),
           conversationPrivacy: effectiveConversationPrivacy,
@@ -243,7 +296,10 @@ export function createPiAgentTools(
     description: toolDef.description,
     parameters: toolDef.inputSchema as AgentTool["parameters"],
     prepareArguments: toolDef.prepareArguments,
-    executionMode: toolDef.executionMode,
+    executionMode:
+      toolDef.approvalMode === "auto" || toolDef.approvalMode === "review"
+        ? "sequential"
+        : toolDef.executionMode,
     execute: async (
       toolCallId: unknown,
       params: unknown,
@@ -261,7 +317,7 @@ export function createPiAgentTools(
         "gen_ai.tool.call.arguments",
         params,
       );
-      return withSpan(
+      const result = await withSpan(
         `execute_tool ${toolName}`,
         "gen_ai.execute_tool",
         spanContext,
@@ -320,6 +376,9 @@ export function createPiAgentTools(
             ) {
               throw error;
             }
+            if (error instanceof ToolActionRejectedError) {
+              return error;
+            }
             handleToolExecutionError(
               error,
               executionToolName,
@@ -342,6 +401,10 @@ export function createPiAgentTools(
             : {}),
         },
       );
+      if (result instanceof ToolActionRejectedError) {
+        throw result;
+      }
+      return result;
     },
   }));
 }

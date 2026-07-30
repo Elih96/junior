@@ -55,6 +55,47 @@ describe("callMcpTool", () => {
     });
   });
 
+  it("uses the managed MCP provider as the trusted review source", async () => {
+    const manager = {
+      activateProvider: vi.fn(async () => true),
+      getResolvedActiveTools: vi.fn(() => [
+        {
+          name: "search",
+          rawName: "search",
+          provider: "demo",
+          description: "Search the remote workspace.",
+          parameters: {},
+          annotations: {
+            destructiveHint: false,
+            openWorldHint: true,
+            readOnlyHint: true,
+          },
+          execute: vi.fn(),
+        },
+      ]),
+    };
+    const callMcpTool = createCallMcpToolTool(manager);
+
+    expect(
+      await callMcpTool.resolveApprovalMetadata?.({
+        tool_name: "search",
+        arguments: { query: "errors" },
+      }),
+    ).toEqual({
+      annotations: {
+        destructiveHint: false,
+        openWorldHint: true,
+        readOnlyHint: true,
+      },
+      description: "Search the remote workspace.",
+      name: "search",
+      source: {
+        id: "demo",
+        description: "MCP provider demo",
+      },
+    });
+  });
+
   it("preserves native MCP content from the managed tool", async () => {
     const nativeContent = [
       { type: "text" as const, text: "image generated" },
