@@ -540,6 +540,37 @@ describe("McpToolManager", () => {
     );
   });
 
+  it("invokes onToolSuccess after a successful model-facing MCP call", async () => {
+    const plugin = buildPlugin();
+    const onToolSuccess = vi.fn(async () => undefined);
+    listToolsMock.mockResolvedValue([
+      {
+        name: "save_issue",
+        description: "Create or update an issue",
+        inputSchema: { type: "object", properties: {} },
+      },
+    ]);
+    callToolMock.mockResolvedValue({
+      content: [{ type: "text", text: "Created ENG-123" }],
+      structuredContent: { identifier: "ENG-123" },
+      isError: false,
+    });
+    const manager = new McpToolManager([plugin], { onToolSuccess });
+    await manager.activateProvider("demo");
+
+    await manager.getResolvedActiveTools()[0]!.execute({
+      title: "Created via MCP",
+    });
+
+    expect(onToolSuccess).toHaveBeenCalledWith({
+      arguments: { title: "Created via MCP" },
+      provider: "demo",
+      structuredContent: { identifier: "ENG-123" },
+      toolName: "save_issue",
+    });
+    await manager.close();
+  });
+
   it("hides wrapped tools from discovery but keeps them callable", async () => {
     const plugin = buildPlugin("linear", {
       allowedTools: ["get_issue"],

@@ -257,6 +257,13 @@ function extractMcpErrorMessage(result: PluginMcpToolCallResult): string {
   return "MCP tool call failed";
 }
 
+export interface McpToolSuccessHookInput {
+  arguments: Record<string, unknown>;
+  provider: string;
+  structuredContent?: unknown;
+  toolName: string;
+}
+
 export interface McpToolManagerOptions {
   authProviderFactory?: (
     plugin: PluginDefinition,
@@ -269,6 +276,13 @@ export interface McpToolManagerOptions {
     provider: string,
     error: McpAuthorizationRequiredError,
   ) => Promise<boolean | void> | boolean | void;
+  /**
+   * Optional post-success processor for model-facing MCP tool calls.
+   * Failures are logged by the host caller and must not fail the tool result.
+   */
+  onToolSuccess?: (
+    input: McpToolSuccessHookInput,
+  ) => Promise<void> | void;
 }
 
 export interface ManagedMcpToolResult {
@@ -576,13 +590,22 @@ export class McpToolManager {
               const providerContent = boundMcpContent(
                 toAgentToolContent(result),
               );
-              return {
+              const successResult = {
                 content: toModelVisibleMcpContent(result),
                 providerContent,
                 ...(result.structuredContent !== undefined
                   ? { structuredContent: result.structuredContent }
                   : {}),
               };
+              await this.options.onToolSuccess?.({
+                arguments: resolvedArgs,
+                provider: plugin.manifest.name,
+                ...(result.structuredContent !== undefined
+                  ? { structuredContent: result.structuredContent }
+                  : {}),
+                toolName: tool.name,
+              });
+              return successResult;
             } catch (error) {
               if (
                 error instanceof McpAuthorizationRequiredError &&
