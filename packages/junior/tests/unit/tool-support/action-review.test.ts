@@ -77,7 +77,7 @@ function definition(
 }
 
 describe("tool action review", () => {
-  it("preserves execution behavior for unclassified tools", async () => {
+  it("preserves execution behavior for unclassified core tools", async () => {
     const reviewer = { review: vi.fn() };
     const resolveApprovalMetadata = vi.fn();
 
@@ -93,7 +93,7 @@ describe("tool action review", () => {
     expect(resolveApprovalMetadata).not.toHaveBeenCalled();
   });
 
-  it("reviews auto plugin actions with exact input and safe credential context", async () => {
+  it("reviews auto plugin actions with exact input and safe context", async () => {
     const review = vi.fn<ToolActionReviewer["review"]>(async () => ({
       decision: "allow",
       reason: "Matches the scheduled request.",
@@ -104,6 +104,7 @@ describe("tool action review", () => {
       approvalMode: "auto",
       annotations: {
         destructiveHint: false,
+        idempotentHint: true,
         openWorldHint: true,
         readOnlyHint: true,
       },

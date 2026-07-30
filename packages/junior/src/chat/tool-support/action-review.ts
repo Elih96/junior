@@ -187,7 +187,7 @@ export class ToolActionReviewLimitError extends Error {
   }
 }
 
-/** Keep tools outside action review unless they explicitly opt in. */
+/** Keep core tools outside action review unless they explicitly opt in. */
 function effectiveApprovalMode(
   tool: AnyToolDefinition,
   resolved: ToolApprovalResolution | undefined,

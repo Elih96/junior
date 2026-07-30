@@ -44,6 +44,7 @@ describe("zodTool", () => {
       },
     });
 
+    expect(tool.approvalMode).toBeUndefined();
     expect(tool.inputSchema).toMatchObject({
       properties: {
         count: { type: "integer" },
