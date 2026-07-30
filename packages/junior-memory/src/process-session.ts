@@ -10,6 +10,7 @@ import { z } from "zod";
 import {
   createMemoryStore,
   type CreateMemoryInput,
+  type CreateMemoryResult,
   type MemoryDb,
 } from "./store";
 import {
@@ -18,6 +19,7 @@ import {
   type ExtractedMemory,
 } from "./agent";
 import { MEMORY_KINDS, memoryRuntimeContextSchema } from "./types";
+import { capturedMemory, memoriesCapturedEvent } from "./events";
 
 const MEMORY_TOOL_NAMES = new Set([
   "createMemory",
@@ -43,6 +45,21 @@ const extractedMemoryCacheSchema = z.array(
 
 /** Where a passively extracted memory may be stored, or dropped when unproven. */
 type MemoryRouteTarget = "drop" | "personal" | "conversation";
+
+function recordCapturedMemory(
+  captured: ReturnType<typeof capturedMemory>[],
+  result: CreateMemoryResult,
+): void {
+  const supersededIds = new Set(result.supersededIds ?? []);
+  for (let index = captured.length - 1; index >= 0; index -= 1) {
+    if (supersededIds.has(captured[index]!.id)) {
+      captured.splice(index, 1);
+    }
+  }
+  if (result.created || result.idempotent) {
+    captured.push(capturedMemory(result.memory));
+  }
+}
 
 /** A cited entry is a run-actor durable instruction evidence entry. */
 function isRunActorInstruction(entry: PluginRunTranscriptEntry): boolean {
@@ -252,6 +269,7 @@ export async function processMemorySession(
     return;
   }
 
+  const captured: ReturnType<typeof capturedMemory>[] = [];
   for (const memory of memories) {
     // The routing gate stays even though extraction is also actor-gated:
     // getTaskMemories caches extraction output for 7 days, so a retry can replay
@@ -262,9 +280,14 @@ export async function processMemorySession(
     }
     const input = passiveInput(run.runId, memory, sourceKey, target);
     if (target === "conversation") {
-      await store.createConversationMemory(input);
+      const result = await store.createConversationMemory(input);
+      recordCapturedMemory(captured, result);
       continue;
     }
-    await store.createMemory(input);
+    const result = await store.createMemory(input);
+    recordCapturedMemory(captured, result);
+  }
+  if (captured.length > 0) {
+    await context.events.emit(memoriesCapturedEvent({ memories: captured }));
   }
 }

@@ -428,6 +428,11 @@ function processSessionContext(
   return {
     db: overrides.db ?? {},
     embedder: overrides.embedder ?? createTestEmbedder(),
+    events:
+      overrides.events ??
+      ({
+        async emit() {},
+      } satisfies MemoryTaskContext["events"]),
     id: "plugin-task-memory",
     log: noopLogger,
     model:
@@ -752,6 +757,7 @@ describe("memory plugin storage", () => {
     const fixture = await createMemoryFixture();
 
     try {
+      const emitted: Parameters<MemoryTaskContext["events"]["emit"]>[0][] = [];
       const { model } = extractionModel([
         {
           kind: "preference",
@@ -768,6 +774,11 @@ describe("memory plugin storage", () => {
         processSessionContext({
           db: memoryDb(fixture),
           embedder,
+          events: {
+            async emit(event) {
+              emitted.push(event);
+            },
+          },
           model,
           run: {
             async load() {
@@ -811,6 +822,21 @@ describe("memory plugin storage", () => {
         ]),
       );
       expect(rows).toHaveLength(2);
+      expect(emitted).toHaveLength(1);
+      expect(emitted[0]?.data).toEqual({
+        memories: expect.arrayContaining([
+          expect.objectContaining({
+            content: "Prefers QA notes that mention database row checks.",
+            kind: "preference",
+            scope: "personal",
+          }),
+          expect.objectContaining({
+            content: "Deploy runbooks live in Notion.",
+            kind: "knowledge",
+            scope: "conversation",
+          }),
+        ]),
+      });
       await expect(
         memoryDb(fixture)
           .select()
@@ -1196,6 +1222,211 @@ describe("memory plugin storage", () => {
       await expect(
         memoryDb(fixture).select().from(memorySqlSchema.juniorMemoryMemories),
       ).resolves.toEqual([]);
+    } finally {
+      await fixture.close();
+    }
+  });
+
+  it("re-emits captured memories when a task retry finds its idempotent writes", async () => {
+    const fixture = await createMemoryFixture();
+    try {
+      const emitted: Parameters<MemoryTaskContext["events"]["emit"]>[0][] = [];
+      const context = processSessionContext({
+        db: memoryDb(fixture),
+        events: {
+          async emit(event) {
+            emitted.push(event);
+          },
+        },
+        model: extractionModel([
+          {
+            kind: "preference",
+            content: "Prefers retry-safe memory transcript events.",
+          },
+        ]).model,
+        run: {
+          async load() {
+            return completedRun({
+              transcript: [
+                instructionMessage(
+                  "I prefer retry-safe memory transcript events.",
+                ),
+              ],
+            });
+          },
+        },
+      });
+
+      await processMemorySession(context);
+      await processMemorySession(context);
+
+      expect(emitted).toHaveLength(2);
+      expect(emitted[1]?.data).toEqual(emitted[0]?.data);
+      await expect(
+        memoryDb(fixture).select().from(memorySqlSchema.juniorMemoryMemories),
+      ).resolves.toHaveLength(1);
+    } finally {
+      await fixture.close();
+    }
+  });
+
+  it("keeps captured event data stable when retries include an exact duplicate", async () => {
+    const fixture = await createMemoryFixture();
+    try {
+      const duplicateContent = "Deployment runbooks live in Notion.";
+      const store = createMemoryStore(memoryDb(fixture), localContext(), {
+        now: () => TEST_NOW_MS,
+      });
+      await store.createConversationMemory({
+        content: duplicateContent,
+        idempotencyKey: "memory-test:existing-conversation-fact",
+        kind: "knowledge",
+      });
+      const emitted: Parameters<MemoryTaskContext["events"]["emit"]>[0][] = [];
+      let failFirstEmit = true;
+      const context = processSessionContext({
+        db: memoryDb(fixture),
+        events: {
+          async emit(event) {
+            emitted.push(event);
+            if (failFirstEmit) {
+              failFirstEmit = false;
+              throw new Error("event append failed");
+            }
+          },
+        },
+        model: extractionModel([
+          {
+            kind: "preference",
+            content: "Prefers stable memory event retries.",
+          },
+          {
+            kind: "knowledge",
+            content: duplicateContent,
+          },
+        ]).model,
+        run: {
+          async load() {
+            return completedRun({
+              transcript: [
+                instructionMessage(
+                  `I prefer stable memory event retries. ${duplicateContent}`,
+                ),
+              ],
+            });
+          },
+        },
+      });
+
+      await expect(processMemorySession(context)).rejects.toThrow(
+        "event append failed",
+      );
+      await processMemorySession(context);
+
+      expect(emitted).toHaveLength(2);
+      expect(emitted[1]?.data).toEqual(emitted[0]?.data);
+      expect(emitted[0]?.data).toMatchObject({
+        memories: [
+          expect.objectContaining({
+            content: "Prefers stable memory event retries.",
+            kind: "preference",
+          }),
+        ],
+      });
+    } finally {
+      await fixture.close();
+    }
+  });
+
+  it("emits only the final active preference after same-batch supersession", async () => {
+    const fixture = await createMemoryFixture();
+    try {
+      const firstContent = "Prefers Python for automation scripts.";
+      const finalContent = "Prefers TypeScript for automation scripts.";
+      const emitted: Parameters<MemoryTaskContext["events"]["emit"]>[0][] = [];
+      let failFirstEmit = true;
+      const model: PluginModel = {
+        async completeObject(input) {
+          if (
+            typeof input.prompt === "string" &&
+            input.prompt.includes("<memory-preference-adjudication-input>")
+          ) {
+            const existingJson =
+              /<existing-memories>\n(.+)\n<\/existing-memories>/s.exec(
+                input.prompt,
+              )?.[1];
+            const existing = existingJson
+              ? (JSON.parse(existingJson) as Array<{ id: string }>)
+              : [];
+            if (existing.length === 0) {
+              return { object: { decision: "distinct" } };
+            }
+            return {
+              object: {
+                decision: "supersedes_old",
+                supersededIds: [existing[0]!.id],
+              },
+            };
+          }
+          return {
+            object: {
+              memories: [
+                {
+                  canonicalFact: firstContent,
+                  expiresAtMs: null,
+                  kind: "preference",
+                  evidenceMessageIndices: [0],
+                },
+                {
+                  canonicalFact: finalContent,
+                  expiresAtMs: null,
+                  kind: "preference",
+                  evidenceMessageIndices: [0],
+                },
+              ],
+            },
+          };
+        },
+      };
+      const context = processSessionContext({
+        db: memoryDb(fixture),
+        events: {
+          async emit(event) {
+            emitted.push(event);
+            if (failFirstEmit) {
+              failFirstEmit = false;
+              throw new Error("event append failed");
+            }
+          },
+        },
+        model,
+        run: {
+          async load() {
+            return completedRun({
+              transcript: [
+                instructionMessage(
+                  "I first preferred Python, but now I prefer TypeScript for automation scripts.",
+                ),
+              ],
+            });
+          },
+        },
+      });
+
+      await expect(processMemorySession(context)).rejects.toThrow(
+        "event append failed",
+      );
+      await processMemorySession(context);
+
+      expect(emitted).toHaveLength(2);
+      expect(emitted[1]?.data).toEqual(emitted[0]?.data);
+      expect(emitted[0]?.data).toMatchObject({
+        memories: [
+          expect.objectContaining({
+            content: finalContent,
+          }),
+        ],
+      });
     } finally {
       await fixture.close();
     }

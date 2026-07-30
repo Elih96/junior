@@ -1,4 +1,5 @@
 import type { ConversationEvent } from "@/chat/conversations/history";
+import { renderPluginConversationEvent } from "@/chat/plugins/conversation-events";
 import { z } from "zod";
 import {
   conversationReportEventSchema,
@@ -16,6 +17,7 @@ export const conversationReportSourceEventTypes = [
   "guardian_action_reviewed",
   "turn_started",
   "turn_context",
+  "plugin_event",
   "turn_routed",
   "turn_completed",
   "turn_failed",
@@ -289,6 +291,19 @@ function reportEventData(args: {
   data: ConversationEvent["data"];
 }): ConversationReportEventData | undefined {
   const { data } = args;
+  if (data.type === "plugin_event") {
+    if (!args.canExposePayload) return undefined;
+    const presentation = renderPluginConversationEvent(data);
+    if (!presentation) return undefined;
+    return {
+      type: "plugin_event",
+      namespace: data.namespace,
+      name: data.name,
+      version: data.version,
+      turnId: data.turnId,
+      presentation,
+    };
+  }
   switch (data.type) {
     case "message": {
       const actorIdentity = args.canExposePayload
