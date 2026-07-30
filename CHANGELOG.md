@@ -1,4 +1,51 @@
 # Changelog
+## 0.123.0
+
+### New Features ✨
+
+#### Dashboard
+
+- Add Guardian stats to System by @dcramer in [#1155](https://github.com/getsentry/junior/pull/1155)
+- Animate archived conversations by @dcramer in [#1145](https://github.com/getsentry/junior/pull/1145)
+
+#### Other
+
+- (agent) Enforce Guardian action review by @dcramer in [#1082](https://github.com/getsentry/junior/pull/1082)
+- (plugins) Add structured conversation events by @dcramer in [#1154](https://github.com/getsentry/junior/pull/1154)
+- (slack) Force unsubscribe with !stop by @sentry-junior in [#1144](https://github.com/getsentry/junior/pull/1144)
+
+### Bug Fixes 🐛
+
+#### Dashboard
+
+- Add conversations navigation link by @dcramer in [#1158](https://github.com/getsentry/junior/pull/1158)
+- Remove conversation list from location details by @dcramer in [#1157](https://github.com/getsentry/junior/pull/1157)
+- Attribute transcript messages to Slack actors by @dcramer in [#1151](https://github.com/getsentry/junior/pull/1151)
+- Render user prose as markdown by @dcramer in [#1153](https://github.com/getsentry/junior/pull/1153)
+- Show ellipsis for long conversation titles by @dcramer in [#1150](https://github.com/getsentry/junior/pull/1150)
+
+#### Other
+
+- (agent) Require tool behavior annotations by @dcramer in [#1156](https://github.com/getsentry/junior/pull/1156)
+- (github) Drop redundant "via Junior" from requester attribution by @sentry-junior in [#1147](https://github.com/getsentry/junior/pull/1147)
+
+### Internal Changes 🔧
+
+#### Deps
+
+- Bump astro from 6.3.7 to 7.1.1 by @dependabot in [#1063](https://github.com/getsentry/junior/pull/1063)
+- Bump hono from 4.12.22 to 4.12.27 by @dependabot in [#1061](https://github.com/getsentry/junior/pull/1061)
+- Bump better-auth from 1.6.11 to 1.6.22 by @dependabot in [#1048](https://github.com/getsentry/junior/pull/1048)
+
+#### Other
+
+- (deps-dev) Bump undici from 7.28.0 to 7.29.0 in /packages/junior-evals by @dependabot in [#1047](https://github.com/getsentry/junior/pull/1047)
+- (tools) Make deferred tool schemas authoritative by @sentry-junior in [#1140](https://github.com/getsentry/junior/pull/1140)
+
+### Other
+
+- Remove broken GitHub asset skill by @dcramer in [#1143](https://github.com/getsentry/junior/pull/1143)
+
 ## 0.122.1
 
 ### Bug Fixes 🐛
