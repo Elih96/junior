@@ -1,4 +1,10 @@
 # Changelog
+## 0.122.1
+
+### Bug Fixes 🐛
+
+- (linear) Annotate save_issue creates via afterMcpTool by @sentry-junior in [#1142](https://github.com/getsentry/junior/pull/1142)
+
 ## 0.122.0
 
 ### New Features ✨
