@@ -1,4 +1,5 @@
 import {
+  calculateCost,
   completeSimple,
   getEnvApiKey,
   getModels,
@@ -10,7 +11,13 @@ import {
   type ThinkingLevel,
 } from "@/chat/pi/sdk";
 import { createGatewayProvider } from "@ai-sdk/gateway";
-import { embedMany, generateObject, NoObjectGeneratedError } from "ai";
+import {
+  embedMany,
+  generateObject,
+  NoObjectGeneratedError,
+  type GenerateObjectResult,
+  type LanguageModelUsage,
+} from "ai";
 
 // Directly register the anthropic provider at import time. pi-ai's built-in
 // registration relies on opaque dynamic import() calls that break under
@@ -277,6 +284,61 @@ function logContextFromMetadata(
   };
 }
 
+function objectCompletionCost(
+  modelId: string,
+  usage: LanguageModelUsage,
+): number | undefined {
+  const cacheRead = usage.inputTokenDetails.cacheReadTokens;
+  const cacheWrite = usage.inputTokenDetails.cacheWriteTokens;
+  const input =
+    usage.inputTokenDetails.noCacheTokens ??
+    (usage.inputTokens === undefined
+      ? undefined
+      : Math.max(0, usage.inputTokens - (cacheRead ?? 0) - (cacheWrite ?? 0)));
+  if (
+    input === undefined &&
+    usage.outputTokens === undefined &&
+    cacheRead === undefined &&
+    cacheWrite === undefined
+  ) {
+    return undefined;
+  }
+
+  return calculateCost(resolveGatewayModel(modelId), {
+    input: input ?? 0,
+    output: usage.outputTokens ?? 0,
+    cacheRead: cacheRead ?? 0,
+    cacheWrite: cacheWrite ?? 0,
+    ...(usage.outputTokenDetails.reasoningTokens !== undefined
+      ? { reasoning: usage.outputTokenDetails.reasoningTokens }
+      : {}),
+    totalTokens:
+      usage.totalTokens ??
+      (input ?? 0) +
+        (usage.outputTokens ?? 0) +
+        (cacheRead ?? 0) +
+        (cacheWrite ?? 0),
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+  }).total;
+}
+
+/** Estimate cost without changing the outcome of a successful completion. */
+function bestEffortObjectCompletionCost(
+  modelId: string,
+  usage: LanguageModelUsage,
+): number | undefined {
+  try {
+    return objectCompletionCost(modelId, usage);
+  } catch (error) {
+    logWarn("ai.completion.cost_estimate.failed", {
+      "exception.message":
+        error instanceof Error ? error.message : String(error),
+      "gen_ai.request.model": modelId,
+    });
+    return undefined;
+  }
+}
+
 /** Execute a schema-constrained completion using the AI SDK structured output path. */
 export async function completeObject<TSchema extends ZodTypeAny>(params: {
   modelId: string;
@@ -293,11 +355,12 @@ export async function completeObject<TSchema extends ZodTypeAny>(params: {
   recordTelemetryPayloads?: boolean;
   signal?: AbortSignal;
   metadata?: Record<string, unknown>;
-}): Promise<{ object: z.infer<TSchema> }> {
+}): Promise<{ costUsd?: number; object: z.infer<TSchema> }> {
   const apiKey = getGatewayApiKey();
   const provider = createGatewayProvider(apiKey ? { apiKey } : {});
+  let result: GenerateObjectResult<unknown>;
   try {
-    const result = await withSpan(
+    result = await withSpan(
       `${GEN_AI_OPERATION_CHAT} ${params.modelId}`,
       "gen_ai.chat",
       logContextFromMetadata(params.modelId, params.metadata),
@@ -350,7 +413,6 @@ export async function completeObject<TSchema extends ZodTypeAny>(params: {
           : {}),
       },
     );
-    return { object: result.object as z.infer<TSchema> };
   } catch (error) {
     const providerError = createProviderError(error, {
       ...(NoObjectGeneratedError.isInstance(error)
@@ -360,6 +422,11 @@ export async function completeObject<TSchema extends ZodTypeAny>(params: {
     });
     throw providerError;
   }
+  const costUsd = bestEffortObjectCompletionCost(params.modelId, result.usage);
+  return {
+    object: result.object as z.infer<TSchema>,
+    ...(costUsd !== undefined ? { costUsd } : {}),
+  };
 }
 
 /** Generate text embeddings through the host-owned AI Gateway provider. */
