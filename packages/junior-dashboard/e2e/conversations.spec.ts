@@ -363,8 +363,27 @@ test("archives and restores a conversation from the sidebar", async ({
   page,
 }) => {
   await page.setViewportSize({ height: 900, width: 1600 });
+  let archived = false;
+  await page.route(/\/api\/conversations(?:\?.*)?$/, async (route) => {
+    const response = await route.fetch();
+    const feed = await response.json();
+    await route.fulfill({
+      response,
+      json: {
+        ...feed,
+        conversations: feed.conversations.filter(
+          (conversation: { displayTitle: string }) =>
+            !archived ||
+            conversation.displayTitle !== "Dashboard QA edge cases",
+        ),
+      },
+    });
+  });
   await page.route("**/api/conversations/*/archive", async (route) => {
-    await route.fulfill({ json: { archived: true } });
+    const request = route.request().postDataJSON();
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    archived = request.archived;
+    await route.fulfill({ json: { archived } });
   });
   await page.goto(server.baseURL);
   await expect(
@@ -377,6 +396,9 @@ test("archives and restores a conversation from the sidebar", async ({
   const archiveButton = page.getByRole("button", {
     name: "Archive Dashboard QA edge cases",
   });
+  await page
+    .getByRole("searchbox", { name: "Search your conversations" })
+    .fill("Dashboard QA edge cases");
   await conversationLink.hover();
 
   const currentUrl = page.url();
@@ -385,6 +407,21 @@ test("archives and restores a conversation from the sidebar", async ({
       request.method() === "PATCH" && request.url().endsWith("/archive"),
   );
   await archiveButton.click();
+  const emptyView = page.getByText("No conversations match this view.");
+  await expect(emptyView).toHaveCount(0);
+  const archiveFocusRefetch = page.waitForResponse(
+    (response) =>
+      response.request().method() === "GET" &&
+      /\/api\/conversations(?:\?.*)?$/.test(response.url()),
+  );
+  await page.evaluate(() => {
+    window.dispatchEvent(new Event("focus"));
+    window.dispatchEvent(new Event("visibilitychange"));
+  });
+  await archiveFocusRefetch;
+  await expect(conversationLink).toHaveCount(0);
+  await page.waitForTimeout(220);
+  await expect(emptyView).toBeVisible();
   const archiveRequest = await archiveRequestPromise;
 
   expect(archiveRequest.postDataJSON()).toMatchObject({ archived: true });
@@ -404,6 +441,23 @@ test("archives and restores a conversation from the sidebar", async ({
       name: "Undo archive for Dashboard QA edge cases",
     })
     .click();
+  await expect(conversationLink).toBeVisible();
+  const restoreFocusRefetch = page.waitForResponse(
+    (response) =>
+      response.request().method() === "GET" &&
+      /\/api\/conversations(?:\?.*)?$/.test(response.url()),
+  );
+  await page.evaluate(() => {
+    window.dispatchEvent(new Event("focus"));
+    window.dispatchEvent(new Event("visibilitychange"));
+  });
+  await restoreFocusRefetch;
+  await expect(conversationLink).toBeVisible();
+  await expect(
+    page.getByRole("button", {
+      name: "Undo archive for Dashboard QA edge cases",
+    }),
+  ).toHaveText("Restoring…");
   const restoreRequest = await restoreRequestPromise;
 
   expect(restoreRequest.postDataJSON()).toMatchObject({ archived: false });
@@ -413,4 +467,76 @@ test("archives and restores a conversation from the sidebar", async ({
     }),
   ).toHaveCount(0);
   expect(page.url()).toBe(currentUrl);
+});
+
+test("shows archive failures after the row returns", async ({ page }) => {
+  await page.setViewportSize({ height: 900, width: 1600 });
+  await page.route("**/api/conversations/*/archive", async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    await route.fulfill({
+      json: { error: "Archive failed" },
+      status: 500,
+    });
+  });
+  await page.goto(server.baseURL);
+
+  const conversationLink = page.getByRole("link", {
+    name: /Dashboard QA edge cases/,
+  });
+  await conversationLink.hover();
+  await page
+    .getByRole("button", { name: "Archive Dashboard QA edge cases" })
+    .click();
+
+  await expect(conversationLink).toBeVisible();
+  await expect(
+    page.getByRole("alert").filter({
+      hasText: "Could not archive Dashboard QA edge cases.",
+    }),
+  ).toBeVisible();
+});
+
+test("keeps undo available when another archive fails", async ({ page }) => {
+  await page.setViewportSize({ height: 900, width: 1600 });
+  let archiveRequests = 0;
+  await page.route("**/api/conversations/*/archive", async (route) => {
+    archiveRequests += 1;
+    if (archiveRequests === 1) {
+      await route.fulfill({ json: { archived: true } });
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    await route.fulfill({
+      json: { error: "Archive failed" },
+      status: 500,
+    });
+  });
+  await page.goto(server.baseURL);
+
+  const firstConversation = page.getByRole("link", {
+    name: /Dashboard QA edge cases/,
+  });
+  await firstConversation.hover();
+  await page
+    .getByRole("button", { name: "Archive Dashboard QA edge cases" })
+    .click();
+  const undo = page.getByRole("button", {
+    name: "Undo archive for Dashboard QA edge cases",
+  });
+  await expect(undo).toBeVisible();
+
+  const secondConversation = page.getByRole("link", {
+    name: /Checkout latency triage/,
+  });
+  await secondConversation.hover();
+  await page
+    .getByRole("button", { name: "Archive Checkout latency triage" })
+    .click();
+
+  await expect(
+    page.getByRole("alert").filter({
+      hasText: "Could not archive Checkout latency triage.",
+    }),
+  ).toBeVisible();
+  await expect(undo).toBeVisible();
 });
