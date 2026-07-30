@@ -109,6 +109,13 @@ export function DashboardShell() {
             <JuniorLogo />
           </Link>
           <nav className="col-span-2 row-start-2 flex min-w-0 items-center gap-6 overflow-x-auto md:col-span-1 md:col-start-2 md:row-start-1 md:justify-self-start md:overflow-visible">
+            <Link
+              aria-current={workspace ? "page" : undefined}
+              className={navLinkClass({ isActive: workspace })}
+              to="/"
+            >
+              Conversations
+            </Link>
             <NavLink className={navLinkClass} to="/locations">
               Locations
             </NavLink>
