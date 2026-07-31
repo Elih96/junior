@@ -1422,6 +1422,42 @@ describe("dashboard canonical-event components", () => {
     expect(html).not.toContain('aria-label="Chart legend"');
   });
 
+  it("formats plugin cost charts as USD", () => {
+    const html = renderToStaticMarkup(
+      <PluginReports
+        reports={[
+          {
+            pluginName: "memory",
+            widgets: [
+              {
+                categories: [
+                  {
+                    id: "2026-07-31",
+                    label: "2026-07-31",
+                    values: { costUsd: 0.0042 },
+                  },
+                ],
+                id: "extraction-cost",
+                series: [
+                  {
+                    format: "usd",
+                    key: "costUsd",
+                    label: "Cost",
+                  },
+                ],
+                title: "Extraction cost",
+                type: "bar_chart",
+              },
+            ],
+          },
+        ]}
+      />,
+    );
+    expect(html).toContain('aria-label="2026-07-31, Cost: $0.0042"');
+    expect(html).toContain(">$0.0042</text>");
+    expect(html).toContain('x1="56"');
+  });
+
   it("renders daily chart ranges from the shared page selection", () => {
     const categories = Array.from({ length: 90 }, (_, index) => {
       const date = new Date("2026-05-03T00:00:00.000Z");

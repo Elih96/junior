@@ -2,6 +2,7 @@ import type { PluginOperationalReport } from "@sentry/junior/api/schema";
 
 import type { TimeRangeDays } from "../../components/controls/TimeRangeSelector";
 import { Tooltip } from "../../components/Tooltip";
+import { formatCostSummary } from "../../format";
 
 type Widget = NonNullable<PluginOperationalReport["widgets"]>[number];
 
@@ -22,9 +23,10 @@ export function PluginBarChart(props: {
   const categories = widget.timeRangeDays
     ? widget.categories.slice(-supportedRange(widget, props.range))
     : widget.categories;
+  const seriesFormat = commonSeriesFormat(widget);
   const width = 520;
   const height = 250;
-  const left = 42;
+  const left = seriesFormat === "usd" ? 56 : 42;
   const top = 16;
   const bottom = 36;
   const plotHeight = height - top - bottom;
@@ -105,7 +107,7 @@ export function PluginBarChart(props: {
                   x={left - 6}
                   y={y + 3}
                 >
-                  {formatChartNumber(tickValue)}
+                  {formatChartValue(tickValue, seriesFormat)}
                 </text>
               </g>
             );
@@ -117,7 +119,7 @@ export function PluginBarChart(props: {
                 value ? 2 : 0,
                 (Math.abs(value) / span) * plotHeight,
               );
-              const formatted = formatChartNumber(value);
+              const formatted = formatChartValue(value, series.format);
               return (
                 <Tooltip
                   content={`${series.label}: ${formatted}`}
@@ -194,4 +196,15 @@ function formatCategoryLabel(label: string): string {
 
 function formatChartNumber(value: number): string {
   return String(Number(value.toPrecision(12)));
+}
+
+function commonSeriesFormat(widget: Widget): "usd" | undefined {
+  const formats = new Set(widget.series.map((series) => series.format));
+  return formats.size === 1 ? widget.series[0]?.format : undefined;
+}
+
+function formatChartValue(value: number, format: "usd" | undefined): string {
+  return format === "usd"
+    ? formatCostSummary({ total: value })
+    : formatChartNumber(value);
 }
