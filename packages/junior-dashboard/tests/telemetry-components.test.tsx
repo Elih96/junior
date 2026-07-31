@@ -1250,10 +1250,15 @@ describe("dashboard canonical-event components", () => {
         <SystemPage data={stale} />
       </MemoryRouter>,
     );
-    expect(overviewHtml).toContain(
-      "Plugin details and capabilities are still available.",
+    expect(overviewHtml).not.toContain("Plugin stats failed to load.");
+
+    const inventoryHtml = renderToStaticMarkup(
+      <MemoryRouter initialEntries={["/system/plugins"]}>
+        <SystemPage data={stale} />
+      </MemoryRouter>,
     );
-    expect(overviewHtml).not.toContain(
+    expect(inventoryHtml).toContain("Plugin stats failed to load.");
+    expect(inventoryHtml).toContain(
       "Showing the last operational reports Junior received.",
     );
   });
@@ -1279,14 +1284,25 @@ describe("dashboard canonical-event components", () => {
       systemHtml.match(/aria-label="Reporting period"/g) ?? [],
     ).toHaveLength(1);
     expect(systemHtml).toContain(">Plugins<");
+    expect(systemHtml).toContain(">All Plugins<");
     expect(systemHtml).toContain(">Skills<");
-    expect(systemHtml).toContain(">GitHub<");
+    expect(systemHtml).not.toContain(">GitHub<");
     expect(systemHtml).not.toContain(">loaded<");
     expect(systemHtml).not.toContain(">quiet<");
     expect(systemHtml).not.toContain(">metrics<");
     expect(systemHtml).not.toContain(">datasets<");
     expect(systemHtml).not.toContain(">1 loaded<");
     expect(systemHtml).toContain(">triage<");
+
+    const pluginsHtml = renderToStaticMarkup(
+      <MemoryRouter initialEntries={["/system/plugins"]}>
+        <SystemPage data={data} />
+      </MemoryRouter>,
+    );
+    expect(pluginsHtml).toContain(">All Plugins<");
+    expect(pluginsHtml).toContain(">GitHub<");
+    expect(pluginsHtml).not.toContain("Usage over time");
+    expect(pluginsHtml).not.toContain('aria-label="Reporting period"');
 
     const skillsHtml = renderToStaticMarkup(
       <SkillInventory skills={data.skills} />,
