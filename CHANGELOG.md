@@ -1,4 +1,15 @@
 # Changelog
+## 0.124.1
+
+### New Features ✨
+
+- (github) Show dashboard and Sentry session links by @sentry-junior in [#1165](https://github.com/getsentry/junior/pull/1165)
+- Improve memory management across user pages and dashboard by @dcramer in [#1159](https://github.com/getsentry/junior/pull/1159)
+
+### Bug Fixes 🐛
+
+- (dashboard) Slim mobile conversation chrome by @sentry-junior in [#1166](https://github.com/getsentry/junior/pull/1166)
+
 ## 0.124.0
 
 ### New Features ✨
