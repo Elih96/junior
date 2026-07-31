@@ -46,7 +46,8 @@ reports, and other typed hook surfaces exported by this package.
   core prompt.
 - Tool hooks return model-visible schemas aligned with their executor inputs.
 - Host-owned structured model and embedding calls do not expose provider
-  credentials to plugins.
+  credentials to plugins. Structured calls return a best-effort provider cost
+  estimate when one is available.
 - Authenticated API route apps receive one verified viewer in their request
   context. The registration hook exposes actor resolution for plugins whose
   viewer-owned data spans platform identities.
@@ -76,8 +77,9 @@ routing, response validation, rendering, confirmation, and query state.
 - Conversation-bound background tasks may emit registered structured events
   through `ctx.events`. Define each version with `defineConversationEvent()`;
   the host supplies the plugin namespace, conversation, turn, ordering, and
-  timestamps. Event definitions return bounded transcript presentation data,
-  while Junior owns browser rendering.
+  timestamps without treating background work as new conversation activity.
+  Event definitions return bounded transcript presentation data, while Junior
+  owns browser rendering.
 - `ctx.agent.dispatch` creates durable agent work with an explicit actor,
   destination, source, metadata, and idempotency identity.
 - Delegated credential subjects declare the narrow action that authorized them.
@@ -90,11 +92,14 @@ routing, response validation, rendering, confirmation, and query state.
 
 Register plugin-owned event definitions through `conversationEvents`. A
 definition owns one local name, version, content schema, and `renderEvent()`
-projection. The active plugin context supplies the namespace, so plugins cannot
-emit native events or impersonate another plugin. The `junior` plugin name is
-reserved for host-owned native events. Stored events remain durable when a
-plugin is removed, but normal transcript projection skips definitions that are
-not currently registered.
+projection. A renderer may return `undefined` when an event should remain
+durable without producing a transcript row. The active plugin context supplies
+the namespace, so plugins cannot emit native events or impersonate another
+plugin. The `junior` plugin name is reserved for host-owned native events.
+Versions of the same event name share one task-operation idempotency identity,
+so keep previous definitions registered when evolving an event. Stored events
+remain durable when a plugin is removed, but normal transcript projection skips
+definitions that are not currently registered.
 
 ## Database
 
