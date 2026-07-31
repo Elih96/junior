@@ -70,17 +70,17 @@ export type TranscriptViewContextEventPart = {
   type: "context_event";
 };
 
-export type TranscriptViewPluginEventPart = {
+export type TranscriptViewStructuredEventPart = {
   name: string;
   namespace: string;
   presentation: ConversationEventPresentation;
-  type: "plugin_event";
+  type: "structured_event";
   version: number;
 };
 
 export type TranscriptViewPart =
   | TranscriptViewContextEventPart
-  | TranscriptViewPluginEventPart
+  | TranscriptViewStructuredEventPart
   | TranscriptViewReasoningPart
   | TranscriptViewSubagentPart
   | TranscriptViewTextPart

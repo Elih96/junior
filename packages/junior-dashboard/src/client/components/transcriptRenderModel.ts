@@ -1,7 +1,7 @@
 import type {
   TranscriptViewContextEventPart,
   TranscriptViewMessage,
-  TranscriptViewPluginEventPart,
+  TranscriptViewStructuredEventPart,
   TranscriptViewReasoningPart,
   TranscriptViewSubagentPart,
   TranscriptViewTextPart,
@@ -29,10 +29,10 @@ export type RenderedSubagentEntry = {
   timestamp?: number;
 };
 
-export type RenderedPluginEventEntry = {
+export type RenderedStructuredEventEntry = {
   key: string;
-  kind: "plugin_event";
-  part: TranscriptViewPluginEventPart;
+  kind: "structured_event";
+  part: TranscriptViewStructuredEventPart;
   timestamp?: number;
 };
 
@@ -62,7 +62,7 @@ export type RenderedTranscriptEntry =
   | RenderedContextEventEntry
   | RenderedFailureEntry
   | RenderedMessageEntry
-  | RenderedPluginEventEntry
+  | RenderedStructuredEventEntry
   | RenderedReasoningEntry
   | RenderedSubagentEntry
   | RenderedToolEntry;
@@ -117,10 +117,10 @@ export function groupTranscriptMessages(
           part,
           timestamp: message.timestamp,
         });
-      } else if (part.type === "plugin_event") {
+      } else if (part.type === "structured_event") {
         entries.push({
-          key: `${message.sourceSeq}:plugin-event:${part.namespace}:${part.name}`,
-          kind: "plugin_event",
+          key: `${message.sourceSeq}:structured-event:${part.namespace}:${part.name}`,
+          kind: "structured_event",
           part,
           timestamp: message.timestamp,
         });
@@ -158,7 +158,7 @@ export function messageRawText(message: TranscriptViewMessage): string {
       if (part.type === "subagent") {
         return `subagent ${part.subagentKind}\nstatus ${part.status}`;
       }
-      if (part.type === "plugin_event") {
+      if (part.type === "structured_event") {
         return [
           part.presentation.title,
           part.presentation.preview,

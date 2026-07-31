@@ -47,7 +47,7 @@ describe("plugin event transcript projection", () => {
     const messages = conversationTranscriptMessages(
       conversation([
         pluginEvent({
-          type: "plugin_event",
+          type: "structured_event",
           namespace: "memory",
           name: "memories_captured",
           version: 1,
@@ -70,7 +70,7 @@ describe("plugin event transcript projection", () => {
 
     expect(entries).toEqual([
       expect.objectContaining({
-        kind: "plugin_event",
+        kind: "structured_event",
         part: expect.objectContaining({
           namespace: "memory",
           name: "memories_captured",
@@ -85,7 +85,7 @@ describe("plugin event transcript projection", () => {
     const markdown = buildConversationMarkdown(
       conversation([
         pluginEvent({
-          type: "plugin_event",
+          type: "structured_event",
           namespace: "memory",
           name: "memories_captured",
           version: 1,
@@ -100,5 +100,37 @@ describe("plugin event transcript projection", () => {
 
     expect(markdown).toContain("### Memory captured");
     expect(markdown).toContain("2026-01-01T00:00:01.000Z - +1.0s");
+  });
+
+  it("creates a searchable standalone native authentication event entry", () => {
+    const messages = conversationTranscriptMessages(
+      conversation([
+        pluginEvent({
+          type: "structured_event",
+          namespace: "junior",
+          name: "authentication_linked",
+          version: 1,
+          turnId: "turn-1",
+          presentation: {
+            icon: "link",
+            title: "GitHub connected",
+            preview: "Connected as `dcramer`",
+          },
+        }),
+      ]),
+    );
+    const entries = groupTranscriptMessages(messages);
+
+    expect(entries).toEqual([
+      expect.objectContaining({
+        kind: "structured_event",
+        part: expect.objectContaining({
+          namespace: "junior",
+          name: "authentication_linked",
+        }),
+      }),
+    ]);
+    expect(entryMatchesSearch(entries[0]!, "dcramer")).toBe(true);
+    expect(messageRawText(messages[0]!)).toContain("GitHub connected");
   });
 });

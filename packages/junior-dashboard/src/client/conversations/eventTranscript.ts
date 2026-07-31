@@ -239,11 +239,11 @@ export function conversationTranscriptMessages(
       continue;
     }
 
-    if (data.type === "plugin_event") {
+    if (data.type === "structured_event") {
       messages.push(
         eventMessage(event, "system", [
           {
-            type: "plugin_event",
+            type: "structured_event",
             namespace: data.namespace,
             name: data.name,
             version: data.version,
