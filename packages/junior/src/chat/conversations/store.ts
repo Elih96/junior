@@ -1,6 +1,7 @@
-import type { Destination } from "@sentry/junior-plugin-api";
+import type { Destination, Source } from "@sentry/junior-plugin-api";
 import type { ConversationPrivacy } from "@/chat/conversation-privacy";
 import type { StoredSlackActor } from "@/chat/actor";
+import type { SessionSource } from "@/chat/source";
 import type { AgentTurnUsage } from "@/chat/usage";
 
 export type ConversationSource =
@@ -44,6 +45,11 @@ export interface Conversation {
   actor?: StoredSlackActor;
   schemaVersion: 1;
   source?: ConversationSource;
+  /**
+   * Structured inbound Source locator for this conversation session.
+   * Session-stable (Slack thread anchor, not per-message ts). Set-once.
+   */
+  sessionSource?: SessionSource;
   title?: string;
   updatedAtMs: number;
   /**
@@ -73,6 +79,8 @@ export interface ConversationStore {
     nowMs?: number;
     actor?: StoredSlackActor;
     source?: ConversationSource;
+    /** Source normalized to a stable session locator; set-once when absent. */
+    sessionSource?: Source;
     title?: string;
     /** Source-confirmed visibility from the current event's signal only. */
     visibility?: ConversationPrivacy;
