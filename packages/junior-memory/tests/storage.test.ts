@@ -21,11 +21,12 @@ import {
 } from "@sentry/junior-plugin-api";
 import { Command, CommanderError } from "commander";
 import { eq } from "drizzle-orm";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import * as memorySqlSchema from "../src/db/schema";
 import {
   createMemoryApi,
   memoryApiSchema,
+  memoryDashboardResponseSchema,
   memoryListResponseSchema,
 } from "../src/api";
 import { createMemoryAgent, type CreateMemoryRequest } from "../src/agent";
@@ -2003,7 +2004,7 @@ describe("memory plugin storage", () => {
       const personal = await store.createMemory({
         content: "Prefers short PR summaries.",
         kind: "preference",
-        idempotencyKey: "memory-test:personal",
+        idempotencyKey: "session:memory-test:personal",
       });
       nowMs = TEST_NOW_MS + 1;
       const conversation = await store.createConversationMemory({
@@ -2070,6 +2071,7 @@ ORDER BY created_at_ms ASC
       if (!memoryPage || !actorContext.actor) {
         throw new Error("Expected Memory dashboard page and actor context");
       }
+      expect(memoryPage.navigation).toBe("primary");
       const memoryContent = await memoryPage.read(
         {
           db: memoryDb(fixture),
@@ -2101,10 +2103,48 @@ ORDER BY created_at_ms ASC
             title: "Prefers short PR summaries.",
             metadata: [
               { label: "Type", value: "Preference" },
-              { label: "Remembered", value: "Jun 19, 2026" },
+              { label: "Learned", value: "Automatic" },
+              { label: "Source", value: "Slack" },
+              { label: "Visibility", value: "Only you" },
+              { label: "Remembered", value: "Jun 19, 2026, 12:00 PM" },
+              { label: "Observed", value: "Jun 19, 2026, 12:00 PM" },
+              { label: "Expires", value: "Never" },
             ],
           },
         ],
+      });
+      await expect(
+        memoryPage.read(
+          {
+            db: memoryDb(fixture),
+            log: noopLogger,
+            plugin: { name: "memory" },
+            viewer: {
+              actors: [actorContext.actor],
+              email: "person@example.com",
+            },
+          },
+          { filter: "automatic", limit: 20 },
+        ),
+      ).resolves.toMatchObject({
+        records: [expect.objectContaining({ id: personal.memory.id })],
+      });
+      await expect(
+        memoryPage.read(
+          {
+            db: memoryDb(fixture),
+            log: noopLogger,
+            plugin: { name: "memory" },
+            viewer: {
+              actors: [actorContext.actor],
+              email: "person@example.com",
+            },
+          },
+          { filter: "explicit", limit: 20 },
+        ),
+      ).resolves.toMatchObject({
+        emptyText: "No saved memories yet.",
+        records: [],
       });
       await expect(
         memoryPage.read(
@@ -2177,11 +2217,17 @@ ORDER BY created_at_ms ASC
 
   it("serves viewer-scoped personal memories through the REST resource", async () => {
     const fixture = await createMemoryFixture();
+    const now = vi.spyOn(Date, "now").mockReturnValue(TEST_NOW_MS);
 
     try {
       const firstContext = slackContext({ teamId: "T123", userId: "U123" });
       const secondContext = slackContext({ teamId: "T456", userId: "U456" });
       const hiddenContext = slackContext({ teamId: "T999", userId: "U999" });
+      const privateContext = slackContext({
+        channelId: "D777",
+        teamId: "T123",
+        userId: "U123",
+      });
       const firstStore = createMemoryStore(memoryDb(fixture), firstContext, {
         now: () => TEST_NOW_MS,
       });
@@ -2191,19 +2237,34 @@ ORDER BY created_at_ms ASC
       const hiddenStore = createMemoryStore(memoryDb(fixture), hiddenContext, {
         now: () => TEST_NOW_MS + 2,
       });
+      const privateStore = createMemoryStore(
+        memoryDb(fixture),
+        privateContext,
+        { now: () => TEST_NOW_MS + 3 },
+      );
       const first = await firstStore.createMemory({
         content: "Prefers concise release notes.",
-        idempotencyKey: "api:first",
+        idempotencyKey: "tool:api:first",
         kind: "preference",
       });
       const second = await secondStore.createMemory({
         content: "Deploy runbooks live in Notion.",
-        idempotencyKey: "api:second",
+        idempotencyKey: "session:api:second",
         kind: "knowledge",
       });
       const hidden = await hiddenStore.createMemory({
         content: "Hidden viewer memory.",
         idempotencyKey: "api:hidden",
+        kind: "knowledge",
+      });
+      await firstStore.createConversationMemory({
+        content: "Public workspace memory.",
+        idempotencyKey: "session:api:public",
+        kind: "knowledge",
+      });
+      await privateStore.createConversationMemory({
+        content: "Private conversation memory.",
+        idempotencyKey: "session:api:private",
         kind: "knowledge",
       });
       const actors = [firstContext.actor!, secondContext.actor!];
@@ -2282,6 +2343,30 @@ ORDER BY created_at_ms ASC
         id: first.memory.id,
       });
 
+      const dashboardResponse = await api.fetch(
+        new Request("http://localhost/dashboard"),
+        requestContext,
+      );
+      expect(dashboardResponse.status).toBe(200);
+      const dashboard = memoryDashboardResponseSchema.parse(
+        await dashboardResponse.json(),
+      );
+      expect(dashboard.stats).toMatchObject({
+        active: 2,
+        automatic: 1,
+        explicit: 1,
+        knowledge: 1,
+        preference: 1,
+        procedure: 0,
+      });
+      expect(dashboard.days).toHaveLength(90);
+      expect(dashboard.days.find((day) => day.date === "2026-06-19")).toEqual({
+        date: "2026-06-19",
+        knowledge: 1,
+        preference: 1,
+        procedure: 0,
+      });
+
       const deleteResponse = await api.fetch(
         new Request(`http://localhost/memories/${second.memory.id}`, {
           method: "DELETE",
@@ -2302,6 +2387,7 @@ ORDER BY created_at_ms ASC
         expect.objectContaining({ id: hidden.memory.id }),
       ]);
     } finally {
+      now.mockRestore();
       await fixture.close();
     }
   }, 15_000);

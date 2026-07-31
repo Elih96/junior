@@ -108,34 +108,143 @@ export async function mockDashboardApis(page: Page) {
           description: "Personal facts Junior remembers about you.",
           id: "memories",
           label: "Memories",
+          navigation: "primary",
           pluginDisplayName: "Memory",
           pluginName: "memory",
+        },
+        {
+          description: "Recurring work Junior runs for you.",
+          id: "tasks",
+          label: "Scheduled tasks",
+          navigation: "profile",
+          pluginDisplayName: "Scheduler",
+          pluginName: "scheduler",
         },
       ],
     });
   });
-  await page.route("**/api/user-pages/memory/memories", async (route) => {
+  await page.route("**/api/user-pages/memory/memories*", async (route) => {
+    const filter = new URL(route.request().url()).searchParams.get("filter");
+    const allRecords = [
+      {
+        actions: [
+          {
+            confirmation: "Forget this memory?",
+            href: "/api/plugins/memory/memories/memory-1",
+            label: "Forget",
+            method: "DELETE",
+            tone: "danger",
+          },
+        ],
+        id: "memory-1",
+        title: "I prefer concise summaries.",
+        metadata: [
+          { label: "Type", value: "Preference" },
+          { label: "Learned", value: "Automatic" },
+          { label: "Source", value: "Slack" },
+          { label: "Visibility", value: "Only you" },
+          { label: "Remembered", value: "Jul 29, 2026, 9:14 AM" },
+        ],
+      },
+      {
+        actions: [
+          {
+            confirmation: "Forget this memory?",
+            href: "/api/plugins/memory/memories/memory-2",
+            label: "Forget",
+            method: "DELETE",
+            tone: "danger",
+          },
+        ],
+        id: "memory-2",
+        title: "Release notes should include migration risks.",
+        metadata: [
+          { label: "Type", value: "Knowledge" },
+          { label: "Learned", value: "Explicit" },
+          { label: "Source", value: "Local" },
+          { label: "Visibility", value: "Only you" },
+          { label: "Remembered", value: "Jul 27, 2026, 4:42 PM" },
+        ],
+      },
+      {
+        actions: [
+          {
+            confirmation: "Forget this memory?",
+            href: "/api/plugins/memory/memories/memory-3",
+            label: "Forget",
+            method: "DELETE",
+            tone: "danger",
+          },
+        ],
+        id: "memory-3",
+        title: "Start incident reviews with the customer impact.",
+        metadata: [
+          { label: "Type", value: "Procedure" },
+          { label: "Learned", value: "Automatic" },
+          { label: "Source", value: "Slack" },
+          { label: "Visibility", value: "Only you" },
+          { label: "Remembered", value: "Jul 24, 2026, 11:08 AM" },
+        ],
+      },
+    ];
+    const records = allRecords.filter((record) => {
+      const metadata = Object.fromEntries(
+        record.metadata.map((item) => [item.label, item.value]),
+      );
+      if (filter === "preferences") return metadata.Type === "Preference";
+      if (filter === "automatic") return metadata.Learned === "Automatic";
+      if (filter === "explicit") return metadata.Learned === "Explicit";
+      return true;
+    });
     await route.fulfill({
       json: {
         type: "list",
         emptyText: "No personal memories yet.",
         searchPlaceholder: "Search memories",
+        records,
+      },
+    });
+  });
+  await page.route("**/api/user-pages/scheduler/tasks", async (route) => {
+    await route.fulfill({
+      json: {
+        type: "list",
+        emptyText: "No scheduled tasks yet.",
         records: [
           {
-            actions: [
-              {
-                confirmation: "Forget this memory?",
-                href: "/api/plugins/memory/memories/memory-1",
-                label: "Forget",
-                method: "DELETE",
-                tone: "danger",
-              },
-            ],
-            id: "memory-1",
-            title: "I prefer concise summaries.",
-            metadata: [{ label: "Type", value: "Preference" }],
+            id: "task-1",
+            title: "Send the weekly project summary",
+            metadata: [{ label: "Schedule", value: "Every Monday" }],
           },
         ],
+      },
+    });
+  });
+  await page.route("**/api/plugins/memory/dashboard", async (route) => {
+    const start = Date.parse("2026-05-02T00:00:00.000Z");
+    const days = Array.from({ length: 90 }, (_, index) => {
+      const date = new Date(start + index * 24 * 60 * 60 * 1_000);
+      return {
+        date: date.toISOString().slice(0, 10),
+        knowledge: index % 13 === 0 ? 2 : index % 6 === 0 ? 1 : 0,
+        preference: index % 9 === 0 ? 2 : index % 5 === 0 ? 1 : 0,
+        procedure: index % 17 === 0 ? 1 : 0,
+      };
+    });
+    await route.fulfill({
+      json: {
+        days,
+        generatedAt: "2026-07-30T12:00:00.000Z",
+        stats: {
+          active: 24,
+          automatic: 17,
+          createdThirtyDays: 14,
+          embedded: 23,
+          explicit: 6,
+          knowledge: 8,
+          preference: 11,
+          procedure: 5,
+        },
       },
     });
   });

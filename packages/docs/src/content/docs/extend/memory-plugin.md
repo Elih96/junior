@@ -67,13 +67,19 @@ For non-Neon managed Postgres (Railway, Supabase, AWS RDS, or self-hosted), set 
 ## Manage personal memories
 
 Signed-in users can search, page through, and forget their personal memories
-from **Profile → Memories** in the dashboard. Forgetting archives the memory so
-Junior no longer recalls it.
+from the top-level **Memories** dashboard page. The page shows viewer-scoped
+memory totals, embedding coverage, and history on **Overview**. The separate
+**Memories** view provides search and collections for preferences,
+automatically learned memories, and explicitly saved memories. Each record
+explains whether Junior learned it automatically or saved it because the user
+asked. Overview groups the viewer's active memories by type and how they were
+added. Forgetting archives the memory so Junior no longer recalls it.
 
 The plugin also exposes authenticated REST resources:
 
 | Method   | Path                               | Purpose                                       |
 | -------- | ---------------------------------- | --------------------------------------------- |
+| `GET`    | `/api/plugins/memory/dashboard`    | Read viewer-scoped memory totals and timeline |
 | `GET`    | `/api/plugins/memory/memories`     | List memories with `q`, `cursor`, and `limit` |
 | `GET`    | `/api/plugins/memory/memories/:id` | Read one personal memory                      |
 | `DELETE` | `/api/plugins/memory/memories/:id` | Forget one personal memory                    |
