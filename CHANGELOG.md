@@ -1,4 +1,10 @@
 # Changelog
+## 0.124.2
+
+### New Features ✨
+
+- (memory) Surface public memories in dashboard by @sentry-junior in [#1168](https://github.com/getsentry/junior/pull/1168)
+
 ## 0.124.1
 
 ### New Features ✨
