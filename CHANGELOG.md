@@ -1,4 +1,22 @@
 # Changelog
+## 0.124.0
+
+### New Features ✨
+
+- (conversations) Add authentication structured events by @sentry-junior in [#1161](https://github.com/getsentry/junior/pull/1161)
+
+### Bug Fixes 🐛
+
+- (agent) Harden Guardian structured review by @dcramer in [#1164](https://github.com/getsentry/junior/pull/1164)
+
+### Documentation 📚
+
+- (skills) Keep ticket handoffs diagnosis-first by @sentry-junior in [#1152](https://github.com/getsentry/junior/pull/1152)
+
+### Internal Changes 🔧
+
+- (dashboard) Organize component ownership by @dcramer in [#1160](https://github.com/getsentry/junior/pull/1160)
+
 ## 0.123.0
 
 ### New Features ✨
