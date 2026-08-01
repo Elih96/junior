@@ -24,6 +24,7 @@ export function createSlackScheduleUpdateTaskTool(
   context: SchedulerToolContext,
 ) {
   return definePluginTool({
+    approvalMode: "review",
     annotations: {
       destructiveHint: true,
       idempotentHint: true,
@@ -58,7 +59,7 @@ export function createSlackScheduleUpdateTaskTool(
           .enum(["system", "creator"])
           .nullable()
           .describe(
-            "Set creator only when the current actor is the task creator and explicitly authorizes future scheduled credential use. Set system to disable delegation.",
+            "Set creator to make the task's original creator credentials available, or system to disable them. Creator always means the task's created_by actor, never the current requester. Only that original creator may enable creator mode. Omit or use null to leave unchanged.",
           )
           .optional(),
       })

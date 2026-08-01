@@ -27,6 +27,7 @@ export function createSlackScheduleCreateTaskTool(
   context: SchedulerToolContext,
 ) {
   return definePluginTool({
+    approvalMode: "review",
     annotations: {
       destructiveHint: false,
       idempotentHint: true,
@@ -43,14 +44,30 @@ export function createSlackScheduleCreateTaskTool(
           "When the task runs. The scheduler computes the exact next run from this intent and the server clock.",
         ),
         credential_mode: z
-          .enum(["system", "creator"])
+          .enum(["creator", "system"])
           .nullable()
           .describe(
-            "Use creator only when the current user explicitly authorizes future scheduled use of their connected credentials. Omit or use system otherwise.",
+            "Use creator to make the task creator's connected credentials available, or system when the creator says not to use them. Omit or use null for the creator default.",
           )
           .optional(),
       })
       .strict(),
+    prepareArguments(args) {
+      const input = args as {
+        task: string;
+        schedule: z.input<typeof scheduleIntentSchema>;
+        credential_mode?: "creator" | "system" | null;
+      };
+      if (
+        input?.credential_mode !== "creator" &&
+        input?.credential_mode !== null
+      ) {
+        return input;
+      }
+      const prepared = { ...input };
+      delete prepared.credential_mode;
+      return prepared;
+    },
     outputSchema: scheduleTaskToolResultSchema,
     execute: async (input, options) => {
       const destination = requireActiveConversation(context);
@@ -101,7 +118,7 @@ export function createSlackScheduleCreateTaskTool(
         updatedAtMs: nowMs,
         createdBy: actor,
         conversationAccess,
-        credentialMode: input.credential_mode ?? "system",
+        credentialMode: input.credential_mode ?? "creator",
         destination,
         executionActor: SCHEDULED_TASK_SYSTEM_ACTOR,
         nextRunAtMs: compiled.nextRunAtMs,
