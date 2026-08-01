@@ -1,4 +1,24 @@
 # Changelog
+## 0.125.0
+
+### New Features ✨
+
+#### Conversations
+
+- Show auxiliary cost breakdown by @dcramer in [#1178](https://github.com/getsentry/junior/pull/1178)
+- Persist structured session source by @sentry-junior in [#1172](https://github.com/getsentry/junior/pull/1172)
+
+#### Memory
+
+- Track automatic recall cost by @dcramer in [#1177](https://github.com/getsentry/junior/pull/1177)
+- Chart passive extraction cost by @dcramer in [#1175](https://github.com/getsentry/junior/pull/1175)
+- Track passive extraction cost by @dcramer in [#1173](https://github.com/getsentry/junior/pull/1173)
+
+#### Other
+
+- (dashboard) Add all plugins system view by @dcramer in [#1171](https://github.com/getsentry/junior/pull/1171)
+- (scheduler) Default to creator credentials by @dcramer in [#1169](https://github.com/getsentry/junior/pull/1169)
+
 ## 0.124.2
 
 ### New Features ✨
