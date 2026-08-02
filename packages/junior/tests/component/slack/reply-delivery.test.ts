@@ -16,10 +16,14 @@ describe("sendSlackReply", () => {
     resetSlackApiMockState();
   });
 
-  it("posts text with a conversation footer on the final chunk", async () => {
+  it("posts text with compact attribution in the conversation footer", async () => {
     const ts = await sendSlackReply({
       channelId: "C123",
       conversationId: "slack:C123:1700000000.000100",
+      replyAttribution: {
+        label: "Scheduled task",
+        detail: "Weekly",
+      },
       text: "hello",
       threadTs: "1700000000.000100",
     });
@@ -30,7 +34,7 @@ describe("sendSlackReply", () => {
         params: expect.objectContaining({
           channel: "C123",
           thread_ts: "1700000000.000100",
-          text: "hello",
+          text: "hello\n\nScheduled task · Weekly",
           blocks: [
             {
               type: "markdown",
@@ -39,6 +43,10 @@ describe("sendSlackReply", () => {
             {
               type: "context",
               elements: [
+                {
+                  type: "plain_text",
+                  text: "Scheduled task · Weekly",
+                },
                 {
                   type: "mrkdwn",
                   text: "*ID:* slack:C123:1700000000.000100",
@@ -49,6 +57,40 @@ describe("sendSlackReply", () => {
         }),
       }),
     ]);
+  });
+
+  it("escapes attribution in mrkdwn fallback text", async () => {
+    await sendSlackReply({
+      channelId: "C123",
+      conversationId: "slack:C123:1700000000.000100",
+      replyAttribution: {
+        label: "Scheduled <@U123>",
+        detail: "Weekly & <https://example.com>",
+      },
+      text: "hello",
+      threadTs: "1700000000.000100",
+    });
+
+    expect(
+      getCapturedSlackApiCalls("chat.postMessage")[0]?.params,
+    ).toMatchObject({
+      text: "hello\n\nScheduled &lt;@U123&gt; · Weekly &amp; &lt;https://example.com&gt;",
+      blocks: [
+        {
+          type: "markdown",
+          text: "hello",
+        },
+        {
+          type: "context",
+          elements: expect.arrayContaining([
+            {
+              type: "plain_text",
+              text: "Scheduled <@U123> · Weekly & <https://example.com>",
+            },
+          ]),
+        },
+      ],
+    });
   });
 
   it("does not post empty text", async () => {
