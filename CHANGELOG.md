@@ -1,4 +1,10 @@
 # Changelog
+## 0.126.1
+
+### Bug Fixes 🐛
+
+- (dashboard) Correct metric tooltip layout by @dcramer in [#1190](https://github.com/getsentry/junior/pull/1190)
+
 ## 0.126.0
 
 ### Breaking Changes 🛠
