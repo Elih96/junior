@@ -1,4 +1,21 @@
 # Changelog
+## 0.126.0
+
+### Breaking Changes 🛠
+
+- (plugin-api) Standardize source visibility by @dcramer in [#1183](https://github.com/getsentry/junior/pull/1183)
+
+### New Features ✨
+
+- (dashboard) Improve cost breakdowns by @dcramer in [#1181](https://github.com/getsentry/junior/pull/1181)
+- (scheduler) Label scheduled task replies by @dcramer in [#1187](https://github.com/getsentry/junior/pull/1187)
+
+### Bug Fixes 🐛
+
+- (dashboard) Reuse cached API reads by @dcramer in [#1180](https://github.com/getsentry/junior/pull/1180)
+- (prompt) Keep skill routing in skill policy by @sentry-junior in [#1179](https://github.com/getsentry/junior/pull/1179)
+- (scheduler) Preserve public dispatch visibility by @dcramer in [#1182](https://github.com/getsentry/junior/pull/1182)
+
 ## 0.125.0
 
 ### New Features ✨
