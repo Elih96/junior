@@ -322,6 +322,7 @@ describe("oauth callback integration", () => {
       sliceId: 2,
       state: "awaiting_resume",
       destination: SLACK_DESTINATION,
+      destinationVisibility: "public",
       source: storedSource,
       piMessages: [
         {

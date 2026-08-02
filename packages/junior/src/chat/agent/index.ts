@@ -108,6 +108,7 @@ import {
   toGenAiMessagesTraceAttributes,
   type ConversationPrivacy,
 } from "@/chat/conversation-privacy";
+import { resolveDestinationVisibility } from "@/chat/conversations/destination-visibility";
 import {
   RetryableDeliveryError,
   assertRunRoutingConsistency,
@@ -199,19 +200,19 @@ export async function executeAgentRun(
   if (!request.routing.destination) {
     throw new TypeError("Assistant reply generation requires a destination");
   }
-  const channelId =
-    request.routing.destination.platform === "slack"
-      ? request.routing.destination.channelId
-      : undefined;
-  const conversationPrivacy = resolveConversationPrivacy({
-    channelId,
-    conversationId: request.conversationId,
-    // Destination visibility is provider-neutral. Slack event context remains
-    // a compatibility fallback for callers that have not projected it yet.
-    visibility:
-      request.routing.destinationVisibility ??
-      request.routing.slackConversation?.visibility,
+  const destinationVisibility = await resolveDestinationVisibility({
+    destination: request.routing.destination,
+    visibility: request.routing.destinationVisibility,
   });
+  const conversationPrivacy = resolveConversationPrivacy({
+    visibility: destinationVisibility,
+  });
+  const resolvedRequest = destinationVisibility
+    ? {
+        ...request,
+        routing: { ...request.routing, destinationVisibility },
+      }
+    : request;
   const credentialActor = request.routing.credentialContext?.actor;
   const actor = actorFromRouting(request.routing);
   const userActor = actor && "userId" in actor ? actor : undefined;
@@ -243,9 +244,9 @@ export async function executeAgentRun(
     assistantUserName: botConfig.userName,
   };
   return withLogContext(runLogContext, () =>
-    runWithConversationPrivacy(conversationPrivacy ?? "private", () =>
+    runWithConversationPrivacy(conversationPrivacy, () =>
       executeAgentRunInPrivacyContext(
-        request,
+        resolvedRequest,
         conversationPrivacy,
         runLogContext,
         streamFn,
@@ -419,6 +420,9 @@ async function executeAgentRunInPrivacyContext(
     resume = createResumeState({
       channelName: routing.slackConversation?.name,
       destination: routing.destination,
+      ...(routing.destinationVisibility
+        ? { destinationVisibility: routing.destinationVisibility }
+        : {}),
       ...(routing.dispatch?.id ? { dispatchId: routing.dispatch.id } : {}),
       durability,
       getLoadedSkillNames: () => loadedSkillNamesForResume,

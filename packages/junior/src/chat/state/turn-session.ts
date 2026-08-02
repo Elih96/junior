@@ -256,7 +256,7 @@ async function appendAgentTurnSessionSummary(
 /** Store run summary metadata in the configured conversation store. */
 async function recordConversationActivityMetadata(args: {
   conversationStore?: ConversationStore;
-  /** Source-confirmed destination visibility from the current event's signal. */
+  /** Confirmed destination visibility; omit when unavailable. */
   destinationVisibility?: ConversationPrivacy;
   nowMs: number;
   summary: AgentTurnSessionSummary;
@@ -554,7 +554,7 @@ function buildStoredRecord(args: {
 
 async function setStoredRecord(args: {
   conversationStore?: ConversationStore;
-  /** Source-confirmed destination visibility from the current event's signal. */
+  /** Confirmed destination visibility; omit when unavailable. */
   destinationVisibility?: ConversationPrivacy;
   piMessages: PiMessage[];
   piMessageProvenance: ConversationMessageProvenance[];
@@ -690,7 +690,7 @@ export async function upsertAgentTurnSessionRecord(args: {
   dispatchId?: string;
   dispatchOutcome?: AgentDispatchOutcome;
   resultMessageId?: string;
-  /** Source-confirmed destination visibility from the current event's signal. */
+  /** Confirmed destination visibility; omit when unavailable. */
   destinationVisibility?: ConversationPrivacy;
   source?: Source;
   lastProgressAtMs?: number;
@@ -881,11 +881,7 @@ export async function recordAgentTurnSessionSummary(args: {
   dispatchId?: string;
   dispatchOutcome?: AgentDispatchOutcome;
   resultMessageId?: string;
-  /**
-   * Source-confirmed destination visibility from the current event's signal
-   * (Slack `channel_type`). Leave unset when no live signal exists so an
-   * existing destination visibility is not overwritten.
-   */
+  /** Confirmed destination visibility; omit when unavailable. */
   destinationVisibility?: ConversationPrivacy;
   source?: Source;
   lastProgressAtMs?: number;

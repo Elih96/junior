@@ -665,6 +665,7 @@ describe("agent run continuation", () => {
           messageText: "Make a large generated-file edit.",
         },
         routing: {
+          destinationVisibility: "private",
           source: TEST_SOURCE,
           destination: TEST_DESTINATION,
           actor: { platform: "slack", teamId: "T123", userId: "U123" },
@@ -716,6 +717,7 @@ describe("agent run continuation", () => {
           piMessages: priorMessages,
         },
         routing: {
+          destinationVisibility: "private",
           source: TEST_SOURCE,
           destination: TEST_DESTINATION,
           actor: { platform: "slack", teamId: "T123", userId: "U123" },
@@ -739,6 +741,7 @@ describe("agent run continuation", () => {
       turnId: "turn-1",
       input: { messageText: "help me" },
       routing: {
+        destinationVisibility: "private",
         destination: TEST_DESTINATION,
         source: TEST_SOURCE,
         actor: { platform: "slack", teamId: "T123", userId: "U123" },
@@ -817,6 +820,7 @@ describe("agent run continuation", () => {
       turnId: "turn-cancelled-backoff",
       input: { messageText: "help me" },
       routing: {
+        destinationVisibility: "private",
         destination: TEST_DESTINATION,
         source: TEST_SOURCE,
         actor: { platform: "slack", teamId: "T123", userId: "U123" },
@@ -853,6 +857,7 @@ describe("agent run continuation", () => {
       turnId: "turn-cancelled-provider",
       input: { messageText: "help me" },
       routing: {
+        destinationVisibility: "private",
         destination: TEST_DESTINATION,
         source: TEST_SOURCE,
         actor: { platform: "slack", teamId: "T123", userId: "U123" },
@@ -904,6 +909,7 @@ describe("agent run continuation", () => {
         turnId: "turn-steering",
         input: { messageText: "help me", piMessages: priorMessages },
         routing: {
+          destinationVisibility: "private",
           destination: TEST_DESTINATION,
           source: TEST_SOURCE,
           actor: { platform: "slack", teamId: "T123", userId: "U123" },
@@ -966,6 +972,7 @@ describe("agent run continuation", () => {
       turnId: "turn-steering-delivery",
       input: { messageText: "help me" },
       routing: {
+        destinationVisibility: "private",
         destination: TEST_DESTINATION,
         source: TEST_SOURCE,
         actor: { platform: "slack", teamId: "T123", userId: "U123" },
@@ -1004,6 +1011,7 @@ describe("agent run continuation", () => {
       turnId: "turn-terminal-delivery-yield",
       input: { messageText: "help me" },
       routing: {
+        destinationVisibility: "private",
         destination: TEST_DESTINATION,
         source: TEST_SOURCE,
         actor: { platform: "slack", teamId: "T123", userId: "U123" },
@@ -1027,6 +1035,7 @@ describe("agent run continuation", () => {
       turnId: "turn-delivery-steering-yield",
       input: { messageText: "help me" },
       routing: {
+        destinationVisibility: "private",
         destination: TEST_DESTINATION,
         source: TEST_SOURCE,
         actor: { platform: "slack", teamId: "T123", userId: "U123" },
@@ -1071,6 +1080,7 @@ describe("agent run continuation", () => {
       turnId: "turn-yield",
       input: { messageText: "help me" },
       routing: {
+        destinationVisibility: "private",
         destination: TEST_DESTINATION,
         source: TEST_SOURCE,
         actor: { platform: "slack", teamId: "T123", userId: "U123" },
@@ -1186,6 +1196,7 @@ describe("agent run continuation", () => {
         turnId,
         input: { messageText: "Delete preview-42 after I confirm." },
         routing: {
+          destinationVisibility: "private",
           destination: TEST_DESTINATION,
           source: TEST_SOURCE,
           actor: { platform: "slack", teamId: "T123", userId: "U123" },
@@ -1211,6 +1222,7 @@ describe("agent run continuation", () => {
       turnId: "turn-yield-steering",
       input: { messageText: "help me" },
       routing: {
+        destinationVisibility: "private",
         actor: { platform: "slack", teamId: "T123", userId: "U123" },
         destination: TEST_DESTINATION,
         source: TEST_SOURCE,
@@ -1267,6 +1279,7 @@ describe("agent run continuation", () => {
       turnId: "turn-yield-persist-failure",
       input: { messageText: "help me" },
       routing: {
+        destinationVisibility: "private",
         destination: TEST_DESTINATION,
         source: TEST_SOURCE,
         actor: { platform: "slack", teamId: "T123", userId: "U123" },
@@ -1300,6 +1313,7 @@ describe("agent run continuation", () => {
         turnId: "turn-tool-activity",
         input: { messageText: "run the tool" },
         routing: {
+          destinationVisibility: "private",
           destination: TEST_DESTINATION,
           source: TEST_SOURCE,
           actor: { platform: "slack", teamId: "T123", userId: "U123" },
@@ -1339,6 +1353,7 @@ describe("agent run continuation", () => {
         turnId: sessionId,
         input: { messageText: "help me", piMessages: [checkpointedPrompt] },
         routing: {
+          destinationVisibility: "private",
           destination: TEST_DESTINATION,
           source: TEST_SOURCE,
           actor: { platform: "slack", teamId: "T123", userId: "U123" },
@@ -1370,6 +1385,7 @@ describe("agent run continuation", () => {
       turnId: "turn-steering-failure",
       input: { messageText: "help me" },
       routing: {
+        destinationVisibility: "private",
         destination: TEST_DESTINATION,
         source: TEST_SOURCE,
         actor: { platform: "slack", teamId: "T123", userId: "U123" },

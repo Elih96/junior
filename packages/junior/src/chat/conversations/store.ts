@@ -65,7 +65,7 @@ export interface Conversation {
 /** Persist and read durable conversation metadata for reporting surfaces. */
 export interface ConversationStore {
   get(args: { conversationId: string }): Promise<Conversation | undefined>;
-  /** Read persisted visibility for one destination. Missing rows fail closed. */
+  /** Read confirmed public/private visibility for one destination. */
   getDestinationVisibility(args: {
     provider: string;
     providerDestinationId: string;
@@ -82,7 +82,7 @@ export interface ConversationStore {
     /** Source normalized to a stable session locator; set-once when absent. */
     sessionSource?: Source;
     title?: string;
-    /** Source-confirmed visibility from the current event's signal only. */
+    /** Confirmed destination visibility; omit when unavailable. */
     visibility?: ConversationPrivacy;
   }): Promise<void>;
   /**
@@ -104,7 +104,7 @@ export interface ConversationStore {
     source?: ConversationSource;
     title?: string;
     updatedAtMs: number;
-    /** Source-confirmed visibility from the current event's signal only. */
+    /** Confirmed destination visibility; omit when unavailable. */
     visibility?: ConversationPrivacy;
   }): Promise<void>;
   listByActivity(args?: {

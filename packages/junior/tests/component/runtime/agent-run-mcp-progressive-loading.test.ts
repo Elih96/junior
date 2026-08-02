@@ -680,6 +680,7 @@ function makeAgentRunRequest(
       ...(overrides.input ?? {}),
     },
     routing: {
+      destinationVisibility: "private",
       credentialContext: {
         actor: { type: "user" as const, userId: "U123" },
       },

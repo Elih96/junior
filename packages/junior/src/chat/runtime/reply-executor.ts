@@ -130,6 +130,7 @@ import {
   recordAgentTurnSessionSummary,
 } from "@/chat/state/turn-session";
 import { completeDeliveredTurn } from "@/chat/services/turn-session-record";
+import { resolveDestinationVisibility } from "@/chat/conversations/destination-visibility";
 import { getConversationStore } from "@/chat/db";
 import {
   contextProvenance,
@@ -473,24 +474,25 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
       !options.execution && channelId
         ? await resolveChannelName(thread)
         : undefined;
+    const destination = requireSlackDestination(
+      options.destination,
+      "Slack reply execution",
+    );
     const slackChannelType = resolveSlackChannelTypeFromMessage(message);
     const slackConversation = resolveSlackConversationContext({
       channelId,
       channelName,
       channelType: slackChannelType,
     });
-    // Source-confirmed visibility for destination persistence; undefined when
-    // the event carries no channel_type so existing visibility is not changed.
-    const destinationVisibility =
-      options.execution?.destinationVisibility ??
-      conversationVisibilityFromSlackChannelType(slackChannelType);
+    const destinationVisibility = await resolveDestinationVisibility({
+      destination,
+      visibility:
+        options.execution?.destinationVisibility ??
+        conversationVisibilityFromSlackChannelType(slackChannelType),
+    });
     const threadTs = getThreadTs(threadId);
     const assistantThreadContext = getAssistantThreadContext(message);
     const messageTs = getMessageTs(message);
-    const destination = requireSlackDestination(
-      options.destination,
-      "Slack reply execution",
-    );
     const teamId = destination.teamId;
     const source =
       options.execution?.source ??
@@ -1357,7 +1359,7 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
               slackConversation,
               source,
               destination,
-              destinationVisibility,
+              ...(destinationVisibility ? { destinationVisibility } : {}),
               surface: options.execution?.surface ?? "slack",
               dispatch: options.execution?.dispatch,
               toolChannelId,
