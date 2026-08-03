@@ -729,6 +729,7 @@ export function githubPlugin(
               });
             },
             db: ctx.db as GitHubDb,
+            installationId: () => readEnv(installationIdEnv),
             log: ctx.log,
             resourceEvents: ctx.resourceEvents,
             webhookSecret: () => readEnv("GITHUB_WEBHOOK_SECRET"),

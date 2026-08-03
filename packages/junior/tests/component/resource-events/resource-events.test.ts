@@ -4,6 +4,9 @@ import { githubPlugin } from "@sentry/junior-github";
 import type { StateAdapter } from "chat";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp, defineJuniorPlugins } from "@/app";
+import { getDispatchRecord } from "@/chat/agent-dispatch/store";
+import { closeDb, getDb } from "@/chat/db";
+import { createEventTask, deleteEventTask } from "@/chat/event-tasks/store";
 import {
   getConfigDefaults,
   setConfigDefaults,
@@ -76,12 +79,13 @@ function createGithubPrSubscription(input: {
   );
 }
 
-describe("resource event subscriptions", () => {
+describe("resource event delivery", () => {
   beforeEach(async () => {
     await disconnectStateAdapter();
   });
 
   afterEach(async () => {
+    await closeDb();
     await disconnectStateAdapter();
   });
 
@@ -142,6 +146,7 @@ describe("resource event subscriptions", () => {
   });
 
   it("accepts plugin-owned GitHub webhooks through the core delivery bridge", async () => {
+    const previousInstallationId = process.env.GITHUB_INSTALLATION_ID;
     const previousSecret = process.env.GITHUB_WEBHOOK_SECRET;
     const previousPlugins = getPlugins();
     const previousConfigDefaults = getConfigDefaults();
@@ -151,7 +156,10 @@ describe("resource event subscriptions", () => {
     const previousDashboardOptions =
       setDashboardConversationLinkOptions(undefined);
     setDashboardConversationLinkOptions(previousDashboardOptions);
+    let eventTaskId: string | undefined;
+
     try {
+      process.env.GITHUB_INSTALLATION_ID = "456";
       process.env.GITHUB_WEBHOOK_SECRET = "test-secret";
       const state = createMemoryState();
       const queue = createConversationWorkQueueTestAdapter();
@@ -163,8 +171,26 @@ describe("resource event subscriptions", () => {
         nowMs,
         state,
       });
+      eventTaskId = `evt_webhook_bridge_${nowMs}`;
+      await createEventTask(getDb(), {
+        id: eventTaskId,
+        createdAtMs: nowMs,
+        createdBy: { slackUserId: "U123" },
+        credentialMode: "system",
+        destination: SLACK_DESTINATION,
+        destinationVisibility: "public",
+        task: { text: "Summarize the reviewer comment." },
+        trigger: {
+          events: ["pull_request.comment.created"],
+          label: "GitHub PR getsentry/junior#691",
+          namespace: "github",
+          identifier: "getsentry/junior#691",
+          resourceType: "pull_request",
+        },
+      });
       const body = JSON.stringify({
         action: "created",
+        installation: { id: 456 },
         repository: { full_name: "getsentry/junior" },
         issue: {
           number: 691,
@@ -202,12 +228,34 @@ describe("resource event subscriptions", () => {
       );
 
       expect(response.status).toBe(202);
-      expect(queue.sentRecords()).toEqual([
-        {
-          conversationId: CONVERSATION_ID,
-          idempotencyKey: `resource-event:${subscription.id}:github:delivery-bridge:pull_request.comment.created`,
-        },
-      ]);
+      expect(queue.sentRecords()).toHaveLength(2);
+      expect(queue.sentRecords()).toEqual(
+        expect.arrayContaining([
+          {
+            conversationId: expect.stringMatching(/^agent-dispatch:/),
+            idempotencyKey: expect.stringMatching(/^agent-dispatch:/),
+          },
+          {
+            conversationId: CONVERSATION_ID,
+            idempotencyKey: `resource-event:${subscription.id}:github:delivery-bridge:pull_request.comment.created`,
+          },
+        ]),
+      );
+      const dispatchRecord = queue
+        .sentRecords()
+        .find(({ conversationId }) =>
+          conversationId.startsWith("agent-dispatch:"),
+        );
+      expect(dispatchRecord).toBeDefined();
+      const dispatch = dispatchRecord
+        ? await getDispatchRecord(
+            dispatchRecord.conversationId.replace(/^agent-dispatch:/, ""),
+          )
+        : undefined;
+      expect(dispatch).toMatchObject({
+        input: expect.stringContaining("Summarize the reviewer comment."),
+        plugin: "junior",
+      });
       const work = await getConversationWorkState({
         conversationId: CONVERSATION_ID,
         state,
@@ -216,6 +264,9 @@ describe("resource event subscriptions", () => {
         "please add regression coverage",
       );
     } finally {
+      if (eventTaskId) {
+        await deleteEventTask(getDb(), eventTaskId);
+      }
       setPlugins(previousPlugins);
       pluginCatalogRuntime.setConfig(previousPluginCatalogConfig);
       setConfigDefaults(previousConfigDefaults);
@@ -224,6 +275,11 @@ describe("resource event subscriptions", () => {
         delete process.env.GITHUB_WEBHOOK_SECRET;
       } else {
         process.env.GITHUB_WEBHOOK_SECRET = previousSecret;
+      }
+      if (previousInstallationId === undefined) {
+        delete process.env.GITHUB_INSTALLATION_ID;
+      } else {
+        process.env.GITHUB_INSTALLATION_ID = previousInstallationId;
       }
     }
   });
