@@ -1,4 +1,21 @@
 # Changelog
+## 0.127.0
+
+### New Features ✨
+
+- (core) Catalog plugin resource events by @dcramer in [#1191](https://github.com/getsentry/junior/pull/1191)
+- (dashboard) Add personal spend to profile menu by @dcramer in [#1195](https://github.com/getsentry/junior/pull/1195)
+
+### Bug Fixes 🐛
+
+- (dashboard) Support selectable tooltips across inputs by @dcramer in [#1189](https://github.com/getsentry/junior/pull/1189)
+- (github) Bracket the secondary Sentry link by @sentry-junior in [#1193](https://github.com/getsentry/junior/pull/1193)
+- (scheduler) Backfill legacy conversation access by @dcramer in [#1192](https://github.com/getsentry/junior/pull/1192)
+
+### Internal Changes 🔧
+
+- (dashboard) Group stats under System by @dcramer in [#1194](https://github.com/getsentry/junior/pull/1194)
+
 ## 0.126.1
 
 ### Bug Fixes 🐛
