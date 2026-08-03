@@ -33,6 +33,7 @@ import { ContributionGrid } from "../src/client/pages/people/ContributionGrid";
 import { PluginReports } from "../src/client/pages/system/PluginReports";
 import { SkillInventory } from "../src/client/pages/system/SkillInventory";
 import { SystemPage } from "../src/client/pages/system/SystemPage";
+import { emptySystemNavigationData } from "../src/client/pages/system/useSystemNavigationData";
 import type { ConversationTranscript, SystemData } from "../src/client/types";
 
 const client = new QueryClient();
@@ -1140,7 +1141,11 @@ describe("dashboard canonical-event components", () => {
     };
     const html = renderToStaticMarkup(
       <MemoryRouter>
-        <LocationsPageContent data={data} error={new Error("refresh failed")} />
+        <LocationsPageContent
+          data={data}
+          error={new Error("refresh failed")}
+          navigation={emptySystemNavigationData}
+        />
       </MemoryRouter>,
     );
     expect(html).toContain("Location telemetry refresh failed");
@@ -1198,6 +1203,7 @@ describe("dashboard canonical-event components", () => {
         <LocationDetailPageContent
           data={detail}
           error={new Error("refresh failed")}
+          navigation={emptySystemNavigationData}
         />
       </MemoryRouter>,
     );
@@ -1283,25 +1289,28 @@ describe("dashboard canonical-event components", () => {
     expect(
       systemHtml.match(/aria-label="Reporting period"/g) ?? [],
     ).toHaveLength(1);
-    expect(systemHtml).toContain(">Plugins<");
+    expect(systemHtml).toContain(">Capabilities<");
     expect(systemHtml).toContain(">All Plugins<");
-    expect(systemHtml).toContain(">Skills<");
+    expect(systemHtml).not.toContain(">Skills<");
     expect(systemHtml).not.toContain(">GitHub<");
     expect(systemHtml).not.toContain(">loaded<");
     expect(systemHtml).not.toContain(">quiet<");
     expect(systemHtml).not.toContain(">metrics<");
     expect(systemHtml).not.toContain(">datasets<");
     expect(systemHtml).not.toContain(">1 loaded<");
-    expect(systemHtml).toContain(">triage<");
+    expect(systemHtml).not.toContain(">triage<");
 
     const pluginsHtml = renderToStaticMarkup(
       <MemoryRouter initialEntries={["/system/plugins"]}>
         <SystemPage data={data} />
       </MemoryRouter>,
     );
-    expect(pluginsHtml).toContain(">All Plugins<");
+    expect(pluginsHtml).toContain(">Plugins<");
+    expect(pluginsHtml).toContain(">Skills<");
     expect(pluginsHtml).toContain(">GitHub<");
+    expect(pluginsHtml).toContain(">triage<");
     expect(pluginsHtml).not.toContain("Usage over time");
+    expect(pluginsHtml).toContain(">All Plugins<");
     expect(pluginsHtml).not.toContain('aria-label="Reporting period"');
 
     const skillsHtml = renderToStaticMarkup(
@@ -1336,6 +1345,7 @@ describe("dashboard canonical-event components", () => {
 
     expect(html).toContain('aria-label="System navigation"');
     expect(html).not.toContain('href="/system/plugins/github"');
+    expect(html).toContain('href="/system/plugins"');
     expect(html).toContain('href="/system/plugins/scheduler"');
     expect(html).toContain(">Scheduler<");
     expect(html).toContain(">active tasks<");

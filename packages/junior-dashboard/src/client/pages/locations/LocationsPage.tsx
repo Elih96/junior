@@ -16,10 +16,14 @@ import {
 } from "../../components/controls/TimeRangeSelector";
 import { Card } from "../../components/layout/Card";
 import { PageHeader } from "../../components/layout/PageHeader";
-import { PageLayout } from "../../components/layout/PageLayout";
-import { agentNamePossessive, getDashboardAgentName } from "../../agentName";
+import { getDashboardAgentName } from "../../agentName";
 import { StatCard } from "../../components/metrics/StatCard";
 import { formatCompactNumber } from "../../format";
+import { SystemPageLayout } from "../system/SystemPageLayout";
+import {
+  type SystemNavigationData,
+  useSystemNavigationData,
+} from "../system/useSystemNavigationData";
 import { LocationDirectoryActivityChart } from "./LocationDirectoryActivityChart";
 import { LocationDirectory, type LocationSort } from "./LocationDirectory";
 import { PrivateActivityCard } from "./PrivateActivityCard";
@@ -27,13 +31,21 @@ import { PrivateActivityCard } from "./PrivateActivityCard";
 /** Render the searchable directory of persisted public conversation locations. */
 export function LocationsPage() {
   const query = useLocationDirectoryData();
-  return <LocationsPageContent data={query.data} error={query.error} />;
+  const navigation = useSystemNavigationData();
+  return (
+    <LocationsPageContent
+      data={query.data}
+      error={query.error}
+      navigation={navigation}
+    />
+  );
 }
 
 /** Render loaded, failed, and empty public-location directory states. */
 export function LocationsPageContent(props: {
   data: LocationDirectoryReport | undefined;
   error: unknown;
+  navigation: SystemNavigationData;
 }) {
   const [params, setParams] = useSearchParams();
   const [range, setRange] = useState<TimeRangeDays>(90);
@@ -69,7 +81,7 @@ export function LocationsPageContent(props: {
   }
 
   return (
-    <PageLayout>
+    <SystemPageLayout navigation={props.navigation}>
       <PageHeader
         actions={<TimeRangeSelector onChange={setRange} value={range} />}
         description={
@@ -77,7 +89,7 @@ export function LocationsPageContent(props: {
             ? "Locations failed to load."
             : `See the public channels where ${getDashboardAgentName()} has been working and how busy they've been.`
         }
-        eyebrow={`Where ${agentNamePossessive()} working`}
+        eyebrow="System / activity"
         title="Locations"
       />
       {props.error ? (
@@ -134,7 +146,7 @@ export function LocationsPageContent(props: {
           ) : null}
         </>
       ) : null}
-    </PageLayout>
+    </SystemPageLayout>
   );
 }
 

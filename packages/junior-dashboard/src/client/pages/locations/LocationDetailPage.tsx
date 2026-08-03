@@ -8,32 +8,44 @@ import { EmptyTelemetry } from "../../components/EmptyTelemetry";
 import { LoadingView } from "../../components/LoadingView";
 import { Card } from "../../components/layout/Card";
 import { PageHeader } from "../../components/layout/PageHeader";
-import { PageLayout } from "../../components/layout/PageLayout";
 import { StatCard } from "../../components/metrics/StatCard";
 import {
   formatCompactNumber,
   formatRelativeTime,
   peoplePath,
 } from "../../format";
+import { SystemPageLayout } from "../system/SystemPageLayout";
+import {
+  type SystemNavigationData,
+  useSystemNavigationData,
+} from "../system/useSystemNavigationData";
 import { LocationActivityChart } from "./LocationActivityChart";
 
 /** Render operational activity for one persisted public location. */
 export function LocationDetailPage() {
   const params = useParams();
   const query = useLocationDetailData(params.locationId);
-  return <LocationDetailPageContent data={query.data} error={query.error} />;
+  const navigation = useSystemNavigationData();
+  return (
+    <LocationDetailPageContent
+      data={query.data}
+      error={query.error}
+      navigation={navigation}
+    />
+  );
 }
 
 /** Render loaded, stale, failed, and loading public-location detail states. */
 export function LocationDetailPageContent(props: {
   data: LocationDetailReport | undefined;
   error: unknown;
+  navigation: SystemNavigationData;
 }) {
   if (!props.data && !props.error) {
     return <LoadingView label="Loading location" />;
   }
   return (
-    <PageLayout>
+    <SystemPageLayout navigation={props.navigation}>
       {props.error ? (
         <Card padding="sm">
           <EmptyTelemetry>
@@ -44,7 +56,7 @@ export function LocationDetailPageContent(props: {
         </Card>
       ) : null}
       {props.data ? <LocationDetail detail={props.data} /> : null}
-    </PageLayout>
+    </SystemPageLayout>
   );
 }
 
@@ -54,7 +66,7 @@ function LocationDetail(props: { detail: LocationDetailReport }) {
     <>
       <PageHeader
         description={`${detail.provider} public ${detail.kind} / ${detail.providerDestinationId} / last active ${formatRelativeTime(detail.lastSeenAt)}`}
-        eyebrow="Locations / public channel"
+        eyebrow="System / locations"
         title={detail.label}
       />
 
