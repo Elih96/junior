@@ -1,4 +1,20 @@
 # Changelog
+## 0.132.0
+
+### New Features ✨
+
+- (dashboard) Simplify system navigation by @dcramer in [#1231](https://github.com/getsentry/junior/pull/1231)
+- (sentry) Expand OAuth scopes by @sentry-junior in [#1230](https://github.com/getsentry/junior/pull/1230)
+
+### Bug Fixes 🐛
+
+- (scheduler) Drop paused scheduled-task status by @sentry-junior in [#1226](https://github.com/getsentry/junior/pull/1226)
+
+### Internal Changes 🔧
+
+- (conversations) Introduce provider location read model by @dcramer in [#1205](https://github.com/getsentry/junior/pull/1205)
+- (memory) Optimize lexical search by @dcramer in [#1233](https://github.com/getsentry/junior/pull/1233)
+
 ## 0.131.0
 
 ### New Features ✨
