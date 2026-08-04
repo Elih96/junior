@@ -1,4 +1,42 @@
 # Changelog
+## 0.128.0
+
+### Breaking Changes 🛠
+
+- (plugins) Use canonical users for personal ownership by @dcramer in [#1196](https://github.com/getsentry/junior/pull/1196)
+- (tools) Use canonical tool outputs by @dcramer in [#1207](https://github.com/getsentry/junior/pull/1207)
+
+### New Features ✨
+
+- (core) Run tasks from resource events by @dcramer in [#1176](https://github.com/getsentry/junior/pull/1176)
+
+### Bug Fixes 🐛
+
+#### Dashboard
+
+- Preserve expanded transcript events by @dcramer in [#1204](https://github.com/getsentry/junior/pull/1204)
+- Distinguish memory events from reasoning by @dcramer in [#1202](https://github.com/getsentry/junior/pull/1202)
+
+#### Other
+
+- (agent) Keep MCP provider failures out of action review by @dcramer in [#1209](https://github.com/getsentry/junior/pull/1209)
+- (core) Scope resource events to Slack workspace by @dcramer in [#1201](https://github.com/getsentry/junior/pull/1201)
+
+### Documentation 📚
+
+- Drop stale ABOUT.md and plugin migration notes by @sentry-junior in [#1198](https://github.com/getsentry/junior/pull/1198)
+
+### Internal Changes 🔧
+
+#### Dashboard
+
+- Animate active indicators by @dcramer in [#1203](https://github.com/getsentry/junior/pull/1203)
+- Increase small text size by @dcramer in [#1199](https://github.com/getsentry/junior/pull/1199)
+
+#### Other
+
+- (docs) Soften homepage color scheme by @dcramer in [#1208](https://github.com/getsentry/junior/pull/1208)
+
 ## 0.127.0
 
 ### New Features ✨
