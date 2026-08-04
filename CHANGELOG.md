@@ -1,4 +1,19 @@
 # Changelog
+## 0.131.0
+
+### New Features ✨
+
+- (sandbox) Add Docker Compose to baseline by @sentry-junior in [#1225](https://github.com/getsentry/junior/pull/1225)
+
+### Bug Fixes 🐛
+
+- (event-tasks) Add reply attribution footer for event dispatches by @sentry-junior in [#1223](https://github.com/getsentry/junior/pull/1223)
+- (slack) Disable message unfurls by @sentry-junior in [#1222](https://github.com/getsentry/junior/pull/1222)
+
+### Internal Changes 🔧
+
+- (memory) Remove structured identifier matching by @dcramer in [#1227](https://github.com/getsentry/junior/pull/1227)
+
 ## 0.130.0
 
 ### New Features ✨
