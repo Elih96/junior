@@ -1,4 +1,14 @@
 # Changelog
+## 0.130.0
+
+### New Features ✨
+
+- (github) Add release resource watches by @sentry-junior in [#1219](https://github.com/getsentry/junior/pull/1219)
+
+### Bug Fixes 🐛
+
+- (github) Deliver repository-scoped PR events by @sentry-junior in [#1216](https://github.com/getsentry/junior/pull/1216)
+
 ## 0.129.0
 
 ### Breaking Changes 🛠
