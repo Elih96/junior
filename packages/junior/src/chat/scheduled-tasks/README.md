@@ -16,3 +16,5 @@ The legacy creator trigger remains during rolling deployment so an old worker ca
 Scheduled runs use the core conversation work queue. They preserve `scheduler` as historical dispatch provenance and as the signed task-credential binding label; changing that value would invalidate existing task-scoped credential authority.
 
 The heartbeat bounds claims per invocation, reconciles incomplete dispatches before claiming new work, and advances recurring tasks only after their current run reaches a terminal outcome.
+
+Task status is `active`, `blocked`, or `deleted`. There is no pause state: stop a task by deleting it, or leave it blocked when authorization/config prevents dispatch. When a terminal run leaves no future occurrence, the task is tombstoned as `deleted`. Listings, tool lookups, and the Tasks UI hide `deleted` rows while retaining the record as a tombstone.

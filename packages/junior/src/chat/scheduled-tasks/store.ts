@@ -14,7 +14,7 @@ import {
   isNotNull,
   lt,
   lte,
-  ne,
+  notInArray,
   or,
   sql,
 } from "drizzle-orm";
@@ -32,6 +32,7 @@ import {
   scheduledTaskCredentialModeSchema,
   type ScheduledRun,
   type ScheduledTask,
+  type ScheduledTaskStatus,
 } from "./types";
 
 const SCHEDULER_KEY_PREFIX = "junior:scheduler";
@@ -107,7 +108,9 @@ const taskRecordFields = {
   originalRequest: z.string().optional(),
   runNowAtMs: z.number().optional(),
   schedule: taskScheduleSchema,
-  status: z.enum(["active", "paused", "blocked", "deleted"]),
+  // TODO(v0.131.0): Remove paused decoding and SQL list filtering after
+  // v0.129.x workers can no longer overlap upgrades.
+  status: z.enum(["active", "blocked", "deleted", "paused"]),
   statusReason: z.string().optional(),
   task: taskSpecSchema,
   updatedAtMs: z.number(),
@@ -384,6 +387,21 @@ function isFinishedRun(run: ScheduledRun): boolean {
   );
 }
 
+/** Tasks with no future occurrence are tombstoned so listings and the UI hide them. */
+function statusAfterTerminalOccurrence(args: {
+  blocked?: boolean;
+  nextRunAtMs: number | undefined;
+  previousStatus?: ScheduledTaskStatus;
+}): ScheduledTaskStatus {
+  if (args.blocked) {
+    return "blocked";
+  }
+  if (args.nextRunAtMs) {
+    return args.previousStatus ?? "active";
+  }
+  return "deleted";
+}
+
 function isStaleActiveRun(
   active: { claimedAtMs?: unknown },
   run: ScheduledRun | undefined,
@@ -544,11 +562,26 @@ function parseStoredRun(value: unknown): ScheduledRun | undefined {
   return parsed.success ? stripLegacyRunFields(parsed.data) : undefined;
 }
 
-function stripLegacyTaskFields(
-  task: ScheduledTask & { version?: number },
-): ScheduledTask {
-  const { version: _version, ...current } = task;
-  return current;
+type StoredScheduledTask = z.infer<typeof taskRecordSchema>;
+
+/** Coerce legacy paused rows to deleted tombstones during rolling deploy. */
+function stripLegacyTaskFields(task: StoredScheduledTask): ScheduledTask {
+  const { version: _version, status, ...current } = task;
+  if (status === "paused") {
+    const {
+      nextRunAtMs: _nextRunAtMs,
+      runNowAtMs: _runNowAtMs,
+      ...rest
+    } = current;
+    return {
+      ...rest,
+      status: "deleted",
+    };
+  }
+  return {
+    ...current,
+    status,
+  };
 }
 
 function stripLegacyRunFields(
@@ -581,6 +614,16 @@ function parseJsonRecord<T>(value: unknown): T | undefined {
 
 function present<T>(value: T | undefined): value is T {
   return value !== undefined;
+}
+
+/**
+ * Drop tombstones after parse so legacy paused rows never surface in listings.
+ * See the v0.131.0 removal TODO on taskRecordFields.status.
+ */
+function listedScheduledTask(
+  task: ScheduledTask | undefined,
+): task is ScheduledTask {
+  return task !== undefined && task.status !== "deleted";
 }
 
 function requireStoredTask(task: ScheduledTask): ScheduledTask {
@@ -858,7 +901,7 @@ class PluginStateSchedulerStore implements SchedulerStore {
               ? getNextRunAtMs(current, args.scheduledForMs, args.nowMs)
               : undefined;
       }
-      const nextStatus = nextRunAtMs ? "active" : "paused";
+      const nextStatus = statusAfterTerminalOccurrence({ nextRunAtMs });
 
       await this.saveTaskRecord(
         {
@@ -866,7 +909,7 @@ class PluginStateSchedulerStore implements SchedulerStore {
           nextRunAtMs,
           runNowAtMs: isRunNow ? undefined : current.runNowAtMs,
           status: nextStatus,
-          statusReason: nextStatus === "paused" ? errorMessage : undefined,
+          statusReason: nextStatus === "deleted" ? errorMessage : undefined,
           updatedAtMs: args.nowMs,
         },
         current,
@@ -1044,12 +1087,11 @@ class PluginStateSchedulerStore implements SchedulerStore {
             lastRunAtMs: args.run.scheduledForMs,
             nextRunAtMs,
             runNowAtMs: undefined,
-            status:
-              args.status === "blocked"
-                ? "blocked"
-                : nextRunAtMs
-                  ? current.status
-                  : "paused",
+            status: statusAfterTerminalOccurrence({
+              blocked: args.status === "blocked",
+              nextRunAtMs,
+              previousStatus: current.status,
+            }),
             statusReason:
               args.status === "blocked" ? args.errorMessage : undefined,
             updatedAtMs: args.nowMs,
@@ -1084,12 +1126,10 @@ class PluginStateSchedulerStore implements SchedulerStore {
           ...current,
           lastRunAtMs: args.run.scheduledForMs,
           nextRunAtMs,
-          status:
-            args.status === "blocked"
-              ? "blocked"
-              : nextRunAtMs
-                ? "active"
-                : "paused",
+          status: statusAfterTerminalOccurrence({
+            blocked: args.status === "blocked",
+            nextRunAtMs,
+          }),
           statusReason:
             args.status === "blocked" ? args.errorMessage : undefined,
           updatedAtMs: args.nowMs,
@@ -1262,12 +1302,12 @@ async function listTasksFromSql(db: SchedulerDb): Promise<ScheduledTask[]> {
       record: juniorSchedulerTasks.record,
     })
     .from(juniorSchedulerTasks)
-    .where(ne(juniorSchedulerTasks.status, "deleted"))
+    .where(notInArray(juniorSchedulerTasks.status, ["deleted", "paused"]))
     .orderBy(
       asc(juniorSchedulerTasks.createdAtMs),
       asc(juniorSchedulerTasks.id),
     );
-  return rows.map(parseSqlTaskRow).filter(present);
+  return rows.map(parseSqlTaskRow).filter(listedScheduledTask);
 }
 
 async function listTasksCreatedByFromSql(
@@ -1307,7 +1347,7 @@ async function listTasksCreatedByFromSql(
       .from(juniorSchedulerTasks)
       .where(
         and(
-          ne(juniorSchedulerTasks.status, "deleted"),
+          notInArray(juniorSchedulerTasks.status, ["deleted", "paused"]),
           inArray(juniorSchedulerTasks.creatorIdentityId, input.identityIds),
           cursor,
           search,
@@ -1318,7 +1358,7 @@ async function listTasksCreatedByFromSql(
         desc(juniorSchedulerTasks.id),
       )
       .limit(input.limit);
-    tasks.push(...rows.map(parseSqlTaskRow).filter(present));
+    tasks.push(...rows.map(parseSqlTaskRow).filter(listedScheduledTask));
     if (rows.length < input.limit) {
       break;
     }
@@ -1345,14 +1385,14 @@ async function listTasksForTeamFromSql(
     .where(
       and(
         eq(juniorSchedulerTasks.teamId, teamId),
-        ne(juniorSchedulerTasks.status, "deleted"),
+        notInArray(juniorSchedulerTasks.status, ["deleted", "paused"]),
       ),
     )
     .orderBy(
       asc(juniorSchedulerTasks.createdAtMs),
       asc(juniorSchedulerTasks.id),
     );
-  return rows.map(parseSqlTaskRow).filter(present);
+  return rows.map(parseSqlTaskRow).filter(listedScheduledTask);
 }
 
 /** List scheduled tasks whose current Slack destination is public. */
@@ -1379,7 +1419,7 @@ export async function listPublicScheduledTasksForTeams(
     .where(
       and(
         inArray(juniorSchedulerTasks.teamId, teamIds),
-        ne(juniorSchedulerTasks.status, "deleted"),
+        notInArray(juniorSchedulerTasks.status, ["deleted", "paused"]),
         eq(juniorDestinations.visibility, "public"),
       ),
     )
@@ -1388,7 +1428,7 @@ export async function listPublicScheduledTasksForTeams(
       desc(juniorSchedulerTasks.id),
     )
     .limit(limit);
-  return rows.map(parseSqlTaskRow).filter(present);
+  return rows.map(parseSqlTaskRow).filter(listedScheduledTask);
 }
 
 async function listIncompleteRunsForTasksFromSql(
@@ -1613,7 +1653,7 @@ class SqlSchedulerStore implements SchedulerStore, SchedulerOperationalStore {
             ? getNextRunAtMs(current, args.scheduledForMs, args.nowMs)
             : undefined;
     }
-    const nextStatus = nextRunAtMs ? "active" : "paused";
+    const nextStatus = statusAfterTerminalOccurrence({ nextRunAtMs });
 
     await this.saveTaskRecord(
       db,
@@ -1622,7 +1662,7 @@ class SqlSchedulerStore implements SchedulerStore, SchedulerOperationalStore {
         nextRunAtMs,
         runNowAtMs: isRunNow ? undefined : current.runNowAtMs,
         status: nextStatus,
-        statusReason: nextStatus === "paused" ? errorMessage : undefined,
+        statusReason: nextStatus === "deleted" ? errorMessage : undefined,
         updatedAtMs: args.nowMs,
       },
       current,
@@ -1787,12 +1827,11 @@ class SqlSchedulerStore implements SchedulerStore, SchedulerOperationalStore {
             lastRunAtMs: args.run.scheduledForMs,
             nextRunAtMs,
             runNowAtMs: undefined,
-            status:
-              args.status === "blocked"
-                ? "blocked"
-                : nextRunAtMs
-                  ? current.status
-                  : "paused",
+            status: statusAfterTerminalOccurrence({
+              blocked: args.status === "blocked",
+              nextRunAtMs,
+              previousStatus: current.status,
+            }),
             statusReason:
               args.status === "blocked" ? args.errorMessage : undefined,
             updatedAtMs: args.nowMs,
@@ -1829,12 +1868,10 @@ class SqlSchedulerStore implements SchedulerStore, SchedulerOperationalStore {
           ...current,
           lastRunAtMs: args.run.scheduledForMs,
           nextRunAtMs,
-          status:
-            args.status === "blocked"
-              ? "blocked"
-              : nextRunAtMs
-                ? "active"
-                : "paused",
+          status: statusAfterTerminalOccurrence({
+            blocked: args.status === "blocked",
+            nextRunAtMs,
+          }),
           statusReason:
             args.status === "blocked" ? args.errorMessage : undefined,
           updatedAtMs: args.nowMs,
