@@ -60,6 +60,7 @@ async function useSchedulerSqlPlugin() {
 function createContext(
   overrides: Partial<SchedulerToolContext> & {
     channelId?: string;
+    linkedUser?: boolean;
     teamId?: string;
   } = {},
 ): SchedulerToolContext {
@@ -67,7 +68,29 @@ function createContext(
   const teamId = overrides.teamId ?? TEST_TEAM_ID;
   const contextOverrides = { ...overrides };
   delete contextOverrides.channelId;
+  delete contextOverrides.linkedUser;
   delete contextOverrides.teamId;
+  const actor = overrides.actor ?? {
+    platform: "slack" as const,
+    teamId,
+    userId: "U123",
+    userName: "dcramer",
+    fullName: "David Cramer",
+  };
+  const identity = {
+    id: `identity:${actor.teamId}:${actor.userId}`,
+    provider: "slack",
+    providerSubjectId: actor.userId,
+    providerTenantId: actor.teamId,
+  };
+  const user =
+    overrides.linkedUser === false
+      ? undefined
+      : {
+          email: `${actor.userId.toLowerCase()}@example.com`,
+          id: `user:${actor.userId}`,
+          identities: [identity],
+        };
   const context: SchedulerToolContext = {
     source: createSlackSource({
       teamId,
@@ -75,16 +98,13 @@ function createContext(
 
       visibility: channelId.startsWith("C") ? "public" : "private",
     }),
-    actor: {
-      platform: "slack",
-      teamId,
-      userId: "U123",
-      userName: "dcramer",
-      fullName: "David Cramer",
-    },
+    actor,
     now: () => Date.parse("2026-05-24T12:00:00.000Z"),
     userText: "schedule this weekly",
     store: schedulerStore(),
+    users: {
+      resolveActor: async () => ({ identity, ...(user ? { user } : {}) }),
+    },
     ...contextOverrides,
   };
   return context;
@@ -231,6 +251,11 @@ describe("Slack schedule tools", () => {
         next_run_at: "2026-05-25T16:00:00.000Z",
       },
     });
+    await expect(
+      schedulerStore().getTask(created.task.id),
+    ).resolves.toMatchObject({
+      creatorIdentityId: `identity:${TEST_TEAM_ID}:U123`,
+    });
 
     const listed = await executeTool(
       createSlackScheduleListTasksTool(createContext()),
@@ -258,6 +283,16 @@ describe("Slack schedule tools", () => {
           schedule: "Every week on Monday at 09:00 (America/Los_Angeles)",
         },
       ],
+    });
+  });
+
+  it("stores identity ownership before the creator is linked to a user", async () => {
+    const context = createContext({ linkedUser: false });
+    const created = await createTask(context);
+
+    const stored = await schedulerStore().getTask(created.task.id);
+    expect(stored).toMatchObject({
+      creatorIdentityId: `identity:${TEST_TEAM_ID}:U123`,
     });
   });
 
@@ -1433,6 +1468,18 @@ describe("Slack schedule tool wiring via getPluginTools", () => {
     const { fixture, store } = await useSchedulerSqlPlugin();
     try {
       const TEAM_ID = `TWIRING${Date.now()}`;
+      const identity = {
+        id: `identity:${TEAM_ID}:U123`,
+        provider: "slack",
+        providerSubjectId: "U123",
+        providerTenantId: TEAM_ID,
+      };
+      const user = {
+        email: "alice@example.com",
+        id: "user:alice",
+        identities: [identity],
+      };
+      const resolveActorIdentity = vi.fn(async () => ({ identity, user }));
       const tools = getPluginTools({
         source: createSlackSource({
           teamId: TEAM_ID,
@@ -1457,10 +1504,12 @@ describe("Slack schedule tool wiring via getPluginTools", () => {
             return new Response("ok");
           },
         },
+        resolveActorIdentity,
         workspace: {} as Parameters<typeof getPluginTools>[0]["workspace"],
       });
 
       expect(tools).toHaveProperty("scheduler_slackScheduleCreateTask");
+      expect(resolveActorIdentity).not.toHaveBeenCalled();
 
       // Create a task through the real wired tool.
       const result = await executeRegisteredTool<{
@@ -1479,6 +1528,7 @@ describe("Slack schedule tool wiring via getPluginTools", () => {
       });
 
       expect(result).toMatchObject({ ok: true });
+      expect(resolveActorIdentity).toHaveBeenCalledOnce();
       const taskId = result.task.id;
 
       // Task destination must be the raw DM channel, NOT the assistant context.

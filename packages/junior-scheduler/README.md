@@ -8,6 +8,8 @@ Junior's durable agent runtime.
 - A scheduled task records its creator, execution actor, Slack destination,
   prompt text, timezone-aware schedule, recurrence, credential mode, status, and
   next-run state.
+- `creatorIdentityId` is the authoritative creator reference used for personal
+  authorization and indexed personal listing.
 - SQL schemas and migrations are authoritative for persistence.
 - Model-facing tools accept structured schedule intent. The scheduler resolves
   relative delays and calendar fields against its server clock and timezone,
@@ -53,16 +55,14 @@ Junior's durable agent runtime.
 - Stored creator attribution grants no broader task-management or execution
   authority.
 - Slack tool management remains scoped to the active Slack context. The
-  dashboard may list and delete a viewer's own tasks across linked Slack
-  workspaces.
+  dashboard may list and delete a user's own tasks across linked identities.
 
 ## Operations
 
 The plugin exposes create, update, delete, list, and run-now tools plus bounded
 operational reporting. The dashboard exposes a searchable
 **Scheduled tasks** user page containing non-deleted tasks created by the
-signed-in viewer's linked Slack actors. A viewer may delete those tasks from the
-page.
+signed-in user. A user may delete those tasks from the page.
 
 Generate schema changes with
 `pnpm --filter @sentry/junior-scheduler db:generate`.

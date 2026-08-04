@@ -37,7 +37,7 @@ import type { AnyToolDefinition } from "@/chat/tools/definition";
 import { getDashboardConversationLink } from "@/chat/slack/dashboard-link";
 import { canRouteResourceEvents } from "@/chat/resource-events/workspace";
 import { getSlackToolContext } from "@/chat/slack/tools/context";
-import { readViewerActors } from "@/chat/plugins/viewer-actors";
+import { resolveViewerUser } from "@/chat/plugins/viewer";
 import type { ToolRuntimeContext } from "@/chat/tools/types";
 import type {
   SandboxCommandInput,
@@ -556,6 +556,8 @@ export function getPluginTools(
       canSubscribe:
         context.source.platform === "slack" && canRouteResourceEvents(),
     };
+    const resolveActor =
+      context.resolveActorIdentity ?? (async () => undefined);
     let pluginContext: ToolRegistrationHookContext;
     if (context.source.platform === "slack") {
       if (context.destination.platform !== "slack") {
@@ -578,6 +580,7 @@ export function getPluginTools(
         model: createPluginModel(pluginName, plugin.model),
         resourceEvents,
         state: createPluginState(pluginName),
+        users: { resolveActor },
       };
     } else {
       if (context.destination.platform !== "local") {
@@ -599,6 +602,7 @@ export function getPluginTools(
         model: createPluginModel(pluginName, plugin.model),
         resourceEvents,
         state: createPluginState(pluginName),
+        users: { resolveActor },
       };
     }
     const pluginTools = hook(pluginContext);
@@ -795,9 +799,7 @@ export function getPluginApiRoutes(): PluginApiRouteRegistration[] {
     const app = hook({
       ...basePluginContext(plugin),
       eventStats: createPluginConversationEventStats(plugin),
-      viewer: {
-        actors: readViewerActors,
-      },
+      users: { resolve: resolveViewerUser },
     });
     if (app === undefined) {
       continue;

@@ -2,9 +2,11 @@ import type {
   PluginContext,
   LocalInvocationContext,
   PluginEmbedder,
+  Identity,
   PluginModel,
   Actor,
   SlackInvocationContext,
+  User,
 } from "./context";
 import type { PluginCredentialSubject } from "./credentials";
 import type { PluginAnnotations } from "./annotations";
@@ -533,6 +535,10 @@ interface BaseToolRegistrationHookContext extends PluginContext {
   model: PluginModel;
   resourceEvents: PluginResourceEventToolContext;
   state: PluginState;
+  users: {
+    /** Resolve the current actor's stored identity and linked user. */
+    resolveActor(): Promise<{ identity: Identity; user?: User } | undefined>;
+  };
   userText?: string;
 }
 

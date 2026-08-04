@@ -93,6 +93,17 @@ export function createSlackScheduleCreateTaskTool(
         );
       }
 
+      const creator = await context.users.resolveActor();
+      const identity = creator?.identity;
+      if (
+        !identity ||
+        identity.provider !== "slack" ||
+        identity.providerTenantId !== destination.teamId ||
+        identity.providerSubjectId !== actor.slackUserId
+      ) {
+        throwToolInputError("Scheduled task creator identity is unavailable.");
+      }
+
       const nowMs = context.now?.() ?? Date.now();
       let compiled;
       try {
@@ -117,6 +128,7 @@ export function createSlackScheduleCreateTaskTool(
         createdAtMs: nowMs,
         updatedAtMs: nowMs,
         createdBy: actor,
+        creatorIdentityId: identity.id,
         conversationAccess,
         credentialMode: input.credential_mode ?? "creator",
         destination,

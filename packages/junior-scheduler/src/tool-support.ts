@@ -3,9 +3,11 @@ import {
   PluginToolInputError,
   pluginToolResultSchema,
   sourceSchema,
+  type Identity,
   type SlackDestination,
   type SlackActor,
   type SlackSource,
+  type User,
 } from "@sentry/junior-plugin-api";
 import { z } from "zod";
 import { sanitizeScheduledTaskPrincipal } from "./identity";
@@ -22,6 +24,9 @@ export interface SchedulerToolContext {
   now?: () => number;
   source?: SlackSource;
   store: SchedulerStore;
+  users: {
+    resolveActor(): Promise<{ identity: Identity; user?: User } | undefined>;
+  };
   userText?: string;
 }
 

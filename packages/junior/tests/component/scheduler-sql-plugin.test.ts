@@ -16,6 +16,7 @@ import {
 } from "@sentry/junior-scheduler";
 import { defineJuniorPlugins } from "@/plugins";
 import { migrateSchema } from "@/chat/conversations/sql/migrations";
+import { upsertIdentity } from "@/chat/identities/sql";
 import { migratePluginSchemas } from "@/chat/plugins/migrations";
 import { migratePluginsToSql } from "@/cli/upgrade/migrations/plugin-sql";
 import { createLocalJuniorSqlFixture } from "../fixtures/sql";
@@ -55,6 +56,7 @@ function createTask(overrides: Partial<ScheduledTask> = {}): ScheduledTask {
     conversationAccess: { audience: "channel", visibility: "public" },
     createdAtMs: TEST_RUN_AT_MS,
     createdBy: { slackUserId: "U123" },
+    creatorIdentityId: "identity-viewer",
     credentialMode: "system",
     destination: {
       platform: "slack",
@@ -91,10 +93,19 @@ WHERE schemaname = 'drizzle'
 `);
       expect(migrationTable).toBeDefined();
       await fixture.sql.execute(
+        `DROP TRIGGER junior_scheduler_assign_creator_identity ON junior_scheduler_tasks; DROP FUNCTION junior_scheduler_assign_creator_identity()`,
+      );
+      await fixture.sql.execute(
         `DROP INDEX junior_scheduler_tasks_creator_idx`,
       );
       await fixture.sql.execute(
+        `DROP INDEX junior_scheduler_tasks_creator_identity_idx`,
+      );
+      await fixture.sql.execute(
         `ALTER TABLE junior_scheduler_tasks DROP COLUMN creator_slack_user_id`,
+      );
+      await fixture.sql.execute(
+        `ALTER TABLE junior_scheduler_tasks DROP COLUMN creator_identity_id`,
       );
       await fixture.sql.execute(
         `DROP TABLE drizzle.${migrationTable!.tablename}`,
@@ -128,10 +139,19 @@ INSERT INTO junior_destinations (
 `,
         ["destination_scheduler_public", "T123", "C123"],
       );
+      const identity = await upsertIdentity(fixture.sql, {
+        email: "person@example.com",
+        emailVerified: true,
+        kind: "user",
+        provider: "slack",
+        providerSubjectId: "U123",
+        providerTenantId: "T123",
+      });
       const currentTask = createTask({ id: "sched_legacy_credential_subject" });
       const {
         conversationAccess: _conversationAccess,
         credentialMode: _credentialMode,
+        creatorIdentityId: _creatorIdentityId,
         ...legacyTask
       } = currentTask;
       const unmatchedCurrentTask = createTask({
@@ -145,10 +165,32 @@ INSERT INTO junior_destinations (
       const {
         conversationAccess: _unmatchedConversationAccess,
         credentialMode: _unmatchedCredentialMode,
+        creatorIdentityId: _unmatchedCreatorIdentityId,
         ...unmatchedLegacyTask
       } = unmatchedCurrentTask;
-      await fixture.sql.execute(
-        `
+      const unlinkedCurrentTask = createTask({
+        createdBy: { slackUserId: "U999" },
+        id: "sched_legacy_unlinked_creator",
+      });
+      const {
+        conversationAccess: _unlinkedConversationAccess,
+        creatorIdentityId: _unlinkedCreatorIdentityId,
+        ...unlinkedLegacyTask
+      } = unlinkedCurrentTask;
+      for (const task of [
+        {
+          ...legacyTask,
+          credentialSubject: {
+            type: "user",
+            userId: "slack:T123:U123",
+            allowedWhen: "private-direct-conversation",
+          },
+        },
+        unmatchedLegacyTask,
+        unlinkedLegacyTask,
+      ]) {
+        await fixture.sql.execute(
+          `
 INSERT INTO junior_scheduler_tasks (
   id,
   team_id,
@@ -158,42 +200,16 @@ INSERT INTO junior_scheduler_tasks (
   record
 ) VALUES ($1, $2, $3, $4, $5, $6)
 `,
-        [
-          legacyTask.id,
-          legacyTask.destination.teamId,
-          legacyTask.status,
-          legacyTask.nextRunAtMs,
-          legacyTask.createdAtMs,
-          JSON.stringify({
-            ...legacyTask,
-            credentialSubject: {
-              type: "user",
-              userId: "slack:T123:U123",
-              allowedWhen: "private-direct-conversation",
-            },
-          }),
-        ],
-      );
-      await fixture.sql.execute(
-        `
-INSERT INTO junior_scheduler_tasks (
-  id,
-  team_id,
-  status,
-  next_run_at_ms,
-  created_at_ms,
-  record
-) VALUES ($1, $2, $3, $4, $5, $6)
-`,
-        [
-          unmatchedLegacyTask.id,
-          unmatchedLegacyTask.destination.teamId,
-          unmatchedLegacyTask.status,
-          unmatchedLegacyTask.nextRunAtMs,
-          unmatchedLegacyTask.createdAtMs,
-          JSON.stringify(unmatchedLegacyTask),
-        ],
-      );
+          [
+            task.id,
+            task.destination.teamId,
+            task.status,
+            task.nextRunAtMs,
+            task.createdAtMs,
+            JSON.stringify(task),
+          ],
+        );
+      }
 
       await expect(
         migratePluginSchemas(fixture.sql, [
@@ -202,7 +218,7 @@ INSERT INTO junior_scheduler_tasks (
             pluginName: "scheduler",
           },
         ]),
-      ).resolves.toEqual({ existing: 1, migrated: 3, scanned: 4 });
+      ).resolves.toEqual({ existing: 1, migrated: 4, scanned: 5 });
       const migrations = readMigrationFiles({
         migrationsFolder: schedulerMigrationsDir(),
       });
@@ -221,11 +237,13 @@ ORDER BY created_at
         })),
       );
       const [migratedTask] = await fixture.sql.query<{
-        creatorSlackUserId: string;
+        creatorIdentityId: string | null;
+        creatorSlackUserId: string | null;
         record: unknown;
       }>(
         `
 SELECT
+  creator_identity_id AS "creatorIdentityId",
   creator_slack_user_id AS "creatorSlackUserId",
   record
 FROM junior_scheduler_tasks
@@ -233,15 +251,36 @@ WHERE id = $1
 `,
         [legacyTask.id],
       );
-      expect(migratedTask?.creatorSlackUserId).toBe("U123");
-      expect(migratedTask?.record).toMatchObject({
-        conversationAccess: {
-          audience: "channel",
-          visibility: "public",
+      expect(migratedTask).toMatchObject({
+        creatorIdentityId: identity.id,
+        creatorSlackUserId: "U123",
+        record: {
+          conversationAccess: {
+            audience: "channel",
+            visibility: "public",
+          },
+          credentialMode: "system",
+          creatorIdentityId: identity.id,
         },
-        credentialMode: "system",
       });
       expect(migratedTask?.record).not.toHaveProperty("credentialSubject");
+      const rollingTaskId = `${legacyTask.id}_rolling`;
+      await fixture.sql.execute(
+        `INSERT INTO junior_scheduler_tasks (id, team_id, creator_slack_user_id, status, next_run_at_ms, run_now_at_ms, created_at_ms, record)
+         SELECT $2, team_id, creator_slack_user_id, status, next_run_at_ms, run_now_at_ms, created_at_ms,
+           (record - 'creatorIdentityId') || jsonb_build_object('id', $2::text)
+         FROM junior_scheduler_tasks WHERE id = $1`,
+        [legacyTask.id, rollingTaskId],
+      );
+      const rollingDeployStore = createSchedulerSqlStore(
+        fixture.sql.db() as unknown as SchedulerDb,
+      );
+      await expect(
+        rollingDeployStore.getTask(rollingTaskId),
+      ).resolves.toMatchObject({
+        creatorIdentityId: identity.id,
+        id: rollingTaskId,
+      });
       const [unmatchedMigratedTask] = await fixture.sql.query<{
         record: unknown;
       }>(`SELECT record FROM junior_scheduler_tasks WHERE id = $1`, [
@@ -252,6 +291,45 @@ WHERE id = $1
           audience: "channel",
           visibility: "private",
         },
+        creatorIdentityId: identity.id,
+      });
+      const [unlinkedIdentity] = await fixture.sql.query<{
+        id: string;
+        userId: string | null;
+      }>(
+        `
+SELECT id, user_id AS "userId"
+FROM junior_identities
+WHERE provider = 'slack'
+  AND provider_tenant_id = 'T123'
+  AND provider_subject_id = 'U999'
+`,
+      );
+      expect(unlinkedIdentity).toEqual({
+        id: expect.any(String),
+        userId: null,
+      });
+      const [unlinkedMigratedTask] = await fixture.sql.query<{
+        creatorIdentityId: string | null;
+        creatorSlackUserId: string | null;
+        record: unknown;
+      }>(
+        `
+SELECT
+  creator_identity_id AS "creatorIdentityId",
+  creator_slack_user_id AS "creatorSlackUserId",
+  record
+FROM junior_scheduler_tasks
+WHERE id = $1
+`,
+        [unlinkedLegacyTask.id],
+      );
+      expect(unlinkedMigratedTask).toMatchObject({
+        creatorIdentityId: unlinkedIdentity!.id,
+        creatorSlackUserId: "U999",
+        record: {
+          creatorIdentityId: unlinkedIdentity!.id,
+        },
       });
       await expect(
         migratePluginSchemas(fixture.sql, [
@@ -260,7 +338,7 @@ WHERE id = $1
             pluginName: "scheduler",
           },
         ]),
-      ).resolves.toEqual({ existing: 4, migrated: 0, scanned: 4 });
+      ).resolves.toEqual({ existing: 5, migrated: 0, scanned: 5 });
       await expect(
         fixture.sql.query<{
           createdAt: string;
@@ -433,15 +511,17 @@ ORDER BY tablename
 INSERT INTO junior_scheduler_tasks (
   id,
   team_id,
+  creator_identity_id,
   creator_slack_user_id,
   status,
   created_at_ms,
   record
-) VALUES ($1, $2, $3, $4, $5, $6)
+) VALUES ($1, $2, $3, $4, $5, $6, $7)
 `,
         [
           "sched_malformed_between_pages",
           visibleNew.destination.teamId,
+          visibleNew.creatorIdentityId,
           visibleNew.createdBy.slackUserId,
           "active",
           TEST_RUN_AT_MS + 150,
@@ -452,6 +532,7 @@ INSERT INTO junior_scheduler_tasks (
         createTask({
           createdAtMs: TEST_RUN_AT_MS + 300,
           createdBy: { slackUserId: "U999" },
+          creatorIdentityId: "identity-other",
           id: "sched_other_creator",
         }),
       );
@@ -463,6 +544,7 @@ INSERT INTO junior_scheduler_tasks (
             teamId: "T999",
             channelId: "C999",
           },
+          creatorIdentityId: "identity-other-workspace",
           id: "sched_other_workspace",
         }),
       );
@@ -474,14 +556,16 @@ INSERT INTO junior_scheduler_tasks (
         log: noopLogger,
         plugin: { name: "scheduler" },
         viewer: {
-          actors: [
+          email: "person@example.com",
+          id: "user-viewer",
+          identities: [
             {
-              platform: "slack" as const,
-              teamId: "T123",
-              userId: "U123",
+              id: "identity-viewer",
+              provider: "slack",
+              providerSubjectId: "U123",
+              providerTenantId: "T123",
             },
           ],
-          email: "person@example.com",
         },
       };
       const first = pluginUserPageContentSchema.parse(
@@ -509,6 +593,7 @@ INSERT INTO junior_scheduler_tasks (
       expect(second.records).toEqual([
         expect.objectContaining({ id: visibleOld.id }),
       ]);
+      expect(second.nextCursor).toBeUndefined();
 
       const search = pluginUserPageContentSchema.parse(
         await page!.read(context, { limit: 20, query: "friday" }),
@@ -517,6 +602,7 @@ INSERT INTO junior_scheduler_tasks (
         expect.objectContaining({ id: visibleOld.id }),
       ]);
 
+      const resolveUser = vi.fn(async () => context.viewer);
       const api = schedulerPlugin().hooks?.apiRoutes?.({
         db,
         eventStats: {
@@ -526,7 +612,7 @@ INSERT INTO junior_scheduler_tasks (
         },
         log: noopLogger,
         plugin: { name: "scheduler" },
-        viewer: { actors: async () => context.viewer.actors },
+        users: { resolve: resolveUser },
       });
       expect(api).toBeDefined();
       const requestContext = pluginApiRouteRequestContextSchema.parse({
@@ -538,6 +624,18 @@ INSERT INTO junior_scheduler_tasks (
         },
         pluginName: "scheduler",
       });
+      const unknownRouteResponse = await api!.fetch(
+        new Request("http://localhost/unknown", { method: "DELETE" }),
+        requestContext,
+      );
+      expect(unknownRouteResponse.status).toBe(404);
+      const invalidMethodResponse = await api!.fetch(
+        new Request(`http://localhost/tasks/${visibleOld.id}`),
+        requestContext,
+      );
+      expect(invalidMethodResponse.status).toBe(405);
+      expect(resolveUser).not.toHaveBeenCalled();
+
       const deleteResponse = await api!.fetch(
         new Request(`http://localhost/tasks/${visibleOld.id}`, {
           method: "DELETE",
@@ -746,8 +844,8 @@ INSERT INTO junior_scheduler_tasks (
         }),
       ).resolves.toEqual({
         existing: 0,
-        migrated: 4,
-        scanned: 4,
+        migrated: 5,
+        scanned: 5,
       });
 
       const db = fixture.sql.db() as unknown as SchedulerDb;
@@ -776,8 +874,8 @@ INSERT INTO junior_scheduler_tasks (
         }),
       ).resolves.toEqual({
         existing: 0,
-        migrated: 4,
-        scanned: 4,
+        migrated: 5,
+        scanned: 5,
       });
     } finally {
       await fixture.close();
@@ -798,16 +896,18 @@ INSERT INTO junior_scheduler_tasks (
 INSERT INTO junior_scheduler_tasks (
   id,
   team_id,
+  creator_identity_id,
   creator_slack_user_id,
   status,
   next_run_at_ms,
   created_at_ms,
   record
-) VALUES ($1, $2, $3, $4, $5, $6, $7)
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 `,
         [
           "sched_bad_record",
           task.destination.teamId,
+          task.creatorIdentityId,
           task.createdBy.slackUserId,
           "active",
           TEST_RUN_AT_MS,
@@ -822,16 +922,18 @@ INSERT INTO junior_scheduler_tasks (
 INSERT INTO junior_scheduler_tasks (
   id,
   team_id,
+  creator_identity_id,
   creator_slack_user_id,
   status,
   next_run_at_ms,
   created_at_ms,
   record
-) VALUES ($1, $2, $3, $4, $5, $6, $7)
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 `,
         [
           "sched_bad_string_record",
           task.destination.teamId,
+          task.creatorIdentityId,
           task.createdBy.slackUserId,
           "active",
           TEST_RUN_AT_MS,

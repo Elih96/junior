@@ -1,8 +1,7 @@
 import {
   pluginApiRouteRequestContextSchema,
-  type PluginApiRouteRequestContext,
   type PluginRouteApp,
-  type PluginUserPageActor,
+  type User,
 } from "@sentry/junior-plugin-api";
 import {
   createViewerScheduledTasks,
@@ -11,8 +10,10 @@ import {
 import { createSchedulerSqlStore, type SchedulerDb } from "./store";
 
 interface SchedulerApiOptions {
-  actors(email: string): Promise<PluginUserPageActor[]>;
   db: SchedulerDb;
+  users: {
+    resolve(email: string): Promise<User | undefined>;
+  };
 }
 
 function json(body: unknown, status: number): Response {
@@ -22,9 +23,7 @@ function json(body: unknown, status: number): Response {
   });
 }
 
-function viewerEmail(
-  context: PluginApiRouteRequestContext | undefined,
-): string | undefined {
+function viewerEmail(context: unknown): string | undefined {
   const parsed = pluginApiRouteRequestContextSchema.safeParse(context);
   if (!parsed.success || parsed.data.auth.user.emailVerified !== true) {
     return undefined;
@@ -51,11 +50,13 @@ export function createSchedulerApi(
         return json({ error: "Method not allowed." }, 405);
       }
 
-      const actors = await options.actors(email);
+      const user = await options.users.resolve(email);
+      if (!user) return json({ error: "Authentication required." }, 401);
+
       try {
         await createViewerScheduledTasks(
           createSchedulerSqlStore(options.db),
-          actors,
+          user,
         ).delete(decodeURIComponent(taskPath[1]!));
         return new Response(null, {
           headers: { "cache-control": "no-store" },
