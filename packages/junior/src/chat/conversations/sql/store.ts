@@ -30,6 +30,12 @@ import type {
   JuniorDestinationKind,
   JuniorDestinationVisibility,
 } from "@/db/schema/destinations";
+import {
+  bindProviderConversation,
+  getConversationIdByProviderConversation,
+  type ProviderConversationBinding,
+  type ProviderConversationReference,
+} from "./bindings";
 import { locationFromRow, privacyFromLocationRow } from "./location";
 
 type ConversationRow = typeof juniorConversations.$inferSelect;
@@ -491,6 +497,18 @@ function updateConversationUsage(args: {
 
 export class SqlStore implements ConversationStore {
   constructor(private readonly executor: JuniorSqlDatabase) {}
+
+  async getConversationIdByProviderConversation(
+    args: ProviderConversationReference,
+  ): Promise<string | undefined> {
+    return await getConversationIdByProviderConversation(this.executor, args);
+  }
+
+  async bindProviderConversation(
+    args: ProviderConversationBinding,
+  ): Promise<void> {
+    await bindProviderConversation(this.executor, args);
+  }
 
   async get(args: {
     conversationId: string;

@@ -23,6 +23,10 @@ import {
 import { getConversationEventStore, getSqlExecutor } from "@/chat/db";
 import type { JuniorSqlDatabase } from "@/db/db";
 import { createSqlConversationEventStore } from "@/chat/conversations/sql/history";
+import {
+  bindProviderConversation,
+  type ProviderConversationBinding,
+} from "@/chat/conversations/sql/bindings";
 import { withConversationEventLock } from "@/chat/conversations/sql/event-lock";
 import {
   historyItemFromPiMessage,
@@ -269,26 +273,31 @@ export async function commitMessages(args: {
  * produced it.
  */
 export async function commitAcceptedReply(args: {
-  agentMessage: AssistantMessage;
+  agentMessage?: AssistantMessage;
   conversation: ThreadConversationState;
   conversationMessageId: string;
   conversationId: string;
+  providerConversationBindings?: Array<
+    Omit<ProviderConversationBinding, "conversationId">
+  >;
   repliedAtMs?: number;
 }): Promise<void> {
   const executor = getSqlExecutor();
   await withConversationEventLock(executor, args.conversationId, async () =>
     executor.transaction(async () => {
-      const agentMessage = normalizeDurableMessage(args.agentMessage);
-      await createSqlConversationEventStore(executor).append(
-        args.conversationId,
-        [
-          {
-            idempotencyKey: `message:${args.conversationMessageId}:agent`,
-            data: historyItemFromPiMessage(agentMessage, contextProvenance),
-            createdAtMs: messageTimestamp(agentMessage),
-          },
-        ],
-      );
+      if (args.agentMessage) {
+        const agentMessage = normalizeDurableMessage(args.agentMessage);
+        await createSqlConversationEventStore(executor).append(
+          args.conversationId,
+          [
+            {
+              idempotencyKey: `message:${args.conversationMessageId}:agent`,
+              data: historyItemFromPiMessage(agentMessage, contextProvenance),
+              createdAtMs: messageTimestamp(agentMessage),
+            },
+          ],
+        );
+      }
       await appendConversationMessages(
         createSqlConversationEventStore(executor),
         {
@@ -299,6 +308,12 @@ export async function commitAcceptedReply(args: {
             : { repliedAtMs: args.repliedAtMs }),
         },
       );
+      for (const binding of args.providerConversationBindings ?? []) {
+        await bindProviderConversation(executor, {
+          conversationId: args.conversationId,
+          ...binding,
+        });
+      }
     }),
   );
 }
@@ -503,9 +518,7 @@ async function recordAuthenticationAccountChange(
     actorId: args.actorId,
     provider: args.provider,
     ...(args.accountLabel ? { accountLabel: args.accountLabel } : {}),
-    ...(args.authorizationId
-      ? { authorizationId: args.authorizationId }
-      : {}),
+    ...(args.authorizationId ? { authorizationId: args.authorizationId } : {}),
     ...(args.providerLabel ? { providerLabel: args.providerLabel } : {}),
   });
   await getConversationEventStore().append(args.conversationId, [
