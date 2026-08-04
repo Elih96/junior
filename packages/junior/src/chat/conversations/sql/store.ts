@@ -30,6 +30,7 @@ import type {
   JuniorDestinationKind,
   JuniorDestinationVisibility,
 } from "@/db/schema/destinations";
+import { locationFromRow, privacyFromLocationRow } from "./location";
 
 type ConversationRow = typeof juniorConversations.$inferSelect;
 type DestinationRow = typeof juniorDestinations.$inferSelect;
@@ -225,15 +226,6 @@ function executionStatusFromValue(value: unknown): ConversationStatus {
   throw new Error("Conversation record execution status is invalid");
 }
 
-function privacyFromRow(
-  row: ConversationReadRow,
-): ConversationPrivacy | undefined {
-  if (row.destination === null) {
-    return undefined;
-  }
-  return row.destination.visibility === "public" ? "public" : "private";
-}
-
 /** Reconstruct a Slack actor with the linked user name and identity-scoped provider fields. */
 function actorFromIdentityRow(
   identity: IdentityRow | null,
@@ -284,7 +276,7 @@ function destinationFromRow(
 /** Decode one SQL row and reject invalid durable conversation records. */
 function conversationFromRow(readRow: ConversationReadRow): Conversation {
   const row = readRow.conversation;
-  const visibility = privacyFromRow(readRow);
+  const visibility = privacyFromLocationRow(readRow.destination);
   if (row.schemaVersion !== 1) {
     throw new Error("Conversation record schema version is invalid");
   }
@@ -328,6 +320,7 @@ function conversationFromRow(readRow: ConversationReadRow): Conversation {
     updatedAtMs:
       msFromDate(row.executionUpdatedAt) ?? requiredMsFromDate(row.updatedAt),
   };
+  const location = locationFromRow(readRow.destination);
 
   return {
     schemaVersion: 1,
@@ -344,6 +337,7 @@ function conversationFromRow(readRow: ConversationReadRow): Conversation {
         }
       : {}),
     ...(destination ? { destination } : {}),
+    ...(location ? { location } : {}),
     ...(actor ? { actor } : {}),
     ...(msFromDate(row.archivedAt) !== undefined
       ? { archivedAtMs: msFromDate(row.archivedAt) }
