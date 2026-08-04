@@ -1,4 +1,23 @@
 # Changelog
+## 0.133.0
+
+### New Features ✨
+
+- (dashboard) Make result lists easier to scan by @dcramer in [#1240](https://github.com/getsentry/junior/pull/1240)
+- (sql) Configure statement timeout by @dcramer in [#1236](https://github.com/getsentry/junior/pull/1236)
+
+### Bug Fixes 🐛
+
+#### Slack
+
+- Bind dispatched conversations to threads by @sentry-junior in [#1232](https://github.com/getsentry/junior/pull/1232)
+- Recognize interrupts after mentions by @sentry-junior in [#1239](https://github.com/getsentry/junior/pull/1239)
+
+### Internal Changes 🔧
+
+- (memory) Bound lexical ranking candidates by @dcramer in [#1242](https://github.com/getsentry/junior/pull/1242)
+- (sql) Cap runtime statements at 30 seconds by @dcramer in [#1235](https://github.com/getsentry/junior/pull/1235)
+
 ## 0.132.0
 
 ### New Features ✨
