@@ -51,11 +51,31 @@ const DEFAULT_SEARCH_LIMIT = 10;
 const DEFAULT_EXPIRED_ARCHIVE_LIMIT = 100;
 const PREFERENCE_ADJUDICATION_CANDIDATE_LIMIT = 10;
 const PREFERENCE_ADJUDICATION_VECTOR_LIMIT = 5;
-const VECTOR_SEARCH_OVERFETCH = 4;
-const LEXICAL_RANK_OVERFETCH = 4;
-const MAX_LEXICAL_RANK_CANDIDATES = 1_000;
+/** Explicit search overfetch: keep a wider fusion window for tool/CLI search. */
+const SEARCH_RETRIEVAL_OVERFETCH = 4;
+/**
+ * Automatic recall overfetch. Recall already asks for ~20 candidates before the
+ * relevance gate, so each hybrid leg only needs a small top-k probe.
+ */
+const RECALL_RETRIEVAL_OVERFETCH = 2;
+/**
+ * Absolute ceiling per retrieval leg. Matches the store limit ceiling so a
+ * single healthy leg can still fill the caller's requested result window.
+ */
+const MAX_RETRIEVAL_LEG_CANDIDATES = 200;
+/** Cap ts_rank_cd work after GIN filtering; ranking is not indexable. */
+const MAX_LEXICAL_RANK_CANDIDATES = 200;
+/** Expand the GIN match window before ts_rank_cd, still under the hard cap. */
+const LEXICAL_RANK_WINDOW_MULTIPLIER = 4;
+/** Bound query text before embedding / FTS construction. */
+const MAX_RETRIEVAL_QUERY_CHARS = 1_500;
 const MAX_MEMORY_CONTENT_CHARS = 4_000;
 const EMBEDDING_METRIC = "cosine";
+/**
+ * Cosine distance cutoff for automatic recall only (not explicit search).
+ * Tuned for text-embedding-3-small; retune if the embedding model changes.
+ */
+const RECALL_MAX_VECTOR_DISTANCE = 0.45;
 
 export type MemoryDb = PgDatabase<PgQueryResultHKT, typeof memorySqlSchema>;
 
@@ -301,8 +321,6 @@ export interface MemorySupersessionDecider {
 
 export interface MemoryStoreOptions {
   embedder?: MemoryEmbeddingProvider;
-  /** Maximum cosine distance for vector recall candidates. Model-dependent; tune when changing AI_EMBEDDING_MODEL. */
-  maxVectorDistance?: number;
   now?: () => number;
   supersessionDecider?: MemorySupersessionDecider;
 }
@@ -949,6 +967,25 @@ async function listVisibleMemories(args: {
   return rows.map(parseMemoryRow);
 }
 
+function normalizeRetrievalQuery(query: string): string {
+  const normalized = query.replace(/\s+/g, " ").trim();
+  if (normalized.length <= MAX_RETRIEVAL_QUERY_CHARS) {
+    return normalized;
+  }
+  return normalized.slice(0, MAX_RETRIEVAL_QUERY_CHARS).trimEnd();
+}
+
+function retrievalLegLimit(limit: number, overfetch: number): number {
+  const requested = Math.max(1, limit);
+  const withOverfetch = requested * Math.max(1, overfetch);
+  // Never return fewer candidates than the caller asked for. A hard overfetch
+  // cap below `limit` under-fills when one modality is empty or both overlap.
+  return Math.min(
+    MAX_RETRIEVAL_LEG_CANDIDATES,
+    Math.max(requested, withOverfetch),
+  );
+}
+
 /** Search a bounded active candidate set with PostgreSQL full-text ranking. */
 async function searchVisibleLexicalMemories(args: {
   db: MemoryDb;
@@ -961,7 +998,11 @@ async function searchVisibleLexicalMemories(args: {
   if (!predicate) {
     return [];
   }
-  const queryVector = sql`to_tsvector('english', ${args.query})`;
+  const query = normalizeRetrievalQuery(args.query);
+  if (!query) {
+    return [];
+  }
+  const queryVector = sql`to_tsvector('english', ${query})`;
   const tsquery = sql`(
     SELECT COALESCE(
       string_agg(quote_literal(term), ' | ')::tsquery,
@@ -969,9 +1010,10 @@ async function searchVisibleLexicalMemories(args: {
     )
     FROM unnest(tsvector_to_array(${queryVector})) AS query_terms(term)
   )`;
+  // GIN filter first, then rank only a bounded recent match window.
   const candidateLimit = Math.min(
     MAX_LEXICAL_RANK_CANDIDATES,
-    args.limit * LEXICAL_RANK_OVERFETCH,
+    args.limit * LEXICAL_RANK_WINDOW_MULTIPLIER,
   );
   const candidates = args.db
     .select()
@@ -1021,7 +1063,7 @@ async function searchVisibleLexicalMemories(args: {
   }));
 }
 
-/** Search active visible records with exact pgvector cosine distance. */
+/** Search active visible records with pgvector cosine distance. */
 async function searchVisibleVectorMemories(args: {
   db: MemoryDb;
   embedder: MemoryEmbeddingProvider | undefined;
@@ -1038,9 +1080,13 @@ async function searchVisibleVectorMemories(args: {
   if (!predicate) {
     return [];
   }
+  const query = normalizeRetrievalQuery(args.query);
+  if (!query) {
+    return [];
+  }
   let embedding: Awaited<ReturnType<typeof embedOne>>;
   try {
-    embedding = await embedOne(args.embedder, args.query);
+    embedding = await embedOne(args.embedder, query);
   } catch {
     return [];
   }
@@ -1048,6 +1094,11 @@ async function searchVisibleVectorMemories(args: {
     juniorMemoryEmbeddings.embedding,
     embedding.vector,
   );
+  // Push distance cutoff into SQL so recall does not overfetch weak neighbors.
+  const distancePredicate =
+    args.maxDistance === undefined
+      ? undefined
+      : sql`${distance} <= ${args.maxDistance}`;
   const rows = await args.db
     .select({
       contentHash: juniorMemoryEmbeddings.contentHash,
@@ -1066,6 +1117,7 @@ async function searchVisibleVectorMemories(args: {
         eq(juniorMemoryEmbeddings.model, embedding.model),
         eq(juniorMemoryEmbeddings.dimensions, MEMORY_EMBEDDING_DIMENSIONS),
         eq(juniorMemoryEmbeddings.metric, EMBEDDING_METRIC),
+        ...(distancePredicate ? [distancePredicate] : []),
       ),
     )
     .orderBy(
@@ -1082,9 +1134,6 @@ async function searchVisibleVectorMemories(args: {
       !Number.isFinite(distanceValue) ||
       hashEmbeddedContent(row.memory.content) !== row.contentHash
     ) {
-      return [];
-    }
-    if (args.maxDistance !== undefined && distanceValue > args.maxDistance) {
       return [];
     }
     return [
@@ -1108,7 +1157,6 @@ export function createMemoryStore(
   const runtimeContext = memoryRuntimeContextSchema.parse(context);
   const parsedOptions = memoryStoreOptionsSchema.parse({ now: options.now });
   const embedder = options.embedder;
-  const maxVectorDistance = options.maxVectorDistance;
   const supersessionDecider = options.supersessionDecider;
   const getNowMs = parsedOptions.now ?? Date.now;
 
@@ -1354,6 +1402,14 @@ export function createMemoryStore(
       : { created: false, memory: idempotent.memory };
   }
 
+  /**
+   * Hybrid retrieval for both automatic recall and explicit search.
+   *
+   * Keep both legs parallel and fuse ranks with RRF. Never skip lexical when
+   * vectors already hit: that drops exact/token memories and serializes the
+   * miss path. Each leg is a hard-capped top-k probe so Postgres work stays
+   * bounded even on broad queries.
+   */
   async function retrieveVisibleMemories(
     rawInput: SearchMemoriesInput,
     vectorMaxDistance: number | undefined,
@@ -1367,7 +1423,13 @@ export function createMemoryStore(
       scopes,
     });
     const limit = boundedLimit(input.limit, DEFAULT_SEARCH_LIMIT);
-    const candidateLimit = limit * VECTOR_SEARCH_OVERFETCH;
+    const overfetch =
+      vectorMaxDistance === undefined
+        ? SEARCH_RETRIEVAL_OVERFETCH
+        : RECALL_RETRIEVAL_OVERFETCH;
+    const candidateLimit = retrievalLegLimit(limit, overfetch);
+    // Always run both legs in parallel. Conditional lexical skip is unsafe:
+    // one in-threshold vector distractor can hide a stronger lexical hit.
     const [vectorMatches, lexicalMatches] = await Promise.all([
       searchVisibleVectorMemories({
         db,
@@ -1391,6 +1453,10 @@ export function createMemoryStore(
     const channelPrefix = sourceChannelPrefix(runtimeContext);
     return rankMemoryMatches([...vectorMatches, ...lexicalMatches], {
       nowMs,
+      // Slight lexical preference protects exact ids/names/timezones on ties.
+      ...(vectorMaxDistance === undefined
+        ? {}
+        : { lexicalWeight: 1, vectorWeight: 0.85 }),
       ...(channelPrefix ? { channelPrefix } : {}),
     })
       .slice(0, limit)
@@ -1445,7 +1511,7 @@ export function createMemoryStore(
     },
 
     async recallMemories(input) {
-      return await retrieveVisibleMemories(input, maxVectorDistance);
+      return await retrieveVisibleMemories(input, RECALL_MAX_VECTOR_DISTANCE);
     },
 
     async searchMemories(input) {

@@ -2780,7 +2780,6 @@ WHERE id = '${superseded.memory.id}'
       });
       const store = createMemoryStore(memoryDb(fixture), slackContext(), {
         embedder,
-        maxVectorDistance: 0.45,
         now: () => TEST_NOW_MS,
       });
       const close = await store.createMemory({
@@ -2801,6 +2800,47 @@ WHERE id = '${superseded.memory.id}'
         expect.objectContaining({ id: close.memory.id }),
         expect.objectContaining({ id: weak.memory.id }),
       ]);
+    } finally {
+      await fixture.close();
+    }
+  }, 15_000);
+
+  it("keeps lexical recall when an acceptable vector distractor exists", async () => {
+    const fixture = await createMemoryFixture();
+
+    try {
+      const query = "America Los Angeles timezone";
+      const vectorDistractor = "Prefers local times in calendar summaries.";
+      const lexicalAnswer =
+        "The user's timezone is America/Los_Angeles for Pacific time.";
+      const embedder = createTestEmbedder({
+        [query]: unitEmbedding(0),
+        [vectorDistractor]: cosineEmbedding(0.8),
+        [lexicalAnswer]: unitEmbedding(1),
+      });
+      const store = createMemoryStore(memoryDb(fixture), slackContext(), {
+        embedder,
+        now: () => TEST_NOW_MS,
+      });
+      const distractor = await store.createMemory({
+        content: vectorDistractor,
+        kind: "preference",
+        idempotencyKey: "memory-test:recall-vector-distractor",
+      });
+      const answer = await store.createMemory({
+        content: lexicalAnswer,
+        kind: "knowledge",
+        idempotencyKey: "memory-test:recall-lexical-answer",
+      });
+
+      // Hybrid recall must keep both legs. A close vector hit must not hide
+      // the exact/token memory that only lexical retrieval surfaces.
+      await expect(store.recallMemories({ limit: 2, query })).resolves.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ id: distractor.memory.id }),
+          expect.objectContaining({ id: answer.memory.id }),
+        ]),
+      );
     } finally {
       await fixture.close();
     }
@@ -4830,6 +4870,37 @@ INSERT INTO junior_memory_memories (
       await expect(
         store.searchMemories({ query: "cutover rehearsal" }),
       ).resolves.toEqual([expect.objectContaining({ id: target.memory.id })]);
+    } finally {
+      await fixture.close();
+    }
+  }, 15_000);
+
+  it("fills the requested search limit from one healthy retrieval leg", async () => {
+    const fixture = await createMemoryFixture();
+
+    try {
+      let nowMs = TEST_NOW_MS;
+      // No embedder: vector leg stays empty so lexical alone must fill limit.
+      const store = createMemoryStore(memoryDb(fixture), slackContext(), {
+        now: () => nowMs,
+      });
+      const ids: string[] = [];
+      for (let index = 0; index < 55; index += 1) {
+        nowMs = TEST_NOW_MS + index;
+        const created = await store.createConversationMemory({
+          content: `Deploy freeze checklist item ${index}`,
+          kind: "knowledge",
+          idempotencyKey: `memory-test:search-leg-fill-${index}`,
+        });
+        ids.push(created.memory.id);
+      }
+
+      const results = await store.searchMemories({
+        limit: 50,
+        query: "deploy freeze checklist",
+      });
+      expect(results).toHaveLength(50);
+      expect(results.every((memory) => ids.includes(memory.id))).toBe(true);
     } finally {
       await fixture.close();
     }

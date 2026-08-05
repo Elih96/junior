@@ -65,7 +65,13 @@ exported types, tools, and tests are authoritative.
 - Search combines independently ranked vector and PostgreSQL full-text matches
   with reciprocal rank fusion; provider-specific raw scores are never added
   together.
-- Automatic recall retrieves a broad candidate window, then uses the
+- Both retrieval legs always run in parallel as bounded top-k probes. Each leg
+  fetches at least the caller's requested limit (and never more than the store
+  limit ceiling). Recall keeps a smaller overfetch window than explicit search
+  and slightly prefers lexical ranks so exact tokens survive soft semantic
+  neighbors. Vector recall also applies the cosine distance cutoff in SQL, and
+  embeddings use an HNSW cosine index (`vector_cosine_ops`).
+- Automatic recall retrieves a bounded candidate window, then uses the
   memory-owned relevance model to admit at most five directly useful memories.
   An empty result contributes no filler prompt text.
 - Every completed automatic recall attempt emits an invisible, namespaced
@@ -84,8 +90,8 @@ exported types, tools, and tests are authoritative.
 - `memoryPlugin({ disableExtraction: true })` disables passive session
   extraction. The two flags are independent and do not disable explicit memory
   tools.
-- `MEMORY_RECALL_MAX_VECTOR_DISTANCE` or
-  `recallMaxVectorDistance` configures the vector candidate threshold.
+- Automatic recall uses a fixed cosine distance cutoff of `0.45` (for
+  `text-embedding-3-small`). Explicit search does not apply that cutoff.
 - Generate schema changes with `pnpm --filter @sentry/junior-memory db:generate`.
 
 Follow `../../policies/data-redaction.md`, `../../policies/security.md`, and the

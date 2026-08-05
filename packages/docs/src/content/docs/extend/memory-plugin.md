@@ -16,7 +16,7 @@ New apps created with `junior init` include `memoryPlugin()` in `plugins.ts` by 
 
 ## Prerequisites
 
-Provision a Postgres database with pgvector support before running migrations. The memory plugin migrations create the `vector` and `btree_gin` extensions, store 1536-dimensional embeddings, and maintain a scope-aware full-text search index. Most managed Postgres providers — Neon, Supabase, Railway, and AWS RDS/Aurora PostgreSQL with pgvector enabled — support this out of the box.
+Provision a Postgres database with pgvector support before running migrations. The memory plugin migrations create the `vector` and `btree_gin` extensions, store 1536-dimensional embeddings, maintain a scope-aware full-text search index, and create an HNSW cosine index on embeddings for hybrid recall. Most managed Postgres providers — Neon, Supabase, Railway, and AWS RDS/Aurora PostgreSQL with pgvector enabled — support this out of the box.
 
 ## Install
 
@@ -70,9 +70,8 @@ export const plugins = defineJuniorPlugins([
 | `JUNIOR_SQL_STATEMENT_TIMEOUT_MS`   | No       | Runtime PostgreSQL statement timeout in milliseconds. Defaults to `30000`; set `0` to disable.                                                                                                               |
 | `AI_EMBEDDING_MODEL`                | No       | Embedding model for vector search. Defaults to `openai/text-embedding-3-small` (1536 dims).                                                                                                                  |
 | `AI_MEMORY_MODEL`                   | No       | Model for memory classification, consolidation, and automatic recall relevance. Defaults to the app's structured model.                                                                                      |
-| `MEMORY_RECALL_MAX_VECTOR_DISTANCE` | No       | Maximum cosine distance for vector recall candidates. Values 0–1; lower = stricter. Values above 1 are clamped to 1. Default `0.45` suits `text-embedding-3-small`. Tune when changing `AI_EMBEDDING_MODEL`. |
 
-`AI_EMBEDDING_MODEL` must produce 1536-dimensional vectors. Changing this value after memories exist requires flushing the `junior_memory_embeddings` table and re-running to regenerate vectors with the new model.
+`AI_EMBEDDING_MODEL` must produce 1536-dimensional vectors. Changing this value after memories exist requires flushing the `junior_memory_embeddings` table and re-running to regenerate vectors with the new model. Automatic recall keeps a fixed cosine distance cutoff of `0.45` for `text-embedding-3-small`; retune that constant in the memory store if the embedding model changes.
 
 For non-Neon managed Postgres (Railway, Supabase, AWS RDS, or self-hosted), set `JUNIOR_DATABASE_DRIVER=postgres`. Local URLs (`localhost`, `127.0.0.1`) automatically use the `postgres` driver.
 
@@ -107,7 +106,7 @@ After setting `DATABASE_URL`, run the upgrade command to apply the memory plugin
 pnpm junior upgrade
 ```
 
-On a fresh database, this creates the `vector` and `btree_gin` extensions, the `junior_memory_memories` table, and the `junior_memory_embeddings` table with a `vector(1536)` column.
+On a fresh database, this creates the `vector` and `btree_gin` extensions, the `junior_memory_memories` table, and the `junior_memory_embeddings` table with a `vector(1536)` column plus its HNSW cosine index.
 
 ## Verify
 
