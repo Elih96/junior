@@ -114,17 +114,39 @@ test("opens scheduled and event tasks in the native Tasks view", async ({
   await expect(page.getByLabel("GitHub event task")).toBeVisible();
   await expect(page.getByText("#project-updates").last()).toBeVisible();
   await expect(page.getByText("Assigned to")).toHaveCount(0);
-  await expect(page.getByText("Task details")).not.toBeVisible();
-  await page
-    .getByRole("button", {
-      name: "View task details: Send the weekly project summary",
-    })
-    .click();
-  await expect(page.getByText("Task details")).toBeVisible();
-  await expect(page.getByRole("link", { name: "you" }).first()).toHaveAttribute(
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  const taskDetailsTrigger = page.getByRole("button", {
+    name: "View task details: Send the weekly project summary",
+  });
+  await taskDetailsTrigger.click();
+  const details = page.getByRole("dialog", { name: "scheduled task" });
+  await expect(details).toBeVisible();
+  await expect
+    .poll(() => page.evaluate(() => document.body.style.overflow))
+    .toBe("hidden");
+  const closeTaskDetails = details.getByRole("button", {
+    name: "Close task details",
+  });
+  await expect(closeTaskDetails).toBeFocused();
+  await page.keyboard.press("Shift+Tab");
+  await expect(closeTaskDetails).not.toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(closeTaskDetails).toBeFocused();
+  await expect(details.getByText("Task details")).toBeVisible();
+  await expect(details.getByText("Instruction")).toBeVisible();
+  await expect(
+    details.getByText("Send the weekly project summary"),
+  ).toBeVisible();
+  await expect(details.getByRole("link", { name: "you" })).toHaveAttribute(
     "href",
     "/people/morgan%40sentry.io",
   );
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect
+    .poll(() => page.evaluate(() => document.body.style.overflow))
+    .toBe("");
+  await expect(taskDetailsTrigger).toBeFocused();
   await expect(
     page.getByText("Notify responders when the incident changes"),
   ).not.toBeVisible();
@@ -143,7 +165,9 @@ test("opens scheduled and event tasks in the native Tasks view", async ({
       name: "View task details: Notify responders when the incident changes",
     })
     .click();
-  const creatorLink = page.getByRole("link", { name: "Avery Chen" });
+  const publicDetails = page.getByRole("dialog");
+  await expect(publicDetails).toBeVisible();
+  const creatorLink = publicDetails.getByRole("link", { name: "Avery Chen" });
   await expect(creatorLink).toHaveAttribute(
     "href",
     "/people/avery%40sentry.io",

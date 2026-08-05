@@ -1,24 +1,23 @@
 import { type ReactNode, useMemo, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import type { TaskSummary } from "@sentry/junior/api/schema";
-import { Link } from "react-router";
 import {
   CalendarClock,
   ChevronRight,
   Globe2,
-  MapPin,
-  Search,
   Trash2,
   UserRound,
 } from "lucide-react";
 import { useTasksData } from "../../api";
 import { Button, ToggleButton } from "../../components/Button";
 import { LoadingView } from "../../components/LoadingView";
+import { SearchInput } from "../../components/SearchInput";
 import { Card } from "../../components/layout/Card";
 import { PageHeader } from "../../components/layout/PageHeader";
 import { deleteDashboardResource } from "../../http";
-import { conversationPath, formatTime, peoplePath } from "../../format";
+import { formatTime } from "../../format";
 import { cn, dashboardContainerClass } from "../../styles";
+import { TaskDetailsDrawer } from "./TaskDetailsDrawer";
 import { TaskExecutionChart } from "./TaskExecutionChart";
 
 type TaskFilter = "all" | TaskSummary["kind"];
@@ -92,6 +91,10 @@ export function TasksPage(props: { enabled: boolean }) {
     [filter, scopedTasks, search],
   );
   const visibleTaskCount = visibleTasks.length;
+  const selectedTask = useMemo(
+    () => tasks.find((task) => `${task.kind}:${task.id}` === selectedTaskKey),
+    [selectedTaskKey, tasks],
+  );
   const deletion = useMutation({
     mutationFn: async (task: TaskSummary) => {
       await deleteDashboardResource(
@@ -151,23 +154,15 @@ export function TasksPage(props: { enabled: boolean }) {
               </ToggleButton>
             ))}
           </TaskFilterGroup>
-          <label className="relative min-w-0">
-            <span className="mb-2 block font-mono text-[0.62rem] uppercase tracking-[0.12em] text-dashboard-text-muted">
-              Search
-            </span>
-            <Search
-              aria-hidden="true"
-              className="pointer-events-none absolute bottom-[0.68rem] left-3 text-dashboard-text-muted"
-              size={15}
-            />
-            <input
-              className="h-9 w-full rounded border border-white/15 bg-black pr-3 pl-9 text-sm text-dashboard-text placeholder:text-dashboard-text-muted focus:border-cyan-300/50 focus:outline-none"
-              onChange={(event) => setSearchText(event.target.value)}
+          <TaskFilterGroup label="Search">
+            <SearchInput
+              className="w-full lg:max-w-sm"
+              label="Search tasks"
+              onChange={setSearchText}
               placeholder="Instruction, location, or creator"
-              type="search"
               value={searchText}
             />
-          </label>
+          </TaskFilterGroup>
         </Card>
         <div className="flex flex-wrap items-baseline justify-between gap-x-5 gap-y-1 border-b border-white/[0.07] pb-3">
           <p className="m-0 font-display text-lg text-dashboard-text">
@@ -232,6 +227,10 @@ export function TasksPage(props: { enabled: boolean }) {
           </p>
         ) : null}
       </section>
+      <TaskDetailsDrawer
+        onClose={() => setSelectedTaskKey(undefined)}
+        task={selectedTask}
+      />
     </div>
   );
 }
@@ -372,7 +371,7 @@ function TaskRow(props: {
         </div>
         <button
           aria-expanded={props.selected}
-          aria-label={`${props.selected ? "Hide" : "View"} task details: ${task.instruction}`}
+          aria-label={`View task details: ${task.instruction}`}
           className="grid size-8 cursor-pointer place-items-center rounded border border-transparent bg-transparent text-dashboard-text-muted transition-colors hover:border-white/10 hover:bg-white/[0.04] hover:text-dashboard-text"
           onClick={props.onSelect}
           type="button"
@@ -381,7 +380,7 @@ function TaskRow(props: {
             aria-hidden="true"
             className={cn(
               "transition-transform",
-              props.selected && "rotate-90",
+              props.selected && "translate-x-0.5 text-cyan-200",
             )}
             size={16}
           />
@@ -400,79 +399,7 @@ function TaskRow(props: {
           <span aria-hidden="true" className="size-8" />
         )}
       </div>
-      {props.selected ? <TaskDetails task={task} /> : null}
     </article>
-  );
-}
-
-function TaskDetails(props: { task: TaskSummary }) {
-  const { task } = props;
-  const createdBy = task.createdByEmail ? (
-    <Link
-      className="font-semibold text-dashboard-text underline decoration-white/20 underline-offset-2 transition-colors hover:decoration-white/60"
-      to={peoplePath(task.createdByEmail)}
-    >
-      {task.ownedByViewer ? "you" : task.createdBy}
-    </Link>
-  ) : task.ownedByViewer ? (
-    "you"
-  ) : (
-    task.createdBy
-  );
-  const details =
-    task.kind === "scheduled"
-      ? [
-          { label: "Schedule", value: task.schedule },
-          {
-            label: "Next run",
-            value: task.nextRunAt ? formatRunDate(task.nextRunAt) : "None",
-          },
-        ]
-      : [
-          { label: "Resource", value: task.resource },
-          { label: "Events", value: task.events.join(", ") },
-        ];
-  return (
-    <div className="border-t border-cyan-300/10 bg-black/20 p-4 sm:p-5">
-      <div className="font-mono text-[0.56rem] uppercase tracking-[0.12em] text-cyan-200/65">
-        Task details
-      </div>
-      <p className="mt-2 mb-0 max-w-4xl font-display text-lg leading-relaxed text-dashboard-text">
-        {task.instruction}
-      </p>
-      <dl className="mt-4 grid gap-px overflow-hidden rounded border border-white/[0.06] bg-white/[0.055] sm:grid-cols-2 lg:grid-cols-4">
-        {details.map((detail) => (
-          <TaskDetail key={detail.label} label={detail.label}>
-            {detail.value}
-          </TaskDetail>
-        ))}
-        <TaskDetail label="Destination">
-          <span className="inline-flex items-center gap-1.5">
-            <MapPin aria-hidden="true" className="text-cyan-300/70" size={13} />
-            {task.destination.label} · {task.destination.visibility}
-          </span>
-        </TaskDetail>
-        <TaskDetail label="Created">
-          {createdBy} · {formatDate(task.createdAt)}
-        </TaskDetail>
-        <TaskDetail label="Executions">
-          <TaskExecutionSummary task={task} compact />
-        </TaskDetail>
-      </dl>
-    </div>
-  );
-}
-
-function TaskDetail(props: { children: ReactNode; label: string }) {
-  return (
-    <div className="min-w-0 bg-[#09090b] px-3 py-3">
-      <dt className="font-mono text-[0.54rem] uppercase tracking-[0.12em] text-dashboard-text-muted">
-        {props.label}
-      </dt>
-      <dd className="mt-1.5 ml-0 break-words text-sm leading-relaxed text-dashboard-text">
-        {props.children}
-      </dd>
-    </div>
   );
 }
 
@@ -548,42 +475,5 @@ function TaskTag(props: {
     >
       {props.children}
     </span>
-  );
-}
-
-function TaskExecutionSummary(props: {
-  compact?: boolean;
-  task: Pick<
-    TaskSummary,
-    "lastConversationId" | "lastRunAt" | "runsLast7Days" | "totalRuns"
-  >;
-}) {
-  const { task } = props;
-  return (
-    <div
-      className={cn(
-        "text-sm text-dashboard-text-muted",
-        !props.compact && "mt-3",
-      )}
-    >
-      <span className="text-dashboard-text">
-        {task.runsLast7Days} runs / 7d
-      </span>
-      <span className="mx-2 opacity-45">·</span>
-      <span>
-        {task.totalRuns} total
-        {task.lastRunAt ? " · Last execution " : " · Never run"}
-        {task.lastRunAt && task.lastConversationId ? (
-          <Link
-            className="text-dashboard-text underline decoration-white/20 underline-offset-2 hover:decoration-white/60"
-            to={conversationPath(task.lastConversationId)}
-          >
-            {formatRunDate(task.lastRunAt)}
-          </Link>
-        ) : task.lastRunAt ? (
-          formatRunDate(task.lastRunAt)
-        ) : null}
-      </span>
-    </div>
   );
 }
