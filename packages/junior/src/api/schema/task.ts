@@ -16,7 +16,11 @@ const taskSummaryBaseSchema = z.object({
   destination: taskDestinationSchema,
   id: z.string().min(1),
   instruction: z.string().min(1),
+  lastConversationId: z.string().min(1).optional(),
+  lastRunAt: z.string().datetime().optional(),
   ownedByViewer: z.boolean(),
+  runsLast7Days: z.number().int().nonnegative(),
+  totalRuns: z.number().int().nonnegative(),
 });
 
 export const scheduledTaskSummarySchema = taskSummaryBaseSchema
@@ -43,8 +47,34 @@ export const taskSummarySchema = z.discriminatedUnion("kind", [
   eventTaskSummarySchema,
 ]);
 
+/** One registered plugin background task with run frequency and recency. */
+export const registeredTaskSummarySchema = z
+  .object({
+    id: z.string().min(1),
+    lastConversationId: z.string().min(1).optional(),
+    lastRunAt: z.string().datetime().optional(),
+    name: z.string().min(1),
+    pluginDisplayName: z.string().min(1),
+    pluginName: z.string().min(1),
+    runsLast7Days: z.number().int().nonnegative(),
+    totalRuns: z.number().int().nonnegative(),
+  })
+  .strict();
+
+/** One UTC day of successful task executions stacked by task type. */
+export const taskExecutionDaySchema = z
+  .object({
+    date: z.string().min(1),
+    event: z.number().int().nonnegative(),
+    registered: z.number().int().nonnegative(),
+    scheduled: z.number().int().nonnegative(),
+  })
+  .strict();
+
 export const taskListSchema = z
   .object({
+    executionDays: z.array(taskExecutionDaySchema),
+    registeredTasks: z.array(registeredTaskSummarySchema),
     tasks: z.array(taskSummarySchema),
     truncated: z.boolean(),
   })
@@ -57,5 +87,9 @@ export const taskParamsSchema = z
   })
   .strict();
 
+export type RegisteredTaskSummary = z.output<
+  typeof registeredTaskSummarySchema
+>;
+export type TaskExecutionDay = z.output<typeof taskExecutionDaySchema>;
 export type TaskSummary = z.output<typeof taskSummarySchema>;
 export type TaskList = z.output<typeof taskListSchema>;

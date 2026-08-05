@@ -9,6 +9,7 @@ import { createEventTask, getEventTask } from "@/chat/event-tasks/store";
 import { resolveViewerUserFromSql } from "@/chat/plugins/viewer";
 import { createSchedulerSqlStore } from "@/chat/scheduled-tasks/store";
 import type { ScheduledTask } from "@/chat/scheduled-tasks/types";
+import { recordTaskExecution } from "@/chat/tasks/execution-stats";
 import { createConfiguredJuniorSqlFixture } from "../../fixtures/sql";
 
 function authenticatedApi(email: string) {
@@ -198,11 +199,57 @@ describe("Tasks API", () => {
         },
       });
 
+      for (const conversationId of [
+        "agent-dispatch:sched-run-1",
+        "agent-dispatch:sched-run-2",
+        "agent-dispatch:event-run-1",
+      ]) {
+        await conversationStore.recordActivity({
+          conversationId,
+          actor: {
+            email: "viewer@example.com",
+            platform: "slack",
+            slackUserId: "U123",
+            teamId: "T123",
+          },
+          destination: {
+            channelId: "C123",
+            platform: "slack",
+            teamId: "T123",
+          },
+          title: "Task execution fixture",
+          visibility: "public",
+        });
+      }
+
+      await recordTaskExecution("scheduled", "sched_tasks_api", {
+        conversationId: "agent-dispatch:sched-run-1",
+        executionId: "sched-run-1",
+        nowMs: Date.parse("2026-08-04T12:00:00.000Z"),
+      });
+      await recordTaskExecution("scheduled", "sched_tasks_api", {
+        conversationId: "agent-dispatch:sched-run-2",
+        executionId: "sched-run-2",
+        nowMs: Date.parse("2026-08-04T13:00:00.000Z"),
+      });
+      await recordTaskExecution("event", "event_tasks_api", {
+        conversationId: "agent-dispatch:event-run-1",
+        executionId: "sched-run-1",
+        nowMs: Date.parse("2026-08-03T12:00:00.000Z"),
+      });
+      await recordTaskExecution("scheduled", "sched_tasks_api", {
+        conversationId: "agent-dispatch:sched-run-2",
+        executionId: "sched-run-2",
+        nowMs: Date.parse("2026-08-04T13:00:00.000Z"),
+      });
+
       const response = await authenticatedApi("VIEWER@example.com").request(
         "http://localhost/api/tasks",
       );
       expect(response.status).toBe(200);
       expect(taskListSchema.parse(await response.json())).toEqual({
+        executionDays: expect.any(Array),
+        registeredTasks: [],
         tasks: [
           expect.objectContaining({
             createdBy: "Aisha Patel",
@@ -232,8 +279,12 @@ describe("Tasks API", () => {
             createdByEmail: "viewer@example.com",
             id: "event_tasks_api",
             kind: "event",
+            lastConversationId: "agent-dispatch:event-run-1",
+            lastRunAt: "2026-08-03T12:00:00.000Z",
             ownedByViewer: true,
+            runsLast7Days: 1,
             source: "linear",
+            totalRuns: 1,
             triggerAvailable: false,
           }),
           expect.objectContaining({
@@ -244,9 +295,13 @@ describe("Tasks API", () => {
             id: "sched_tasks_api",
             instruction: "Untitled scheduled task",
             kind: "scheduled",
+            lastConversationId: "agent-dispatch:sched-run-2",
+            lastRunAt: "2026-08-04T13:00:00.000Z",
             ownedByViewer: true,
+            runsLast7Days: 2,
             schedule: "Schedule unavailable",
             status: "active",
+            totalRuns: 2,
           }),
         ],
         truncated: false,
@@ -273,6 +328,7 @@ describe("Tasks API", () => {
       ).request("http://localhost/api/tasks");
       expect(crowdedResponse.status).toBe(200);
       const crowdedList = taskListSchema.parse(await crowdedResponse.json());
+      expect(crowdedList.executionDays).toHaveLength(90);
       expect(crowdedList.tasks).toHaveLength(102);
       expect(
         crowdedList.tasks
@@ -304,6 +360,7 @@ describe("Tasks API", () => {
       ).request("http://localhost/api/tasks");
       expect(privateResponse.status).toBe(200);
       const privateList = taskListSchema.parse(await privateResponse.json());
+      expect(privateList.executionDays).toHaveLength(90);
       expect(privateList.tasks.map((task) => task.id)).toEqual([
         "event_tasks_api",
         "sched_tasks_api",
