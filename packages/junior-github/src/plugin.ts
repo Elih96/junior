@@ -386,12 +386,30 @@ function githubApiWriteGrantName(
     return "installation-write";
   }
   if (
+    method === "POST" &&
+    /^\/repos\/[^/]+\/[^/]+\/pulls\/[^/]+\/comments(?:\/[^/]+\/replies)?$/.test(
+      pathname,
+    )
+  ) {
+    // Inline review comments and thread replies post as the App bot.
+    return "installation-write";
+  }
+  if (
+    (method === "PATCH" || method === "DELETE") &&
+    /^\/repos\/[^/]+\/[^/]+\/pulls\/comments\/[^/]+$/.test(pathname)
+  ) {
+    // Update/delete of inline review comments also stay bot-owned.
+    return "installation-write";
+  }
+  if (
     /^\/repos\/[^/]+\/[^/]+\/pulls\/[^/]+\/reviews(?:\/[^/]+(?:\/(events|dismissals))?)?$/.test(
       pathname,
     ) &&
     !HTTP_READ_METHODS.has(method)
   ) {
-    return "user-write";
+    // Bot-authored reviews use the App installation identity so headless and
+    // interactive review feedback both post as Junior, not the requesting user.
+    return "installation-write";
   }
   return undefined;
 }
