@@ -1,4 +1,21 @@
 # Changelog
+## 0.134.0
+
+### New Features ✨
+
+- (chat) Load repository AGENTS.md context by @dcramer in [#1229](https://github.com/getsentry/junior/pull/1229)
+- (dashboard) Show per-task execution analytics by @sentry-junior in [#1220](https://github.com/getsentry/junior/pull/1220)
+- (memory) Add recall and extraction flags by @sentry-junior in [#1245](https://github.com/getsentry/junior/pull/1245)
+
+### Bug Fixes 🐛
+
+- (github) Post PR reviews and inline comments as the App bot by @sentry-junior in [#1252](https://github.com/getsentry/junior/pull/1252)
+- (slack) Make user lookup reliable across models by @Elih96 in [#1251](https://github.com/getsentry/junior/pull/1251)
+
+### Internal Changes 🔧
+
+- (memory) Harden hybrid automatic recall by @sentry-junior in [#1250](https://github.com/getsentry/junior/pull/1250)
+
 ## 0.133.0
 
 ### New Features ✨
