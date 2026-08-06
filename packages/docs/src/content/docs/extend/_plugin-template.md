@@ -6,6 +6,7 @@ prerequisites:
   - /extend/
 related:
   - /extend/
+  - /concepts/resource-subscriptions/
   - /reference/config-and-env/
 ---
 
@@ -59,6 +60,42 @@ If no variables are required, replace the table with a single sentence:
 ## Plugin-specific setup
 
 Explain the provider-specific setup after install and environment configuration. Keep this section concrete and action-oriented.
+
+## Resource subscriptions
+
+If the plugin publishes resource events, list every resource type the agent can
+subscribe to. Link to [Resource Subscriptions](/concepts/resource-subscriptions/)
+for the core distinction between temporary resource subscriptions and durable
+event tasks; do not redefine those behaviors on every plugin page.
+
+Use one subsection per resource type, then one collapsed disclosure per event.
+Show the exact event name in the summary and its plain-language description
+inside. Do not add a separate subscription-details row.
+
+### `issue`
+
+<details class="resource-event">
+<summary><code>issue.closed</code></summary>
+
+The issue was closed.
+
+</details>
+
+<details class="resource-event">
+<summary><code>issue.reopened</code></summary>
+
+The issue was reopened.
+
+</details>
+
+Use the exact `resourceTypes[].type` and `supportedEvents` values registered by
+the plugin. Do not omit registered events. Keep descriptions to one sentence.
+Explain provider setup and identifier formats in normal prose after the resource
+subsections only when users need that information.
+
+If the plugin does not publish resource events, use this sentence instead:
+
+`This plugin does not support resource subscriptions.`
 
 ## Verify
 
