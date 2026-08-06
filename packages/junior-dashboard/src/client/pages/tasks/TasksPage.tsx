@@ -1,4 +1,5 @@
-import { type ReactNode, useMemo, useState } from "react";
+import { type ReactNode, useMemo } from "react";
+import { useLocation, useNavigate, useParams } from "react-router";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import type { TaskSummary } from "@sentry/junior/api/schema";
 import {
@@ -16,12 +17,24 @@ import { Card } from "../../components/layout/Card";
 import { PageHeader } from "../../components/layout/PageHeader";
 import { deleteDashboardResource } from "../../http";
 import { formatTime } from "../../format";
+import {
+  pathWithSearch,
+  useDebouncedSearchParam,
+  useSearchParamEnum,
+} from "../../searchParams";
 import { cn, dashboardContainerClass } from "../../styles";
 import { TaskDetailsDrawer } from "./TaskDetailsDrawer";
 import { TaskExecutionChart } from "./TaskExecutionChart";
 
 type TaskFilter = "all" | TaskSummary["kind"];
 type TaskScope = "mine" | "public";
+
+const TASK_FILTERS = [
+  "all",
+  "scheduled",
+  "event",
+] as const satisfies readonly TaskFilter[];
+const TASK_SCOPES = ["mine", "public"] as const satisfies readonly TaskScope[];
 
 function formatDate(value: string): string {
   return formatTime(value, {
@@ -62,11 +75,15 @@ function taskMatches(task: TaskSummary, search: string): boolean {
 export function TasksPage(props: { enabled: boolean }) {
   const query = useTasksData(props.enabled);
   const queryClient = useQueryClient();
-  const [filter, setFilter] = useState<TaskFilter>("all");
-  const [scope, setScope] = useState<TaskScope>("mine");
-  const [searchText, setSearchText] = useState("");
-  const [selectedTaskKey, setSelectedTaskKey] = useState<string>();
-  const search = searchText.trim().toLowerCase();
+  const navigate = useNavigate();
+  const location = useLocation();
+  const { taskId } = useParams();
+  const [filter, setFilter] = useSearchParamEnum("type", "all", TASK_FILTERS);
+  const [scope, setScope] = useSearchParamEnum("scope", "mine", TASK_SCOPES);
+  const [searchText, setSearchText, searchQuery] = useDebouncedSearchParam();
+  const search = searchQuery.toLowerCase();
+  const tasksPath = (pathname: string) =>
+    pathWithSearch(pathname, location.search);
   const tasks = query.data?.tasks ?? [];
   const mineCount = tasks.filter((task) => task.ownedByViewer).length;
   const publicCount = tasks.filter(
@@ -92,8 +109,8 @@ export function TasksPage(props: { enabled: boolean }) {
   );
   const visibleTaskCount = visibleTasks.length;
   const selectedTask = useMemo(
-    () => tasks.find((task) => `${task.kind}:${task.id}` === selectedTaskKey),
-    [selectedTaskKey, tasks],
+    () => tasks.find((task) => task.id === taskId),
+    [taskId, tasks],
   );
   const deletion = useMutation({
     mutationFn: async (task: TaskSummary) => {
@@ -204,11 +221,15 @@ export function TasksPage(props: { enabled: boolean }) {
                       }
                     }}
                     onSelect={() =>
-                      setSelectedTaskKey((current) =>
-                        current === key ? undefined : key,
+                      navigate(
+                        tasksPath(
+                          taskId === task.id
+                            ? "/tasks"
+                            : `/tasks/${encodeURIComponent(task.id)}`,
+                        ),
                       )
                     }
-                    selected={selectedTaskKey === key}
+                    selected={taskId === task.id}
                     task={task}
                   />
                 );
@@ -228,7 +249,7 @@ export function TasksPage(props: { enabled: boolean }) {
         ) : null}
       </section>
       <TaskDetailsDrawer
-        onClose={() => setSelectedTaskKey(undefined)}
+        onClose={() => navigate(tasksPath("/tasks"))}
         task={selectedTask}
       />
     </div>
