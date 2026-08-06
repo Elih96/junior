@@ -1,4 +1,10 @@
 # Changelog
+## 0.136.1
+
+### Bug Fixes 🐛
+
+- (memory) Accept canonical system actors by @dcramer in [#1264](https://github.com/getsentry/junior/pull/1264)
+
 ## 0.136.0
 
 ### New Features ✨
