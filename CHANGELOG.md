@@ -1,4 +1,17 @@
 # Changelog
+## 0.136.0
+
+### New Features ✨
+
+- (dashboard) Add shareable task and memory views by @sentry-junior in [#1262](https://github.com/getsentry/junior/pull/1262)
+- (github) Expose pull_request.opened and ready_for_review events by @sentry-junior in [#1259](https://github.com/getsentry/junior/pull/1259)
+- (sentry) Add issue resource events by @sentry-junior in [#1260](https://github.com/getsentry/junior/pull/1260)
+- (vercel) Add project-scoped deployment subscriptions by @sentry-junior in [#1263](https://github.com/getsentry/junior/pull/1263)
+
+### Documentation 📚
+
+- (plugins) Document resource subscriptions by @sentry-junior in [#1261](https://github.com/getsentry/junior/pull/1261)
+
 ## 0.135.0
 
 ### Bug Fixes 🐛
