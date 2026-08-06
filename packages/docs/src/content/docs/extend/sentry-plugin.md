@@ -1,88 +1,124 @@
 ---
 title: Sentry Plugin
-description: Configure Sentry OAuth for per-user investigation workflows.
+description: Configure Sentry OAuth and issue webhooks.
 type: tutorial
 prerequisites:
   - /extend/
 related:
   - /concepts/credentials-and-oauth/
+  - /concepts/resource-subscriptions/
   - /operate/security-hardening/
 ---
 
-The Sentry plugin enables per-user OAuth so Slack users can run Sentry investigations with their own access.
-Junior stores the Sentry grant server-side and only activates it during that
-same user's turn when a Sentry command actually needs auth.
+Use the Sentry plugin to investigate issues with a user's Sentry account and respond to new issues through resource subscriptions and event tasks.
+
+Junior stores each user's OAuth grant and uses it only for that user's requests. Webhooks use a separate internal integration.
 
 ## Install
-
-Install the plugin package alongside `@sentry/junior`:
 
 ```bash
 pnpm add @sentry/junior @sentry/junior-sentry
 ```
 
-## Runtime setup
-
-Add the package name to the plugin set exported from `plugins.ts`:
-
 ```ts title="plugins.ts"
 import { defineJuniorPlugins } from "@sentry/junior";
+import { sentryPlugin } from "@sentry/junior-sentry";
 
-export const plugins = defineJuniorPlugins(["@sentry/junior-sentry"]);
+export const plugins = defineJuniorPlugins([sentryPlugin()]);
 ```
+
+Register `sentryPlugin()` so Junior loads the webhook route.
 
 ## Configure environment variables
 
-Set these values in the host environment:
+| Variable                | Required | Purpose                                                |
+| ----------------------- | -------- | ------------------------------------------------------ |
+| `SENTRY_CLIENT_ID`      | Yes      | User OAuth client ID.                                  |
+| `SENTRY_CLIENT_SECRET`  | Yes      | User OAuth client secret.                              |
+| `SENTRY_WEBHOOK_ORG`    | No       | Sentry organization slug allowed to send webhooks.     |
+| `SENTRY_WEBHOOK_SECRET` | No       | Internal integration client secret for issue webhooks. |
 
-| Variable               | Required | Purpose              |
-| ---------------------- | -------- | -------------------- |
-| `SENTRY_CLIENT_ID`     | Yes      | OAuth client ID.     |
-| `SENTRY_CLIENT_SECRET` | Yes      | OAuth client secret. |
+## Set up user OAuth
 
-## Create the Sentry OAuth application
-
-Create an OAuth application in Sentry and set its redirect URL to:
+Create a Sentry OAuth app with this redirect URL:
 
 ```text
 <base-url>/api/oauth/callback/sentry
 ```
 
-Then copy the client ID and client secret into your deployment environment as `SENTRY_CLIENT_ID` and `SENTRY_CLIENT_SECRET`.
+Set `SENTRY_CLIENT_ID` and `SENTRY_CLIENT_SECRET` to the app's credentials. Junior requests these scopes:
 
-Junior requests these Sentry OAuth scopes:
+`alerts:write event:write member:read org:read project:releases project:write team:write`
 
-- `event:read`
-- `org:read`
-- `project:read`
-- `team:read`
+Reconnect after scope changes. Existing grants do not pick up new scopes automatically.
+
+## Set up issue webhooks
+
+Create a **Sentry internal integration** in the organization that should send issue webhooks. A public Sentry app is not required.
+
+1. Create an internal integration.
+2. Enable the **issue** webhook resource.
+3. Set the webhook URL to:
+
+```text
+https://<junior-host>/api/webhooks/sentry
+```
+
+4. Set `SENTRY_WEBHOOK_ORG` to the organization slug.
+5. Set `SENTRY_WEBHOOK_SECRET` to the integration's client secret.
+6. Redeploy Junior.
+
+Junior verifies each webhook signature and accepts webhooks only from the configured organization.
+
+## Resource subscriptions
+
+Set `SENTRY_WEBHOOK_ORG` and `SENTRY_WEBHOOK_SECRET` to enable resource subscriptions. See [Resource Subscriptions](/concepts/resource-subscriptions/) for the difference between temporary subscriptions and durable event tasks.
+
+### `issue`
+
+Subscribe to one issue with `org/project#issueId`.
+
+<details class="resource-event">
+<summary><code>issue.created</code></summary>
+
+The issue was created.
+
+</details>
+
+### `project`
+
+Subscribe to all new issues in a project with `org/project`.
+
+<details class="resource-event">
+<summary><code>issue.created</code></summary>
+
+An issue was created in the project.
+
+</details>
+
+Create the subscription or event task before the issue arrives. Junior does not replay earlier webhooks.
 
 ## Verify
 
-Run the auth flow and then make a real Sentry request:
+**OAuth:** Connect Sentry from Slack, then query an issue or organization.
 
-1. User asks Junior to connect Sentry for their account.
-2. Junior sends the private authorization link.
-3. The OAuth callback stores the token and resumes the original request.
-4. User runs a real Sentry query in Slack, naming the org and project explicitly if the workspace spans multiple targets.
+**Webhooks:** Subscribe to a project, then create a test issue in that project.
 
-Confirm the auth flow completes, the query returns expected data, and re-auth works after token invalidation.
+## Security
 
-## Security model
-
-- The real Sentry token stays in host-managed storage and is never printed back to the model.
-- Junior injects Sentry auth only for the requesting user's turn.
-- Missing or stale auth triggers a private reconnect flow and resumes the blocked request after consent.
+- Junior stores user tokens and does not include them in model input.
+- Webhooks use the internal integration client secret, not user OAuth.
+- Missing or stale user authorization starts a private reconnect flow.
 
 ## Failure modes
 
-- Callback errors after consent: the OAuth redirect URL does not exactly match `<base-url>/api/oauth/callback/sentry`. Update the OAuth app redirect URL and retry.
-- `401` after authorization: the stored token is stale or revoked. Reconnect Sentry and retry.
-- Explicit `missing scope` or `insufficient scope` after authorization: reconnect Sentry to refresh the stored grant, then retry.
-- Generic `403` after authorization: the connected account lacks access to the target org or project. Reconnect with an account that can access the target org, or change the request target.
-- Auth link points at the wrong host: `JUNIOR_BASE_URL` is unset or incorrect. Set it to the canonical public base URL used for callbacks.
-- Query still targets the wrong org or project: Junior does not have enough target context for this request. Include the org and project directly in the Sentry request and retry.
+- **OAuth callback fails:** Set the app's redirect URL to exactly `<base-url>/api/oauth/callback/sentry`.
+- **Sentry returns `401`:** Reconnect Sentry to replace the stale or revoked token.
+- **Sentry reports a missing scope:** Reconnect Sentry to grant the current scopes.
+- **Sentry returns `403`:** Connect an account with access to the requested organization and project.
+- **Webhooks are ignored:** Check `SENTRY_WEBHOOK_ORG` and `SENTRY_WEBHOOK_SECRET`, then confirm a matching subscription or event task exists.
+- **Authorization links use the wrong host:** Set `JUNIOR_BASE_URL` to Junior's public URL.
 
 ## Next step
 
-Review [Credentials & OAuth](/concepts/credentials-and-oauth/) and [Security Hardening](/operate/security-hardening/).
+Review [Resource Subscriptions](/concepts/resource-subscriptions/) and [Security Hardening](/operate/security-hardening/).
