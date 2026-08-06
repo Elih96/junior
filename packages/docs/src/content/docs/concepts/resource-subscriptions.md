@@ -1,8 +1,8 @@
 ---
 title: Resource Subscriptions
-description: Follow plugin resource events with temporary updates or durable instructions.
+description: Follow plugin resource events temporarily, or turn them into durable tasks.
 type: conceptual
-summary: Understand the two core tool paths available for plugin resource events.
+summary: Choose a temporary watch for updates or an event task for automation.
 prerequisites:
   - /concepts/skills-and-plugins/
 related:
@@ -10,25 +10,18 @@ related:
   - /extend/
 ---
 
-Plugins can publish normalized resource events for provider resources such as
-issues, pull requests, deployments, or projects. Each plugin page lists the
-resource types and events that plugin supports.
+Plugins can publish events for resources such as issues, pull requests, and deployments. Junior creates a watch or task only when asked.
 
-Junior gives the agent two tool paths for those events:
+## Choose a Watch or Task
 
-- **Resource subscription** — for watch, notify, or tell-me-when requests. A
-  temporary conversation association that delivers matching events back to the
-  current conversation until it expires, completes, or is cancelled. It does not
-  run a stored durable instruction.
-- **Event task** — for whenever-this-happens-do-X automation. A durable
-  instruction that Junior dispatches when a matching resource event occurs, then
-  delivers to its Slack channel or DM. Event tasks remain configured for that
-  destination until deleted, not only the thread where they were created.
+| Type | Use it for | Lifetime |
+| ---- | ---------- | -------- |
+| Resource subscription | “Watch this” or “tell me when” | Temporary and thread-bound |
+| Event task | “Whenever this happens, do this” | Durable and destination-bound |
 
-Both paths use the plugin's registered namespace, resource type, identifier, and
-supported events. Enabling a plugin or configuring its webhook does not create
-either one; the agent creates the requested resource subscription or event task
-through a core tool.
+A resource subscription sends matching updates to the current conversation. It ends when it expires, completes, is cancelled, or Junior leaves the thread.
+
+An event task stores an instruction and runs it for each matching event. It remains attached to its Slack channel or DM until deleted.
 
 ## Examples
 
@@ -36,23 +29,19 @@ through a core tool.
 watch this pull request and tell me when its checks fail
 ```
 
-This asks for a resource subscription because it follows one resource for a
-limited time in the current conversation.
-
 ```text
 whenever an issue is reopened in this repository, summarize why in this channel
 ```
 
-This asks for an event task because it stores an ongoing instruction for future
-matching events.
+## Limits
 
-## Plugin documentation
+- Watches default to 14 days and cannot exceed 30 days.
+- Event data cannot change conversation visibility or credential access.
+- Duplicate provider deliveries should not create duplicate work.
+- Resource events currently require single-workspace Slack mode.
 
-A plugin page should list every supported resource type, the identifier or scope
-it accepts, and every supported event. It should also explain the provider setup
-needed to publish events, such as webhook configuration.
+Each plugin page lists its supported resources, events, and webhook setup.
 
-## Next step
+## Next Step
 
-Choose a plugin from [Plugins](/extend/) and use its resource subscriptions
-section to see what the agent can watch or automate.
+Choose a provider from [Plugins](/extend/), or read [Tasks](/concepts/tasks/) for durable automation.

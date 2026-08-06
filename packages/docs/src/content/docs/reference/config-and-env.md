@@ -7,6 +7,7 @@ prerequisites:
   - /start-here/quickstart/
 related:
   - /extend/
+  - /concepts/security-and-authority/
   - /operate/security-hardening/
 ---
 
