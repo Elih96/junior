@@ -13,6 +13,7 @@ import {
   completeConversationWork,
   CONVERSATION_WORK_LEASE_TTL_MS,
   CONVERSATION_WORK_MAX_DELIVERY_ATTEMPTS,
+  CONVERSATION_WORK_MAX_RETRIES,
   countPendingConversationMessages,
   drainConversationMailbox,
   getConversationWorkState,
@@ -1252,6 +1253,7 @@ describe("conversation work execution", () => {
     const state = await getConversationWorkState({
       conversationId: CONVERSATION_ID,
     });
+    expect(state?.execution.lastProgressAtMs).toBeUndefined();
     expect(state?.messages).toEqual([]);
     expect(state?.execution.inboundMessageIds).toEqual(["m1"]);
     expect(state?.execution.status).toBe("failed");
@@ -1329,6 +1331,33 @@ describe("conversation work execution", () => {
         idempotencyKey: `lost_lease:${CONVERSATION_ID}:2000`,
       },
     ]);
+  });
+
+  it("stops conversation work after repeated lost-lease retries", async () => {
+    const queue = createConversationWorkQueueTestAdapter();
+    let currentNowMs = 1_000;
+    await appendInboundMessage({ message: inboundMessage("m1"), nowMs: 1_000 });
+
+    for (let attempt = 1; attempt <= 5; attempt += 1) {
+      currentNowMs = attempt * 1_000;
+      await expect(
+        processConversationWork(conversationQueueMessage(), {
+          nowMs: () => currentNowMs,
+          queue,
+          run: async () => ({ status: "lost_lease" }),
+        }),
+      ).resolves.toEqual({ status: "lost_lease" });
+    }
+
+    const state = await getConversationWorkState({
+      conversationId: CONVERSATION_ID,
+    });
+    expect(state?.execution.status).toBe("failed");
+    expect(state?.execution.retryCount).toBe(5);
+    expect(state?.lease).toBeUndefined();
+    expect(state?.needsRun).toBe(false);
+    expect(state ? countPendingConversationMessages(state) : 0).toBe(0);
+    expect(queue.sentRecords()).toHaveLength(4);
   });
 
   it("drains pending messages and completes the leased conversation", async () => {
@@ -1685,6 +1714,53 @@ describe("conversation work execution", () => {
         idempotencyKey: `heartbeat:lease:${CONVERSATION_ID}:92000`,
       },
     ]);
+  });
+
+  it("stops heartbeat recovery after repeated lease expirations", async () => {
+    const queue = createConversationWorkQueueTestAdapter();
+    await appendInboundMessage({ message: inboundMessage("m1"), nowMs: 1_000 });
+
+    for (let retry = 1; retry <= CONVERSATION_WORK_MAX_RETRIES; retry += 1) {
+      const acquiredAtMs = retry * 100_000;
+      await expect(
+        startConversationWork({
+          conversationId: CONVERSATION_ID,
+          nowMs: acquiredAtMs,
+        }),
+      ).resolves.toMatchObject({ status: "acquired" });
+      await recoverConversationWork({
+        nowMs: acquiredAtMs + CONVERSATION_WORK_LEASE_TTL_MS,
+        queue,
+      });
+      queue.clearSentRecords();
+    }
+
+    const state = await getConversationWorkState({
+      conversationId: CONVERSATION_ID,
+    });
+    expect(state?.execution.status).toBe("failed");
+    expect(state?.execution.retryCount).toBe(CONVERSATION_WORK_MAX_RETRIES);
+    expect(state?.lease).toBeUndefined();
+    expect(state?.needsRun).toBe(false);
+    expect(state?.messages).toEqual([]);
+  });
+
+  it("does not reset retries when new input arrives", async () => {
+    const queue = createConversationWorkQueueTestAdapter();
+    await appendInboundMessage({ message: inboundMessage("m1"), nowMs: 1_000 });
+    await processConversationWork(conversationQueueMessage(), {
+      nowMs: () => 2_000,
+      queue,
+      run: async () => ({ status: "lost_lease" }),
+    });
+
+    await appendInboundMessage({ message: inboundMessage("m2"), nowMs: 3_000 });
+
+    await expect(
+      getConversationWorkState({ conversationId: CONVERSATION_ID }),
+    ).resolves.toMatchObject({
+      execution: { retryCount: 1 },
+    });
   });
 
   it("prioritizes turn recovery after an execution lease expires", async () => {

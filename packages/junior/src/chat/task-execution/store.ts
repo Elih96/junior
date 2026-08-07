@@ -9,6 +9,7 @@ export {
   CONVERSATION_WORK_CHECK_IN_INTERVAL_MS,
   CONVERSATION_WORK_LEASE_TTL_MS,
   CONVERSATION_WORK_MAX_DELIVERY_ATTEMPTS,
+  CONVERSATION_WORK_MAX_RETRIES,
   CONVERSATION_WORK_STALE_ENQUEUE_MS,
   isFinalAttempt,
   isInvalidConversationRecordError,
@@ -125,6 +126,19 @@ export async function getConversationWorkState(args: {
   state?: StateAdapter;
 }) {
   return await workState.getConversationWorkState(args);
+}
+
+/** Count one failed conversation execution and persist its terminal retry state. */
+export async function recordConversationRetry(args: {
+  conversationId: string;
+  conversationStore?: ConversationStore;
+  leaseToken: string;
+  nowMs?: number;
+  state?: StateAdapter;
+}) {
+  const result = await workState.recordConversationRetry(args);
+  await recordExecutionMetadata(args);
+  return result;
 }
 
 /** Count mailbox messages that have not yet reached the conversation event log. */
@@ -441,6 +455,7 @@ export async function releaseConversationWork(args: {
 export async function completeConversationWork(args: {
   conversationId: string;
   leaseToken: string;
+  madeProgress?: boolean;
   conversationStore?: ConversationStore;
   nowMs?: number;
   state?: StateAdapter;
@@ -479,7 +494,7 @@ export async function deadLetterAttempt(args: {
   return result;
 }
 
-/** Clear an expired durable lease so a later worker can resume safely. */
+/** Recover an expired lease and persist the resulting retry state. */
 export async function clearExpiredConversationLease(args: {
   conversationId: string;
   conversationStore?: ConversationStore;

@@ -60,6 +60,7 @@ export const CONVERSATION_WORK_LEASE_TTL_MS = 90_000;
 export const CONVERSATION_WORK_CHECK_IN_INTERVAL_MS = 15_000;
 export const CONVERSATION_WORK_STALE_ENQUEUE_MS = 60_000;
 export const CONVERSATION_WORK_MAX_DELIVERY_ATTEMPTS = 5;
+export const CONVERSATION_WORK_MAX_RETRIES = 5;
 
 const inboundMessageSourceSchema = z.enum([
   "api",
@@ -130,6 +131,8 @@ export interface ConversationExecution {
   inboundMessageIds: string[];
   lastCheckpointAtMs?: number;
   lastEnqueuedAtMs?: number;
+  lastProgressAtMs?: number;
+  retryCount?: number;
   lease?: Lease;
   pendingCount: number;
   pendingMessages: InboundMessage[];
@@ -434,6 +437,8 @@ function normalizeExecution(
     lease,
     lastCheckpointAtMs: toOptionalNumber(value.lastCheckpointAtMs),
     lastEnqueuedAtMs: toOptionalNumber(value.lastEnqueuedAtMs),
+    lastProgressAtMs: toOptionalNumber(value.lastProgressAtMs),
+    retryCount: toOptionalNumber(value.retryCount),
     runId: toOptionalString(value.runId),
     updatedAtMs: toOptionalNumber(value.updatedAtMs),
   };
@@ -1443,6 +1448,7 @@ export async function startConversationWork(args: {
       lastCheckInAtMs: nowMs,
       expiresAtMs: nowMs + CONVERSATION_WORK_LEASE_TTL_MS,
     };
+    const startsNewRun = current.execution.runId === undefined;
     await writeConversation(
       state,
       lock,
@@ -1457,6 +1463,7 @@ export async function startConversationWork(args: {
               : "running",
           runId: current.execution.runId ?? randomUUID(),
           lastEnqueuedAtMs: undefined,
+          retryCount: startsNewRun ? 0 : current.execution.retryCount,
         },
         nowMs,
       ),
@@ -1569,6 +1576,8 @@ export async function drainConversationMailbox(args: {
             pendingMessages.length === 0
               ? "running"
               : current.execution.status,
+          lastProgressAtMs: nowMs,
+          retryCount: 0,
           pendingMessages,
         },
         nowMs,
@@ -1616,6 +1625,8 @@ export async function ackMessages(args: {
         current,
         {
           ...current.execution,
+          lastProgressAtMs: nowMs,
+          retryCount: 0,
           pendingMessages,
         },
         nowMs,
@@ -1726,10 +1737,47 @@ export async function releaseConversationWork(args: {
   });
 }
 
+/** Count one failed execution attempt and stop the conversation when retries are exhausted. */
+export async function recordConversationRetry(args: {
+  conversationId: string;
+  leaseToken: string;
+  nowMs?: number;
+  state?: StateAdapter;
+}): Promise<"lost_lease" | "recorded" | "stopped"> {
+  const nowMs = args.nowMs ?? now();
+  return await withConversationMutation(args, async (state, lock) => {
+    const current = await readConversation(state, args.conversationId);
+    if (!current || current.execution.lease?.token !== args.leaseToken) {
+      return "lost_lease";
+    }
+    const count = (current.execution.retryCount ?? 0) + 1;
+    const stopped = count >= CONVERSATION_WORK_MAX_RETRIES;
+    await writeConversation(
+      state,
+      lock,
+      withExecutionUpdate(
+        current,
+        {
+          ...current.execution,
+          lastEnqueuedAtMs: undefined,
+          lease: stopped ? undefined : current.execution.lease,
+          retryCount: count,
+          pendingMessages: stopped ? [] : current.execution.pendingMessages,
+          runId: stopped ? undefined : current.execution.runId,
+          status: stopped ? "failed" : "awaiting_resume",
+        },
+        nowMs,
+      ),
+    );
+    return stopped ? "stopped" : "recorded";
+  });
+}
+
 /** Finish a leased conversation and report whether runnable work remains. */
 export async function completeConversationWork(args: {
   conversationId: string;
   leaseToken: string;
+  madeProgress?: boolean;
   nowMs?: number;
   state?: StateAdapter;
 }): Promise<"completed" | "lost_lease" | "pending"> {
@@ -1755,6 +1803,14 @@ export async function completeConversationWork(args: {
             : hasPending
               ? "pending"
               : "idle",
+          lastProgressAtMs:
+            args.madeProgress === false
+              ? current.execution.lastProgressAtMs
+              : nowMs,
+          retryCount:
+            runnable || args.madeProgress === false
+              ? current.execution.retryCount
+              : 0,
           runId: runnable ? current.execution.runId : undefined,
         },
         nowMs,
@@ -1764,19 +1820,20 @@ export async function completeConversationWork(args: {
   });
 }
 
-/** Failure outcome: `lost_lease` (another owner took over), `recorded` (attempt counted), or `skipped` (durable progress was made). */
+/** Failure outcome: `lost_lease` (another owner took over), `recorded` (retry counted), or `skipped` (durable progress was made). */
 export interface AttemptFailure {
   pendingCount: number;
   deadLetteredMessages: InboundMessage[];
+  retryCount: number;
   status: "lost_lease" | "recorded" | "skipped";
 }
 
 /**
- * Record one failed delivery attempt for the pending messages a run attempted,
- * dead-lettering messages that reach the retry limit so a deterministic
- * failure cannot requeue forever.
+ * Record one failed execution attempt for pending messages, dead-lettering
+ * the conversation when its retry budget or the legacy message delivery limit
+ * is exhausted.
  *
- * Attempts are counted only when the run made no durable progress: if any
+ * Retries are counted only when the run made no durable progress: if any
  * attempted message left the mailbox, the remaining pending entries may be
  * deliberate deferrals and are left untouched. Consumed message ids stay in
  * `inboundMessageIds` so source retries remain duplicates.
@@ -1796,6 +1853,7 @@ export async function recordAttemptFailure(args: {
         status: "lost_lease",
         pendingCount: 0,
         deadLetteredMessages: [],
+        retryCount: 0,
       };
     }
     const pendingIds = new Set(
@@ -1811,22 +1869,32 @@ export async function recordAttemptFailure(args: {
         status: "skipped",
         pendingCount: current.execution.pendingMessages.length,
         deadLetteredMessages: [],
+        retryCount: current.execution.retryCount ?? 0,
       };
     }
 
+    const retryCount = (current.execution.retryCount ?? 0) + 1;
+    const retriesExhausted = retryCount >= CONVERSATION_WORK_MAX_RETRIES;
     const attemptedIds = new Set(args.inboundMessageIds);
     const deadLetteredMessages: InboundMessage[] = [];
     const pendingMessages: InboundMessage[] = [];
     for (const message of current.execution.pendingMessages) {
       if (!attemptedIds.has(message.inboundMessageId)) {
-        pendingMessages.push(message);
+        if (retriesExhausted) {
+          deadLetteredMessages.push(message);
+        } else {
+          pendingMessages.push(message);
+        }
         continue;
       }
       const attempted = {
         ...message,
         attemptCount: (message.attemptCount ?? 0) + 1,
       };
-      if (attempted.attemptCount >= CONVERSATION_WORK_MAX_DELIVERY_ATTEMPTS) {
+      if (
+        retriesExhausted ||
+        attempted.attemptCount >= CONVERSATION_WORK_MAX_DELIVERY_ATTEMPTS
+      ) {
         deadLetteredMessages.push(attempted);
         continue;
       }
@@ -1839,6 +1907,7 @@ export async function recordAttemptFailure(args: {
         current,
         {
           ...current.execution,
+          retryCount,
           pendingMessages,
         },
         nowMs,
@@ -1848,6 +1917,7 @@ export async function recordAttemptFailure(args: {
       status: "recorded",
       pendingCount: pendingMessages.length,
       deadLetteredMessages,
+      retryCount,
     };
   });
 }
@@ -1884,12 +1954,12 @@ export async function deadLetterAttempt(args: {
   });
 }
 
-/** Clear an expired durable lease so a later worker can resume safely. */
+/** Recover an expired lease, consuming the retry budget under the mutation lock. */
 export async function clearExpiredConversationLease(args: {
   conversationId: string;
   nowMs?: number;
   state?: StateAdapter;
-}): Promise<boolean> {
+}): Promise<"not_expired" | "requeued" | "stopped"> {
   const nowMs = args.nowMs ?? now();
   return await withConversationMutation(args, async (state, lock) => {
     const current = await readConversation(state, args.conversationId);
@@ -1897,8 +1967,10 @@ export async function clearExpiredConversationLease(args: {
       !current?.execution.lease ||
       current.execution.lease.expiresAtMs > nowMs
     ) {
-      return false;
+      return "not_expired";
     }
+    const retryCount = (current.execution.retryCount ?? 0) + 1;
+    const stopped = retryCount >= CONVERSATION_WORK_MAX_RETRIES;
     await writeConversation(
       state,
       lock,
@@ -1906,13 +1978,17 @@ export async function clearExpiredConversationLease(args: {
         current,
         {
           ...current.execution,
+          lastEnqueuedAtMs: undefined,
           lease: undefined,
-          status: "awaiting_resume",
+          retryCount,
+          pendingMessages: stopped ? [] : current.execution.pendingMessages,
+          runId: stopped ? undefined : current.execution.runId,
+          status: stopped ? "failed" : "awaiting_resume",
         },
         nowMs,
       ),
     );
-    return true;
+    return stopped ? "stopped" : "requeued";
   });
 }
 

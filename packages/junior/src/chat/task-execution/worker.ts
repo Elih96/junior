@@ -16,6 +16,7 @@ import {
   clearConsumedConversationWake,
   completeConversationWork,
   CONVERSATION_WORK_CHECK_IN_INTERVAL_MS,
+  CONVERSATION_WORK_MAX_RETRIES,
   countPendingConversationMessages,
   deadLetterAttempt,
   drainConversationMailbox,
@@ -24,6 +25,7 @@ import {
   isFinalAttempt,
   isInvalidConversationRecordError,
   recordAttemptFailure,
+  recordConversationRetry,
   releaseConversationWork,
   requestConversationContinuation,
   startConversationWork,
@@ -127,6 +129,34 @@ async function requestLostLeaseRecovery(args: {
   nowMs: number;
   options: ProcessConversationWorkOptions;
 }): Promise<void> {
+  const before = await getConversationWorkState({
+    conversationId: args.conversationId,
+    state: args.options.state,
+  });
+  const retry = await recordConversationRetry({
+    conversationId: args.conversationId,
+    leaseToken: args.leaseToken,
+    conversationStore: args.options.conversationStore,
+    nowMs: args.nowMs,
+    state: args.options.state,
+  });
+  if (retry === "lost_lease") {
+    return;
+  }
+  if (retry === "stopped") {
+    logException(
+      new Error("Conversation work stopped after repeated failed attempts"),
+      "conversation.work.retry.exhausted",
+      {
+        "app.run.id": before?.execution.runId ?? "unknown",
+        "app.worker.last_progress_at_ms":
+          before?.execution.lastProgressAtMs ?? before?.createdAtMs ?? 0,
+        "app.worker.retry_count":
+          (before?.execution.retryCount ?? 0) + 1,
+      },
+    );
+    return;
+  }
   const resumeRequested = await requestConversationContinuation({
     conversationId: args.conversationId,
     destination: args.destination,
@@ -202,6 +232,19 @@ function isTerminalFailure(failure: AttemptFailure): boolean {
     failure.deadLetteredMessages.length > 0 &&
     failure.pendingCount === 0
   );
+}
+
+function logRetryExhausted(args: {
+  error: unknown;
+  retryCount: number;
+  work: ConversationWorkState;
+}): void {
+  logException(args.error, "conversation.work.retry.exhausted", {
+    "app.run.id": args.work.execution.runId ?? "unknown",
+    "app.worker.last_progress_at_ms":
+      args.work.execution.lastProgressAtMs ?? args.work.createdAtMs,
+    "app.worker.retry_count": args.retryCount,
+  });
 }
 
 function startLeaseCheckIn(args: {
@@ -326,6 +369,7 @@ async function processConversationWorkInContext(
   let attemptMessageIds: string[] = [];
   let attemptSelectedMessageIds = new Set<string>();
   let attemptStartMessageIds = new Set<string>();
+  let failedWithoutProgress = false;
   let leaseLost = false;
   const markLeaseLost = (): void => {
     leaseLost = true;
@@ -585,6 +629,15 @@ async function processConversationWorkInContext(
           options,
         });
         if (isTerminalFailure(failure)) {
+          if (failure.retryCount >= CONVERSATION_WORK_MAX_RETRIES) {
+            logRetryExhausted({
+              error: new Error(
+                "Conversation work stopped after repeated failed attempts",
+              ),
+              retryCount: failure.retryCount,
+              work: leasedWork,
+            });
+          }
           await deadLetterAttempt({
             conversationId,
             leaseToken: lease.leaseToken,
@@ -598,6 +651,7 @@ async function processConversationWorkInContext(
           return { status: "lost_lease" };
         }
         if (failure.status === "recorded") {
+          failedWithoutProgress = true;
           break;
         }
       }
@@ -620,6 +674,7 @@ async function processConversationWorkInContext(
     const completion = await completeConversationWork({
       conversationId,
       leaseToken: lease.leaseToken,
+      madeProgress: !failedWithoutProgress,
       conversationStore: options.conversationStore,
       nowMs: now(options),
       state: options.state,
@@ -669,6 +724,13 @@ async function processConversationWorkInContext(
             })
           : undefined;
       if (failure && isTerminalFailure(failure)) {
+        if (failure.retryCount >= CONVERSATION_WORK_MAX_RETRIES) {
+          logRetryExhausted({
+            error,
+            retryCount: failure.retryCount,
+            work: initial,
+          });
+        }
         await deadLetterAttempt({
           conversationId,
           leaseToken: lease.leaseToken,
@@ -698,6 +760,26 @@ async function processConversationWorkInContext(
           state: options.state,
         });
       } else {
+        const retry = failure
+          ? failure.status
+          : await recordConversationRetry({
+              conversationId,
+              leaseToken: lease.leaseToken,
+              conversationStore: options.conversationStore,
+              nowMs: errorNowMs,
+              state: options.state,
+            });
+        if (retry === "stopped") {
+          logException(error, "conversation.work.retry.exhausted", {
+            "app.run.id": initial.execution.runId ?? "unknown",
+            "app.worker.last_progress_at_ms":
+              initial.execution.lastProgressAtMs ?? initial.createdAtMs,
+            "app.worker.retry_count":
+              failure?.retryCount ?? (initial.execution.retryCount ?? 0) + 1,
+          });
+          recoveryRecorded = true;
+          return { status: "failed" };
+        }
         const resumeRequested = await requestConversationContinuation({
           conversationId,
           destination,
