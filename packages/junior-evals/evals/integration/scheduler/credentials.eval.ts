@@ -1,7 +1,7 @@
 import { describeEval } from "vitest-evals";
 import { expect } from "vitest";
 import { toolCalls } from "vitest-evals";
-import { mention, rubric, slackEvals, threadMessage } from "../../src/helpers";
+import { mention, rubric, slackEvals, threadMessage } from "../../../src/helpers";
 import {
   scheduledTaskCreateCalls,
   scheduledTaskUpdateCalls,

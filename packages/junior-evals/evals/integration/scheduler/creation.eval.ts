@@ -1,6 +1,6 @@
 import { describeEval } from "vitest-evals";
 import { expect } from "vitest";
-import { mention, rubric, slackEvals } from "../../src/helpers";
+import { mention, rubric, slackEvals } from "../../../src/helpers";
 import { scheduledTaskCreateCalls } from "./helpers";
 
 describeEval("Schedule Creation", slackEvals, (it) => {
