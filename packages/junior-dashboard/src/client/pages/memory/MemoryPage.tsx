@@ -68,7 +68,6 @@ export function MemoryPage(props: { page: PluginUserPageLink }) {
     >
       <PageHeader
         description={props.page.description}
-        eyebrow="Memory system"
         title={props.page.label}
       />
       <nav
@@ -193,11 +192,8 @@ function MemoryLibrary(props: {
     <section className="grid gap-4" aria-labelledby="memory-library-title">
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
-          <div className="font-mono text-xs uppercase tracking-[0.16em] text-cyan-200/65">
-            Your memories
-          </div>
           <h2
-            className="mt-1 mb-0 font-display text-xl font-medium tracking-[-0.02em] text-dashboard-text"
+            className="m-0 font-display text-xl font-medium tracking-[-0.02em] text-dashboard-text"
             id="memory-library-title"
           >
             {searchQuery ? "Search results" : "What Junior remembers"}
@@ -425,10 +421,7 @@ function MemoryKindPanel(props: { data: MemoryDashboardData }) {
   const { stats } = props.data;
   return (
     <Card className="p-5 sm:p-6">
-      <div className="font-mono text-xs uppercase tracking-[0.16em] text-cyan-200/65">
-        By type
-      </div>
-      <h2 className="mt-1 mb-0 font-display text-xl font-medium text-dashboard-text">
+      <h2 className="m-0 font-display text-xl font-medium text-dashboard-text">
         What Junior remembers
       </h2>
       <p className="mt-1 mb-0 font-mono text-xs leading-relaxed text-dashboard-text-muted">
@@ -463,10 +456,7 @@ function MemoryOriginPanel(props: { data: MemoryDashboardData }) {
   const other = Math.max(0, stats.active - stats.automatic - stats.explicit);
   return (
     <Card className="p-5 sm:p-6">
-      <div className="font-mono text-xs uppercase tracking-[0.16em] text-cyan-200/65">
-        By origin
-      </div>
-      <h2 className="mt-1 mb-0 font-display text-xl font-medium text-dashboard-text">
+      <h2 className="m-0 font-display text-xl font-medium text-dashboard-text">
         How they got here
       </h2>
       <p className="mt-1 mb-0 font-mono text-xs leading-relaxed text-dashboard-text-muted">
