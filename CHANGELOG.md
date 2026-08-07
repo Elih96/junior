@@ -1,4 +1,33 @@
 # Changelog
+## 0.139.0
+
+### New Features ✨
+
+- (tasks) Browse terminal task executions from the dashboard by @sentry-junior in [#1299](https://github.com/getsentry/junior/pull/1299)
+- (telemetry) Include Junior version in deployment release by @sentry-junior in [#1302](https://github.com/getsentry/junior/pull/1302)
+
+### Bug Fixes 🐛
+
+#### Dashboard
+
+- Add compact badge and chart type step by @sentry-junior in [#1296](https://github.com/getsentry/junior/pull/1296)
+- Label the active model in metric tooltips by @sentry-junior in [#1297](https://github.com/getsentry/junior/pull/1297)
+
+#### Other
+
+- (transcript) Preserve readable markdown structure by @sentry-junior in [#1300](https://github.com/getsentry/junior/pull/1300)
+
+### Internal Changes 🔧
+
+#### Evals
+
+- Split integration and behavioral suites by @sentry-junior in [#1301](https://github.com/getsentry/junior/pull/1301)
+- Add isolated Guardian decision suite by @sentry-junior in [#1293](https://github.com/getsentry/junior/pull/1293)
+
+#### Other
+
+- (chat) Stop writing actor into turn-session Redis by @sentry-junior in [#1298](https://github.com/getsentry/junior/pull/1298)
+
 ## 0.138.0
 
 ### New Features ✨
