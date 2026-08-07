@@ -10,8 +10,6 @@
 import { THREAD_STATE_TTL_MS, type StateAdapter } from "chat";
 import {
   actorSchema,
-  destinationSchema,
-  sourceSchema,
   type Destination,
   type Source,
 } from "@sentry/junior-plugin-api";
@@ -55,6 +53,15 @@ const AGENT_TURN_SESSION_INDEX_MAX_LENGTH = 5_000;
 const AGENT_TURN_SESSION_INDEX_READ_CONCURRENCY = 25;
 const AGENT_TURN_SESSION_TTL_MS = THREAD_STATE_TTL_MS;
 
+/** Keep only keys whose value is defined. */
+function definedProps<T extends Record<string, unknown>>(
+  values: T,
+): Partial<T> {
+  return Object.fromEntries(
+    Object.entries(values).filter(([, value]) => value !== undefined),
+  ) as Partial<T>;
+}
+
 export type AgentTurnSessionStatus =
   | "running"
   | "awaiting_resume"
@@ -78,12 +85,10 @@ export interface AgentTurnSessionRecord {
   conversationId: string;
   cumulativeDurationMs: number;
   cumulativeUsage?: AgentTurnUsage;
-  destination?: Destination;
   dispatchId?: string;
   dispatchOutcome?: AgentDispatchOutcome;
   /** Provider-owned identifier returned after visible delivery is accepted. */
   resultMessageId?: string;
-  source?: Source;
   errorMessage?: string;
   lastProgressAtMs: number;
   loadedSkillNames?: string[];
@@ -167,6 +172,20 @@ const agentTurnResumeReasonSchema = z.enum([
 
 const nonNegativeNumberSchema = z.number().finite().nonnegative();
 const seqCursorSchema = z.number().int().min(-1);
+
+/**
+ * Turn-session summary projection.
+ *
+ * This is the shared field set for durable turn-session state and the summary
+ * indexes. `.strip()` keeps only declared keys so unknown/deprecated payload
+ * fields (including legacy nested destination/source) are discarded on both
+ * read and write. Do not switch this back to `.strict()` without an explicit
+ * migration path for those dropped fields.
+ *
+ * The stored record schema below extends this same projection with resume-only
+ * fields (committedSeq, runtimeContext, ...). Summary indexes intentionally
+ * omit those heavier fields; they are not a separate domain model.
+ */
 const agentTurnSessionSummarySchema = z
   .object({
     channelName: z.string().min(1).optional(),
@@ -174,17 +193,14 @@ const agentTurnSessionSummarySchema = z
     conversationId: z.string().min(1),
     cumulativeDurationMs: nonNegativeNumberSchema,
     cumulativeUsage: agentTurnUsageSchema.optional(),
-    // TODO(#1267): Remove destination/source and their Redis write paths once
-    // SQL-only readers are deployed; existing records do not need to expire.
-    destination: destinationSchema.optional(),
     dispatchId: z.string().min(1).optional(),
     dispatchOutcome: z.enum(["blocked", "completed", "failed"]).optional(),
     resultMessageId: z.string().min(1).optional(),
-    source: sourceSchema.optional(),
     lastProgressAtMs: nonNegativeNumberSchema,
     loadedSkillNames: z.array(z.string()).optional(),
     modelId: z.string().min(1).optional(),
     reasoningLevel: z.string().min(1).optional(),
+    // TODO(#1267): Remove actor from this projection once resume rebuilds it.
     actor: actorSchema.optional(),
     resumeReason: agentTurnResumeReasonSchema.optional(),
     resumedFromSliceId: z.number().int().nonnegative().optional(),
@@ -196,8 +212,9 @@ const agentTurnSessionSummarySchema = z
     traceId: z.string().optional(),
     updatedAtMs: nonNegativeNumberSchema,
   })
-  .strict() satisfies z.ZodType<AgentTurnSessionSummary>;
+  .strip() satisfies z.ZodType<AgentTurnSessionSummary>;
 
+/** Full turn-session record: summary projection plus resume-only fields. */
 const storedAgentTurnSessionRecordSchema = agentTurnSessionSummarySchema
   .extend({
     actors: z.array(actorSchema).optional(),
@@ -207,7 +224,7 @@ const storedAgentTurnSessionRecordSchema = agentTurnSessionSummarySchema
     turnStartSeq: seqCursorSchema.optional(),
     runtimeContext: z.array(piMessageSchema).optional(),
   })
-  .strict() satisfies z.ZodType<StoredAgentTurnSessionRecord>;
+  .strip() satisfies z.ZodType<StoredAgentTurnSessionRecord>;
 
 function conversationExecutionFromSummary(
   summary: AgentTurnSessionSummary,
@@ -243,15 +260,16 @@ async function appendAgentTurnSessionSummary(
   summary: AgentTurnSessionSummary,
   ttlMs: number,
 ): Promise<void> {
+  const projectedSummary = agentTurnSessionSummarySchema.parse(summary);
   const stateAdapter = getStateAdapter();
   await Promise.all([
-    stateAdapter.appendToList(AGENT_TURN_SESSION_INDEX_KEY, summary, {
+    stateAdapter.appendToList(AGENT_TURN_SESSION_INDEX_KEY, projectedSummary, {
       maxLength: AGENT_TURN_SESSION_INDEX_MAX_LENGTH,
       ttlMs,
     }),
     stateAdapter.appendToList(
-      agentTurnSessionConversationIndexKey(summary.conversationId),
-      summary,
+      agentTurnSessionConversationIndexKey(projectedSummary.conversationId),
+      projectedSummary,
       { ttlMs },
     ),
   ]);
@@ -260,9 +278,17 @@ async function appendAgentTurnSessionSummary(
 /** Store run summary metadata in the configured conversation store. */
 async function recordConversationActivityMetadata(args: {
   conversationStore?: ConversationStore;
+  destination?: Destination;
   /** Confirmed destination visibility; omit when unavailable. */
   destinationVisibility?: ConversationPrivacy;
   nowMs: number;
+  /**
+   * Structured inbound Source for SQL conversation metadata.
+   * Named `source` here to match the turn-session write API; mapped to the
+   * conversation store's `sessionSource` field below because that store also
+   * has a separate coarse `source` enum (slack/api/scheduler/...).
+   */
+  source?: Source;
   summary: AgentTurnSessionSummary;
 }): Promise<void> {
   const conversationStore = args.conversationStore ?? getConversationStore();
@@ -270,12 +296,19 @@ async function recordConversationActivityMetadata(args: {
     conversationId: args.summary.conversationId,
   });
   const isChild = Boolean(conversation?.lineage);
-  const destination = isChild ? undefined : args.summary.destination;
-  const source = isChild
+  // Nested destination/source stay off Redis turn-session payloads; callers pass
+  // live routing here for SQL dual-write. Child conversations stay destinationless.
+  const destination = isChild ? undefined : args.destination;
+  // Only derive ConversationSource when routing is known. Abandon/fail no longer
+  // carry nested destination, and SQL coalesce(excluded, existing) would otherwise
+  // overwrite a durable `local` source with surface `internal`.
+  const activitySource = isChild
     ? "internal"
     : destination?.platform === "local"
       ? "local"
-      : args.summary.surface;
+      : destination
+        ? args.summary.surface
+        : undefined;
   await conversationStore.recordActivity({
     activityAtMs: args.summary.updatedAtMs,
     channelName: args.summary.channelName,
@@ -283,8 +316,8 @@ async function recordConversationActivityMetadata(args: {
     destination,
     nowMs: args.nowMs,
     actor: sessionLogActor(args.summary.actor),
-    source,
-    ...(args.summary.source ? { sessionSource: args.summary.source } : {}),
+    ...definedProps({ source: activitySource }),
+    ...(args.source ? { sessionSource: args.source } : {}),
     visibility: isChild ? undefined : args.destinationVisibility,
   });
   await conversationStore.recordExecution({
@@ -301,7 +334,7 @@ async function recordConversationActivityMetadata(args: {
         : {}),
     },
     actor: sessionLogActor(args.summary.actor),
-    source,
+    ...definedProps({ source: activitySource }),
     updatedAtMs: args.nowMs,
     visibility: isChild ? undefined : args.destinationVisibility,
   });
@@ -320,7 +353,6 @@ function materializeAgentTurnSessionRecord(
       : piProjection;
   return {
     version: stored.version,
-    ...(stored.channelName ? { channelName: stored.channelName } : {}),
     conversationId: stored.conversationId,
     sessionId: stored.sessionId,
     sliceId: stored.sliceId,
@@ -332,32 +364,23 @@ function materializeAgentTurnSessionRecord(
     piMessageProvenance: restoredProjection.provenance,
     actors: stored.actors ?? instructionActors(piProjection.provenance),
     cumulativeDurationMs: stored.cumulativeDurationMs,
-    ...(stored.destination ? { destination: stored.destination } : {}),
-    ...(stored.dispatchId ? { dispatchId: stored.dispatchId } : {}),
-    ...(stored.dispatchOutcome
-      ? { dispatchOutcome: stored.dispatchOutcome }
-      : {}),
-    ...(stored.resultMessageId
-      ? { resultMessageId: stored.resultMessageId }
-      : {}),
-    ...(stored.source ? { source: stored.source } : {}),
-    ...(stored.cumulativeUsage
-      ? { cumulativeUsage: stored.cumulativeUsage }
-      : {}),
-    ...(stored.resumeReason ? { resumeReason: stored.resumeReason } : {}),
-    ...(stored.errorMessage ? { errorMessage: stored.errorMessage } : {}),
-    ...(stored.loadedSkillNames
-      ? { loadedSkillNames: stored.loadedSkillNames }
-      : {}),
-    ...(stored.modelId ? { modelId: stored.modelId } : {}),
-    ...(stored.reasoningLevel ? { reasoningLevel: stored.reasoningLevel } : {}),
-    ...(stored.actor ? { actor: stored.actor } : {}),
-    ...(stored.resumedFromSliceId !== undefined
-      ? { resumedFromSliceId: stored.resumedFromSliceId }
-      : {}),
-    ...(stored.surface ? { surface: stored.surface } : {}),
-    ...(stored.traceId ? { traceId: stored.traceId } : {}),
-    ...(turnStartMessageIndex !== undefined ? { turnStartMessageIndex } : {}),
+    ...definedProps({
+      actor: stored.actor,
+      channelName: stored.channelName,
+      cumulativeUsage: stored.cumulativeUsage,
+      dispatchId: stored.dispatchId,
+      dispatchOutcome: stored.dispatchOutcome,
+      errorMessage: stored.errorMessage,
+      loadedSkillNames: stored.loadedSkillNames,
+      modelId: stored.modelId,
+      reasoningLevel: stored.reasoningLevel,
+      resumeReason: stored.resumeReason,
+      resultMessageId: stored.resultMessageId,
+      resumedFromSliceId: stored.resumedFromSliceId,
+      surface: stored.surface,
+      traceId: stored.traceId,
+      turnStartMessageIndex,
+    }),
   };
 }
 
@@ -507,11 +530,9 @@ function buildStoredRecord(args: {
   conversationId: string;
   cumulativeDurationMs: number;
   cumulativeUsage?: AgentTurnUsage;
-  destination?: Destination;
   dispatchId?: string;
   dispatchOutcome?: AgentDispatchOutcome;
   resultMessageId?: string;
-  source?: Source;
   committedSeq: number;
   historyVersion?: number;
   lastProgressAtMs?: number;
@@ -536,7 +557,6 @@ function buildStoredRecord(args: {
   const nowMs = Date.now();
   return {
     version: (args.previousVersion ?? 0) + 1,
-    ...(args.channelName ? { channelName: args.channelName } : {}),
     conversationId: args.conversationId,
     sessionId: args.sessionId,
     sliceId: args.sliceId,
@@ -545,61 +565,60 @@ function buildStoredRecord(args: {
     lastProgressAtMs: args.lastProgressAtMs ?? nowMs,
     updatedAtMs: nowMs,
     committedSeq: args.committedSeq,
-    ...(args.historyVersion !== undefined
-      ? { historyVersion: args.historyVersion }
-      : {}),
-    ...(args.turnStartSeq !== undefined
-      ? { turnStartSeq: args.turnStartSeq }
-      : {}),
-    ...(args.runtimeContext && args.runtimeContext.length > 0
-      ? { runtimeContext: args.runtimeContext }
-      : {}),
     cumulativeDurationMs: args.cumulativeDurationMs,
-    ...(args.cumulativeUsage ? { cumulativeUsage: args.cumulativeUsage } : {}),
-    ...(args.destination ? { destination: args.destination } : {}),
-    ...(args.dispatchId ? { dispatchId: args.dispatchId } : {}),
-    ...(args.dispatchOutcome ? { dispatchOutcome: args.dispatchOutcome } : {}),
-    ...(args.resultMessageId ? { resultMessageId: args.resultMessageId } : {}),
-    ...(args.source ? { source: args.source } : {}),
-    ...(args.actor ? { actor: args.actor } : {}),
-    ...(args.actors ? { actors: args.actors } : {}),
-    ...(args.loadedSkillNames
-      ? { loadedSkillNames: args.loadedSkillNames }
-      : {}),
-    ...(args.modelId ? { modelId: args.modelId } : {}),
-    ...(args.reasoningLevel ? { reasoningLevel: args.reasoningLevel } : {}),
-    ...(args.resumeReason ? { resumeReason: args.resumeReason } : {}),
-    ...(args.errorMessage ? { errorMessage: args.errorMessage } : {}),
-    ...(args.resumedFromSliceId !== undefined
-      ? { resumedFromSliceId: args.resumedFromSliceId }
-      : {}),
-    ...(args.surface ? { surface: args.surface } : {}),
-    ...(args.traceId ? { traceId: args.traceId } : {}),
+    ...definedProps({
+      actor: args.actor,
+      actors: args.actors,
+      channelName: args.channelName,
+      cumulativeUsage: args.cumulativeUsage,
+      dispatchId: args.dispatchId,
+      dispatchOutcome: args.dispatchOutcome,
+      errorMessage: args.errorMessage,
+      historyVersion: args.historyVersion,
+      loadedSkillNames: args.loadedSkillNames,
+      modelId: args.modelId,
+      reasoningLevel: args.reasoningLevel,
+      resumeReason: args.resumeReason,
+      resultMessageId: args.resultMessageId,
+      resumedFromSliceId: args.resumedFromSliceId,
+      runtimeContext:
+        args.runtimeContext && args.runtimeContext.length > 0
+          ? args.runtimeContext
+          : undefined,
+      surface: args.surface,
+      traceId: args.traceId,
+      turnStartSeq: args.turnStartSeq,
+    }),
   };
 }
 
 async function setStoredRecord(args: {
   conversationStore?: ConversationStore;
+  destination?: Destination;
   /** Confirmed destination visibility; omit when unavailable. */
   destinationVisibility?: ConversationPrivacy;
   piMessages: PiMessage[];
   piMessageProvenance: ConversationMessageProvenance[];
   record: StoredAgentTurnSessionRecord;
+  source?: Source;
   ttlMs: number;
   turnStartMessageIndex?: number;
 }): Promise<AgentTurnSessionRecord> {
   const stateAdapter = getStateAdapter();
   await stateAdapter.connect();
 
+  const storedRecord = storedAgentTurnSessionRecordSchema.parse(args.record);
   await recordConversationActivityMetadata({
     conversationStore: args.conversationStore,
+    destination: args.destination,
     destinationVisibility: args.destinationVisibility,
     nowMs: Date.now(),
-    summary: args.record,
+    source: args.source,
+    summary: storedRecord,
   });
   await stateAdapter.set(
-    agentTurnSessionKey(args.record.conversationId, args.record.sessionId),
-    args.record,
+    agentTurnSessionKey(storedRecord.conversationId, storedRecord.sessionId),
+    storedRecord,
     args.ttlMs,
   );
   const {
@@ -610,10 +629,10 @@ async function setStoredRecord(args: {
     turnStartSeq: _turnStartSeq,
     runtimeContext: _runtimeContext,
     ...summary
-  } = args.record;
+  } = storedRecord;
   await appendAgentTurnSessionSummary(summary, args.ttlMs);
   return materializeAgentTurnSessionRecord(
-    args.record,
+    storedRecord,
     {
       messages: [...args.piMessages],
       provenance: [...args.piMessageProvenance],
@@ -643,65 +662,39 @@ async function updateAgentTurnSessionState(args: {
     piMessages: args.existing.piMessages,
     piMessageProvenance: args.existing.piMessageProvenance,
     ttlMs: AGENT_TURN_SESSION_TTL_MS,
-    ...(args.existing.turnStartMessageIndex !== undefined
-      ? { turnStartMessageIndex: args.existing.turnStartMessageIndex }
-      : {}),
+    ...definedProps({
+      turnStartMessageIndex: args.existing.turnStartMessageIndex,
+    }),
     record: buildStoredRecord({
       conversationId: args.existing.conversationId,
       sessionId: args.existing.sessionId,
       sliceId: args.existing.sliceId,
       state: args.state,
       committedSeq: parsed.committedSeq,
-      ...(parsed.historyVersion !== undefined
-        ? { historyVersion: parsed.historyVersion }
-        : {}),
-      ...(parsed.turnStartSeq !== undefined
-        ? { turnStartSeq: parsed.turnStartSeq }
-        : {}),
-      ...(parsed.runtimeContext
-        ? { runtimeContext: parsed.runtimeContext }
-        : {}),
-      ...(parsed.channelName ? { channelName: parsed.channelName } : {}),
       startedAtMs: parsed.startedAtMs,
       lastProgressAtMs: parsed.lastProgressAtMs,
       previousVersion: parsed.version,
       cumulativeDurationMs: args.existing.cumulativeDurationMs,
-      ...(args.existing.cumulativeUsage
-        ? { cumulativeUsage: args.existing.cumulativeUsage }
-        : {}),
-      ...(args.existing.destination
-        ? { destination: args.existing.destination }
-        : {}),
-      ...(args.existing.dispatchId
-        ? { dispatchId: args.existing.dispatchId }
-        : {}),
-      ...(args.existing.dispatchOutcome
-        ? { dispatchOutcome: args.existing.dispatchOutcome }
-        : {}),
-      ...(args.existing.resultMessageId
-        ? { resultMessageId: args.existing.resultMessageId }
-        : {}),
-      ...(args.existing.source ? { source: args.existing.source } : {}),
-      ...(args.existing.loadedSkillNames
-        ? { loadedSkillNames: args.existing.loadedSkillNames }
-        : {}),
-      ...(args.existing.modelId ? { modelId: args.existing.modelId } : {}),
-      ...(args.existing.reasoningLevel
-        ? { reasoningLevel: args.existing.reasoningLevel }
-        : {}),
-      ...(args.existing.actor ? { actor: args.existing.actor } : {}),
       actors: args.existing.actors,
-      ...(args.existing.resumeReason
-        ? { resumeReason: args.existing.resumeReason }
-        : {}),
-      ...(args.existing.resumedFromSliceId !== undefined
-        ? { resumedFromSliceId: args.existing.resumedFromSliceId }
-        : {}),
-      ...(args.existing.surface ? { surface: args.existing.surface } : {}),
-      ...(args.existing.traceId ? { traceId: args.existing.traceId } : {}),
-      ...((args.errorMessage ?? args.existing.errorMessage)
-        ? { errorMessage: args.errorMessage ?? args.existing.errorMessage }
-        : {}),
+      ...definedProps({
+        actor: args.existing.actor,
+        channelName: parsed.channelName,
+        cumulativeUsage: args.existing.cumulativeUsage,
+        dispatchId: args.existing.dispatchId,
+        dispatchOutcome: args.existing.dispatchOutcome,
+        errorMessage: args.errorMessage ?? args.existing.errorMessage,
+        historyVersion: parsed.historyVersion,
+        loadedSkillNames: args.existing.loadedSkillNames,
+        modelId: args.existing.modelId,
+        reasoningLevel: args.existing.reasoningLevel,
+        resumeReason: args.existing.resumeReason,
+        resultMessageId: args.existing.resultMessageId,
+        resumedFromSliceId: args.existing.resumedFromSliceId,
+        runtimeContext: parsed.runtimeContext,
+        surface: args.existing.surface,
+        traceId: args.existing.traceId,
+        turnStartSeq: parsed.turnStartSeq,
+      }),
     }),
   });
 }
@@ -812,87 +805,48 @@ export async function upsertAgentTurnSessionRecord(args: {
 
   return await setStoredRecord({
     conversationStore: args.conversationStore,
+    destination: args.destination,
     destinationVisibility: args.destinationVisibility,
+    source: args.source,
     piMessages: commit.messages,
     piMessageProvenance: commit.provenance,
     ttlMs,
-    ...(turnStartMessageIndex !== undefined ? { turnStartMessageIndex } : {}),
+    turnStartMessageIndex,
     record: buildStoredRecord({
-      ...((args.channelName ?? existingRecord?.channelName)
-        ? { channelName: args.channelName ?? existingRecord?.channelName }
-        : {}),
       conversationId: args.conversationId,
       sessionId: args.sessionId,
       sliceId: args.sliceId,
       state: args.state,
-      ...(existingRecord?.startedAtMs !== undefined
-        ? { startedAtMs: existingRecord.startedAtMs }
-        : {}),
-      ...(args.lastProgressAtMs !== undefined
-        ? { lastProgressAtMs: args.lastProgressAtMs }
-        : {}),
       committedSeq: commit.committedSeq,
       historyVersion: commit.historyVersion,
-      ...(turnStartSeq !== undefined ? { turnStartSeq } : {}),
-      ...(retainedRuntimeContext
-        ? { runtimeContext: retainedRuntimeContext }
-        : {}),
       previousVersion: existingRecord?.version,
       cumulativeDurationMs:
         args.cumulativeDurationMs ?? existingRecord?.cumulativeDurationMs ?? 0,
-      ...(args.cumulativeUsage
-        ? { cumulativeUsage: args.cumulativeUsage }
-        : {}),
-      ...((args.destination ?? existingRecord?.destination)
-        ? { destination: args.destination ?? existingRecord?.destination }
-        : {}),
-      ...((args.dispatchId ?? existingRecord?.dispatchId)
-        ? { dispatchId: args.dispatchId ?? existingRecord?.dispatchId }
-        : {}),
-      ...((args.dispatchOutcome ?? existingRecord?.dispatchOutcome)
-        ? {
-            dispatchOutcome:
-              args.dispatchOutcome ?? existingRecord?.dispatchOutcome,
-          }
-        : {}),
-      ...((args.resultMessageId ?? existingRecord?.resultMessageId)
-        ? {
-            resultMessageId:
-              args.resultMessageId ?? existingRecord?.resultMessageId,
-          }
-        : {}),
-      ...((args.source ?? existingRecord?.source)
-        ? { source: args.source ?? existingRecord?.source }
-        : {}),
-      ...(args.loadedSkillNames
-        ? { loadedSkillNames: args.loadedSkillNames }
-        : {}),
       modelId: args.modelId,
-      ...((args.reasoningLevel ?? existingRecord?.reasoningLevel)
-        ? {
-            reasoningLevel:
-              args.reasoningLevel ?? existingRecord?.reasoningLevel,
-          }
-        : {}),
-      ...((args.actor ?? existingRecord?.actor)
-        ? { actor: args.actor ?? existingRecord?.actor }
-        : {}),
       actors: instructionActors([
         ...(existingRecord?.actors ?? []).map(instructionProvenanceFor),
         ...(args.actors ?? []).map(instructionProvenanceFor),
         ...commit.provenance,
       ]),
-      ...(args.resumeReason ? { resumeReason: args.resumeReason } : {}),
-      ...(args.errorMessage ? { errorMessage: args.errorMessage } : {}),
-      ...(args.resumedFromSliceId !== undefined
-        ? { resumedFromSliceId: args.resumedFromSliceId }
-        : {}),
-      ...((args.surface ?? existingRecord?.surface)
-        ? { surface: args.surface ?? existingRecord?.surface }
-        : {}),
-      ...((args.traceId ?? existingRecord?.traceId)
-        ? { traceId: args.traceId ?? existingRecord?.traceId }
-        : {}),
+      ...definedProps({
+        actor: args.actor ?? existingRecord?.actor,
+        channelName: args.channelName ?? existingRecord?.channelName,
+        cumulativeUsage: args.cumulativeUsage,
+        dispatchId: args.dispatchId ?? existingRecord?.dispatchId,
+        dispatchOutcome: args.dispatchOutcome ?? existingRecord?.dispatchOutcome,
+        errorMessage: args.errorMessage,
+        lastProgressAtMs: args.lastProgressAtMs,
+        loadedSkillNames: args.loadedSkillNames,
+        reasoningLevel: args.reasoningLevel ?? existingRecord?.reasoningLevel,
+        resumeReason: args.resumeReason,
+        resultMessageId: args.resultMessageId ?? existingRecord?.resultMessageId,
+        resumedFromSliceId: args.resumedFromSliceId,
+        runtimeContext: retainedRuntimeContext,
+        startedAtMs: existingRecord?.startedAtMs,
+        surface: args.surface ?? existingRecord?.surface,
+        traceId: args.traceId ?? existingRecord?.traceId,
+        turnStartSeq,
+      }),
     }),
   });
 }
@@ -951,9 +905,6 @@ export async function recordAgentTurnSessionSummary(args: {
   const ttlMs = Math.max(1, args.ttlMs ?? AGENT_TURN_SESSION_TTL_MS);
   const summary: AgentTurnSessionSummary = {
     version: existing?.version ?? 0,
-    ...((args.channelName ?? existing?.channelName)
-      ? { channelName: args.channelName ?? existing?.channelName }
-      : {}),
     conversationId: args.conversationId,
     sessionId: args.sessionId,
     sliceId: args.sliceId,
@@ -963,50 +914,27 @@ export async function recordAgentTurnSessionSummary(args: {
     updatedAtMs: nowMs,
     cumulativeDurationMs:
       args.cumulativeDurationMs ?? existing?.cumulativeDurationMs ?? 0,
-    ...((args.cumulativeUsage ?? existing?.cumulativeUsage)
-      ? { cumulativeUsage: args.cumulativeUsage ?? existing?.cumulativeUsage }
-      : {}),
-    ...((args.destination ?? existing?.destination)
-      ? { destination: args.destination ?? existing?.destination }
-      : {}),
-    ...((args.dispatchId ?? existingDispatchId)
-      ? { dispatchId: args.dispatchId ?? existingDispatchId }
-      : {}),
-    ...((args.dispatchOutcome ?? existingDispatchOutcome)
-      ? { dispatchOutcome: args.dispatchOutcome ?? existingDispatchOutcome }
-      : {}),
-    ...((args.resultMessageId ?? existingResultMessageId)
-      ? { resultMessageId: args.resultMessageId ?? existingResultMessageId }
-      : {}),
-    ...((args.source ?? existing?.source)
-      ? { source: args.source ?? existing?.source }
-      : {}),
-    ...((args.actor ?? existing?.actor)
-      ? { actor: args.actor ?? existing?.actor }
-      : {}),
-    ...(args.loadedSkillNames
-      ? { loadedSkillNames: args.loadedSkillNames }
-      : existing?.loadedSkillNames
-        ? { loadedSkillNames: existing.loadedSkillNames }
-        : {}),
-    ...((args.modelId ?? existing?.modelId)
-      ? { modelId: args.modelId ?? existing?.modelId }
-      : {}),
-    ...((args.reasoningLevel ?? existing?.reasoningLevel)
-      ? { reasoningLevel: args.reasoningLevel ?? existing?.reasoningLevel }
-      : {}),
-    ...(args.resumeReason ? { resumeReason: args.resumeReason } : {}),
-    ...((args.surface ?? existing?.surface)
-      ? { surface: args.surface ?? existing?.surface }
-      : {}),
-    ...((args.traceId ?? existing?.traceId)
-      ? { traceId: args.traceId ?? existing?.traceId }
-      : {}),
+    ...definedProps({
+      actor: args.actor ?? existing?.actor,
+      channelName: args.channelName ?? existing?.channelName,
+      cumulativeUsage: args.cumulativeUsage ?? existing?.cumulativeUsage,
+      dispatchId: args.dispatchId ?? existingDispatchId,
+      dispatchOutcome: args.dispatchOutcome ?? existingDispatchOutcome,
+      loadedSkillNames: args.loadedSkillNames ?? existing?.loadedSkillNames,
+      modelId: args.modelId ?? existing?.modelId,
+      reasoningLevel: args.reasoningLevel ?? existing?.reasoningLevel,
+      resumeReason: args.resumeReason,
+      resultMessageId: args.resultMessageId ?? existingResultMessageId,
+      surface: args.surface ?? existing?.surface,
+      traceId: args.traceId ?? existing?.traceId,
+    }),
   };
   await recordConversationActivityMetadata({
     conversationStore: args.conversationStore,
+    destination: args.destination,
     destinationVisibility: args.destinationVisibility,
     nowMs,
+    source: args.source,
     summary,
   });
   await appendAgentTurnSessionSummary(summary, ttlMs);
