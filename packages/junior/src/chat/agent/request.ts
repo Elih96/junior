@@ -21,7 +21,6 @@ import type { Actor } from "@/chat/actor";
 import type { SandboxRef } from "@/chat/sandbox/ref";
 import type { SandboxEgressTracePropagationConfig } from "@/chat/sandbox/egress/tracing";
 import type { SandboxEgressSignalTransport } from "@/chat/sandbox/egress/signals";
-import type { AuthorizationFlowMode } from "@/chat/services/auth-pause";
 import type { OAuthAuthorization } from "@/chat/oauth-authorization";
 import type { AssistantStatusSpec } from "@/chat/slack/assistant-thread/status";
 import type { SlackConversationContext } from "@/chat/slack/conversation-context";
@@ -63,6 +62,24 @@ export interface AgentRunSteeringMessage {
   userAttachments?: AgentRunAttachment[];
 }
 
+/** Model-safe input for one asynchronously delegated child-agent task. */
+export type SpawnAgentInput = {
+  name?: string;
+  reasoningLevel?: TurnReasoningLevel;
+  task: string;
+};
+
+/** Handle returned after a child-agent task is durably scheduled. */
+export type SpawnAgentResult = {
+  invocationId: string;
+};
+
+/** Runtime-bound child-agent capability exposed to model-facing tool wiring. */
+export type SpawnAgent = (
+  input: SpawnAgentInput,
+  options: { signal?: AbortSignal; toolCallId: string },
+) => Promise<SpawnAgentResult>;
+
 /** Carries the user-visible content and prior transcript for one agent-run slice. */
 export interface AgentRunInput {
   actor?: AgentRunInstructionActor;
@@ -101,13 +118,39 @@ export interface AgentRunRouting {
   toolChannelId?: string;
 }
 
+/** Optional agent capabilities that a run slice can turn off. */
+export const AGENT_RUN_FEATURES = [
+  "handoff",
+  "interactive-auth",
+  "subagents",
+] as const;
+
+/** One optional agent capability controlled by run policy. */
+export type AgentRunFeature = (typeof AGENT_RUN_FEATURES)[number];
+
+/** Return whether one optional agent capability is disabled for this run. */
+export function isAgentRunFeatureDisabled(
+  policy: Pick<AgentRunPolicy, "disabledFeatures"> | undefined,
+  feature: AgentRunFeature,
+): boolean {
+  return policy?.disabledFeatures?.includes(feature) ?? false;
+}
+
 /** Carries execution limits and dependency overrides for one run slice. */
 export interface AgentRunPolicy {
+  /**
+   * Optional agent capabilities disabled for this run slice.
+   * `interactive-auth` blocks pausing to send an OAuth link; missing credentials
+   * hard-fail instead. Default is enabled when omitted.
+   * TODO(#881, #883): child invocations currently disable interactive-auth, but
+   * may later need a path to force the auth flow when a delegated tool requires
+   * credentials the parent can already request.
+   */
+  disabledFeatures?: readonly AgentRunFeature[];
   /** Absolute wall-clock deadline for this host request, in milliseconds. */
   turnDeadlineAtMs?: number;
   /** Cancels provider work when the owning host request is abandoned. */
   signal?: AbortSignal;
-  authorizationFlowMode?: AuthorizationFlowMode;
   /** Explicit per-agent reasoning level. When set, adaptive routing is disabled. */
   reasoningLevel?: TurnReasoningLevel;
   configuration?: Record<string, unknown>;
@@ -167,6 +210,8 @@ export class RetryableDeliveryError extends Error {
 
 /** Carries durable-worker ports that commit or update resumable run state. */
 export interface AgentRunDurability {
+  /** Schedule delegated work with authority bound by the active parent run. */
+  spawnAgent?: SpawnAgent;
   onInputCommitted?: () => void | Promise<void>;
   /** Return true when the durable worker should pause at the next Pi boundary. */
   shouldYield?: () => boolean;
@@ -230,15 +275,20 @@ export function assertRunRoutingConsistency(
     if (source.teamId !== destination.teamId) {
       throw new TypeError("Slack source and destination teams do not match");
     }
-  } else if (
-    source.platform === "local" &&
-    destination.platform === "local" &&
-    (source.conversationId !== request.conversationId ||
-      destination.conversationId !== request.conversationId)
-  ) {
-    throw new TypeError(
-      "Local source, destination, and run conversation IDs do not match",
-    );
+  } else if (source.platform === "local" && destination.platform === "local") {
+    if (source.conversationId !== destination.conversationId) {
+      throw new TypeError(
+        "Local source and destination conversation IDs do not match",
+      );
+    }
+    if (
+      request.routing.surface !== "internal" &&
+      destination.conversationId !== request.conversationId
+    ) {
+      throw new TypeError(
+        "Local source, destination, and run conversation IDs do not match",
+      );
+    }
   }
 
   const actor = request.routing.dispatch?.actor ?? request.routing.actor;

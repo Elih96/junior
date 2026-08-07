@@ -9,7 +9,8 @@ file.
 
 1. `ingress/` parses, classifies, and normalizes source events.
 2. Mailbox-backed sources append work and send a queue nudge through
-   `task-execution/`.
+   `task-execution/`. `agent-invocations/` uses the same mailbox for
+   destinationless child work.
 3. A worker acquires the conversation lease, drains pending input, and restores
    persisted conversation state.
 4. `runtime/` prepares and orchestrates the run; `agent/` owns Pi execution.
@@ -34,6 +35,8 @@ mailbox-backed provider.
 - `runtime/`: turn orchestration and provider-neutral delivery callbacks.
 - `agent-dispatch/`: durable task and plugin dispatch authority, mailbox
   adaptation, and plugin-facing outcome projection.
+- `agent-invocations/`: durable parent/child bindings, delegated work, and
+  internal terminal results.
 - `event-tasks/`: durable instructions matched to normalized resource events.
 - `scheduled-tasks/`: durable scheduled instructions, authoring tools, and
   heartbeat dispatch.
@@ -104,8 +107,10 @@ delegation without becoming the execution actor or a general task owner.
   back past delivered assistant output.
 - Unexpected failures propagate to the boundary that owns capture and fallback
   delivery.
-- Actor, destination, conversation, and credential context remain explicit
-  across asynchronous boundaries.
+- Actor, execution destination, conversation, and credential context remain
+  explicit across asynchronous boundaries. A destinationless child
+  conversation receives its bounded execution destination from its durable
+  agent invocation.
 - Host-owned runtime context and the actor's current instruction are separate
   user messages. The context message immediately precedes the instruction,
   remains context-authority on resume, and may be replaced before a later model

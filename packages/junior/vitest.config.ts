@@ -33,7 +33,11 @@ export default defineConfig({
       "tests/integration/workflow/**/*.test.ts",
     ],
     globalSetup: ["tests/fixtures/postgres/global-setup.ts"],
-    setupFiles: ["tests/msw/setup.ts", "tests/fixtures/postgres/setup.ts"],
+    setupFiles: [
+      "tests/msw/setup.ts",
+      "tests/fixtures/postgres/setup.ts",
+      "tests/fixtures/experimental-setup.ts",
+    ],
     coverage: {
       provider: "v8",
       reporter: ["json", "lcov"],

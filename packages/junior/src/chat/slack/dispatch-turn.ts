@@ -94,7 +94,7 @@ export function createSlackDispatchTurnRunner(options: {
       conversationId,
       destination: dispatch.destination,
       execution: {
-        authorizationFlowMode: "disabled",
+        disabledFeatures: ["interactive-auth"],
         channelConfiguration: options.getChannelConfiguration(
           dispatch.destination.channelId,
         ),

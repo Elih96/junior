@@ -68,6 +68,7 @@ export default defineConfig({
       path.resolve(__dirname, "src/setup.ts"),
       path.resolve(juniorPackageRoot, "tests/msw/setup.ts"),
       path.resolve(juniorPackageRoot, "tests/fixtures/postgres/setup.ts"),
+      path.resolve(juniorPackageRoot, "tests/fixtures/experimental-setup.ts"),
     ],
     outputFile: { json: evalReportPath },
     reporters: [new DefaultEvalReporter(), "json"],

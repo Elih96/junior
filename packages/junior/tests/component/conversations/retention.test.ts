@@ -14,6 +14,8 @@ import {
   juniorConversationEvents,
   juniorConversations,
   juniorDestinations,
+  juniorAgentBindings,
+  juniorAgentInvocations,
 } from "@/db/schema";
 import type { JuniorDestinationVisibility } from "@/db/schema/destinations";
 import type { JuniorSqlDatabase } from "@/db/db";
@@ -248,6 +250,29 @@ describe("retention purge job", () => {
       parentConversationId: "child",
       lastActivityAtMs: BASE_MS,
     });
+    await fixture.sql
+      .db()
+      .insert(juniorAgentInvocations)
+      .values({
+        actor: { name: "parent-agent", platform: "system" },
+        childConversationId: "child",
+        createdAt: new Date(BASE_MS),
+        destination: { conversationId: "root", platform: "local" },
+        destinationVisibility: "private",
+        input: "private delegated input",
+        invocationId: "agent-invocation:retained",
+        mailboxStatus: "appended",
+        parentConversationId: "root",
+        result: "private delegated result",
+        source: {
+          conversationId: "root",
+          platform: "local",
+          visibility: "private",
+        },
+        status: "completed",
+        terminalAt: new Date(BASE_MS),
+        updatedAt: new Date(BASE_MS),
+      });
 
     // The child is never a purge candidate on its own: it rides the root.
     const result = await runRetentionPurge(fixture.sql, {
@@ -264,6 +289,9 @@ describe("retention purge job", () => {
     expect(await eventCount(fixture.sql, "root")).toBe(0);
     expect(await eventCount(fixture.sql, "child")).toBe(0);
     expect(await eventCount(fixture.sql, "grandchild")).toBe(0);
+    await expect(
+      fixture.sql.db().select().from(juniorAgentInvocations),
+    ).resolves.toEqual([]);
   });
 
   it("uses the freshest activity in the tree for selection and destructive recheck", async () => {
@@ -381,6 +409,50 @@ describe("retention purge job", () => {
 
     expect(result.purged).toBe(1);
     expect(await eventCount(fixture.sql, "remaining-child")).toBe(0);
+  });
+
+  it("selects and purges a tree whose remaining content is only an agent binding", async () => {
+    const dest = await seedDestination(fixture.sql, "private");
+    await seedConversation(fixture.sql, {
+      conversationId: "binding-root",
+      destinationId: dest,
+      lastActivityAtMs: BASE_MS,
+      title: null,
+      channelName: null,
+      withContent: false,
+    });
+    await fixture.sql
+      .db()
+      .update(juniorConversations)
+      .set({ actor: null })
+      .where(eq(juniorConversations.conversationId, "binding-root"));
+    await seedConversation(fixture.sql, {
+      conversationId: "binding-child",
+      parentConversationId: "binding-root",
+      lastActivityAtMs: BASE_MS,
+      title: null,
+      channelName: null,
+      withContent: false,
+    });
+    await fixture.sql
+      .db()
+      .update(juniorConversations)
+      .set({ actor: null })
+      .where(eq(juniorConversations.conversationId, "binding-child"));
+    await fixture.sql.db().insert(juniorAgentBindings).values({
+      childConversationId: "binding-child",
+      name: "retained-name",
+      parentConversationId: "binding-root",
+    });
+
+    const result = await runRetentionPurge(fixture.sql, {
+      nowMs: BASE_MS + 30 * DAY_MS,
+    });
+
+    expect(result.purged).toBe(1);
+    await expect(
+      fixture.sql.db().select().from(juniorAgentBindings),
+    ).resolves.toEqual([]);
   });
 
   it("purges up to the batch limit and leaves the remainder for the next run", async () => {

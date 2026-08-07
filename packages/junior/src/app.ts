@@ -19,6 +19,11 @@ import { logException, logWarn } from "@/chat/logging";
 import { executeAgentRun } from "@/chat/agent";
 import { normalizeSandboxEgressTracePropagationDomains } from "@/chat/sandbox/egress/tracing";
 import {
+  getExperimentalFeatures,
+  setExperimentalFeatures,
+  type ExperimentalFeaturesConfig,
+} from "@/chat/experimental";
+import {
   getSandboxResourceConfig,
   setSandboxResourceConfig,
   type SandboxResourceConfig,
@@ -68,6 +73,7 @@ import {
   type VercelConversationWorkCallbackOptions,
 } from "@/chat/task-execution/vercel-callback";
 import { getVercelConversationWorkQueue } from "@/chat/task-execution/vercel-queue";
+import { bindSpawnAgent } from "@/chat/agent-invocations/spawn";
 import {
   createVercelPluginTaskCallback,
   registerVercelPluginTaskDevConsumer,
@@ -94,6 +100,12 @@ export type {
 export interface JuniorAppOptions {
   /** Authenticated dashboard mounted by core when configured. */
   dashboard?: JuniorDashboardOptions;
+  /**
+   * Opt into unstable product features. Experimental keys may change or be
+   * removed without a stable migration path; leave unset in production unless
+   * you are deliberately dogfooding a pre-stable surface.
+   */
+  experimental?: ExperimentalFeaturesConfig;
   /** Slack-specific overrides applied after env parsing. */
   slack?: {
     /** Slack emoji shown while Junior is processing. Defaults to `eyes`. */
@@ -610,6 +622,7 @@ export async function createApp(options?: JuniorAppOptions): Promise<Hono> {
   const previousConfigDefaults = getConfigDefaults();
   const previousSlackReactionConfig = getSlackReactionConfig();
   const previousSandboxResources = getSandboxResourceConfig();
+  const previousExperimentalFeatures = getExperimentalFeatures();
   const previousDashboardLinkOptions =
     setDashboardConversationLinkOptions(dashboard);
   let pluginRoutes: PluginRouteRegistration[] = [];
@@ -647,6 +660,7 @@ export async function createApp(options?: JuniorAppOptions): Promise<Hono> {
         options?.sandbox?.egressTracePropagationDomains,
       );
     setSandboxResourceConfig(options?.sandbox);
+    setExperimentalFeatures(options?.experimental);
     setConfigDefaults(options?.configDefaults);
     warnUnregisteredConfigDefaults(options?.configDefaults);
     if (options?.slack) {
@@ -670,13 +684,17 @@ export async function createApp(options?: JuniorAppOptions): Promise<Hono> {
     setConfigDefaults(previousConfigDefaults);
     setSlackReactionConfig(previousSlackReactionConfig);
     setSandboxResourceConfig(previousSandboxResources);
+    setExperimentalFeatures(previousExperimentalFeatures);
     setDashboardConversationLinkOptions(previousDashboardLinkOptions);
     throw error;
   }
 
   const waitUntil = options?.waitUntil ?? (await defaultWaitUntil());
   const tracePropagation = { domains: sandboxEgressTracePropagationDomains };
+  const conversationWorkQueue = getVercelConversationWorkQueue();
   const agentRunner = createAgentRunner(executeAgentRun, {
+    bindSpawnAgent: (request) =>
+      bindSpawnAgent(request, { queue: conversationWorkQueue }),
     tracePropagation,
   });
   const runtimeServiceOverrides = {

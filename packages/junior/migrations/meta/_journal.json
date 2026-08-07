@@ -148,6 +148,13 @@
       "when": 1785960181727,
       "tag": "0020_restrict_task_execution_kinds",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1785985649150,
+      "tag": "0021_first_warhawk",
+      "breakpoints": true
     }
   ]
 }

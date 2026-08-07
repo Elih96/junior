@@ -58,6 +58,7 @@ function assistantMessage(text: string, timestamp: number): PiMessage {
 
 function failingConversationStore(): ConversationStore {
   return {
+    createChild: vi.fn(),
     get: vi.fn(),
     getConversationIdByProviderConversation: vi.fn(async () => undefined),
     bindProviderConversation: vi.fn(),

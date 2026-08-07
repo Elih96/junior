@@ -14,6 +14,7 @@ import { createSearchMcpToolsTool } from "@/chat/tools/skill/search-mcp-tools";
 import { createReadFileTool } from "@/chat/tools/sandbox/read-file";
 import { createViewImageTool } from "@/chat/tools/sandbox/view-image";
 import { createReportProgressTool } from "@/chat/tools/runtime/report-progress";
+import { createSpawnAgentTool } from "@/chat/tools/runtime/spawn-agent";
 import { createResourceEventTools } from "@/chat/tools/resource-events";
 import { getResourceEventCatalog } from "@/chat/resource-events/runtime-catalog";
 import { createEventTaskTools } from "@/chat/tools/event-tasks";
@@ -161,6 +162,10 @@ export function createTools(
 
   if (context.handoff) {
     tools.handoff = createHandoffTool(context.handoff);
+  }
+
+  if (context.spawnAgent) {
+    tools.spawnAgent = createSpawnAgentTool(context.spawnAgent);
   }
 
   if (context.mcpToolManager) {

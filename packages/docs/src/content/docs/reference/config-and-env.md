@@ -118,6 +118,28 @@ The egress proxy verifies Vercel-signed Sandbox OIDC tokens per request to authe
 
 Provider credentials and other plugin-specific variables live on each plugin setup page under [Extend](/extend/). Keep this page limited to core runtime configuration.
 
+## Experimental features
+
+Unstable product surfaces opt in through `createApp({ experimental })`, the same
+pattern used by frameworks such as Next.js. Features default off, may change
+without a stable migration path, and should stay unset in production unless you
+are deliberately dogfooding them. There is no environment-variable opt-in.
+
+```ts
+import { createApp } from "@sentry/junior";
+
+const app = await createApp({
+  experimental: {
+    // Model-facing spawnAgent for durable child agent work. Incomplete; keep off
+    // unless you are testing the #879 runtime.
+    subagents: true,
+  },
+});
+```
+
+`junior chat` enables experimental `subagents` automatically because it is the
+local createApp-equivalent entrypoint and already wires the child-worker path.
+
 ## Install-wide config defaults
 
 Pass `configDefaults` to `createApp()` to set provider defaults across all conversations:

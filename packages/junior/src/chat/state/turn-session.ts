@@ -266,26 +266,32 @@ async function recordConversationActivityMetadata(args: {
   summary: AgentTurnSessionSummary;
 }): Promise<void> {
   const conversationStore = args.conversationStore ?? getConversationStore();
-  const source =
-    args.summary.destination?.platform === "local"
+  const conversation = await conversationStore.get({
+    conversationId: args.summary.conversationId,
+  });
+  const isChild = Boolean(conversation?.lineage);
+  const destination = isChild ? undefined : args.summary.destination;
+  const source = isChild
+    ? "internal"
+    : destination?.platform === "local"
       ? "local"
       : args.summary.surface;
   await conversationStore.recordActivity({
     activityAtMs: args.summary.updatedAtMs,
     channelName: args.summary.channelName,
     conversationId: args.summary.conversationId,
-    destination: args.summary.destination,
+    destination,
     nowMs: args.nowMs,
     actor: sessionLogActor(args.summary.actor),
     source,
     ...(args.summary.source ? { sessionSource: args.summary.source } : {}),
-    visibility: args.destinationVisibility,
+    visibility: isChild ? undefined : args.destinationVisibility,
   });
   await conversationStore.recordExecution({
     channelName: args.summary.channelName,
     conversationId: args.summary.conversationId,
     createdAtMs: args.summary.startedAtMs,
-    destination: args.summary.destination,
+    destination,
     execution: conversationExecutionFromSummary(args.summary),
     lastActivityAtMs: args.summary.updatedAtMs,
     metrics: {
@@ -297,7 +303,7 @@ async function recordConversationActivityMetadata(args: {
     actor: sessionLogActor(args.summary.actor),
     source,
     updatedAtMs: args.nowMs,
-    visibility: args.destinationVisibility,
+    visibility: isChild ? undefined : args.destinationVisibility,
   });
 }
 

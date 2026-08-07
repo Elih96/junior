@@ -236,13 +236,45 @@ async function prepareLocalChatRun(
 ) {
   defaultStateAdapterForLocalChat();
   await configureLocalChatPlugins(pluginSet);
+  // Local chat is the createApp-equivalent entrypoint. Opt into experimental
+  // subagents here so spawnAgent matches the wired child-worker path.
+  const { setExperimentalFeatures } = await import("@/chat/experimental");
+  setExperimentalFeatures({ subagents: true });
   const { runLocalAgentTurn } = await import("@/chat/local/runner");
   const { startLocalOAuthCallbackServer } =
     await import("@/chat/local/oauth-callback-server");
   const { createLocalOAuthState } = await import("@/chat/local/oauth-relay");
   const { createLocalSandboxEgressSignalTransport } =
     await import("@/chat/local/sandbox-egress-signals");
-  const agentRunner = createAgentRunner(executeAgentRun);
+  const { bindSpawnAgent } = await import("@/chat/agent-invocations/spawn");
+  const { createAgentInvocationWorker, routeAgentInvocationWork } =
+    await import("@/chat/agent-invocations/work");
+  const { createLocalConversationWork } =
+    await import("@/chat/local/conversation-work");
+  const { processConversationWork } =
+    await import("@/chat/task-execution/worker");
+  let agentRunner: ReturnType<typeof createAgentRunner> | undefined;
+  const localConversationWork = createLocalConversationWork(async (message) => {
+    if (!agentRunner) {
+      throw new Error("Local agent runner is not ready");
+    }
+    const run = routeAgentInvocationWork({
+      fallbackWorker: async () => {
+        throw new Error("Local child queue received non-invocation work");
+      },
+      invocationWorker: createAgentInvocationWorker({
+        agentRunner,
+      }),
+    });
+    await processConversationWork(message, {
+      queue: localConversationWork.queue,
+      run,
+    });
+  });
+  agentRunner = createAgentRunner(executeAgentRun, {
+    bindSpawnAgent: (request) =>
+      bindSpawnAgent(request, { queue: localConversationWork.queue }),
+  });
   const oauthCallback = await startLocalOAuthCallbackServer(agentRunner);
   const deps: LocalAgentTurnDeps = {
     agentRunner,
@@ -271,7 +303,13 @@ async function prepareLocalChatRun(
     },
   };
   return {
-    close: oauthCallback.close,
+    close: async () => {
+      try {
+        await localConversationWork.drain();
+      } finally {
+        await oauthCallback.close();
+      }
+    },
     conversationId: newRunConversationId(),
     runLocalAgentTurn,
     deps,

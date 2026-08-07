@@ -33,6 +33,8 @@ import {
 import { createAgentRunner } from "@/chat/runtime/agent-runner";
 import { ConversationTurnLifecycleService } from "@/chat/conversations/turn-lifecycle";
 import { getConversationEventStore } from "@/chat/db";
+import { bindSpawnAgent } from "@/chat/agent-invocations/spawn";
+import { getVercelConversationWorkQueue } from "@/chat/task-execution/vercel-queue";
 
 export interface JuniorRuntimeServices {
   conversationMemory: ConversationMemoryService;
@@ -71,6 +73,13 @@ export function createJuniorRuntimeServices(
     downloadFile:
       overrides.visionContext?.downloadFile ?? downloadPrivateSlackFile,
   });
+  const agentRunner =
+    overrides.replyExecutor?.agentRunner ??
+    createAgentRunner(executeAgentRunImpl, {
+      bindSpawnAgent: (request) =>
+        bindSpawnAgent(request, { queue: getVercelConversationWorkQueue }),
+      tracePropagation: overrides.sandbox?.tracePropagation,
+    });
 
   return {
     conversationMemory,
@@ -78,11 +87,7 @@ export function createJuniorRuntimeServices(
     replyExecutor: {
       contextCompactor:
         overrides.replyExecutor?.contextCompactor ?? contextCompactor,
-      agentRunner:
-        overrides.replyExecutor?.agentRunner ??
-        createAgentRunner(executeAgentRunImpl, {
-          tracePropagation: overrides.sandbox?.tracePropagation,
-        }),
+      agentRunner,
       getAwaitingAgentContinueRequest:
         overrides.replyExecutor?.getAwaitingAgentContinueRequest ??
         getAwaitingAgentContinueRequest,
