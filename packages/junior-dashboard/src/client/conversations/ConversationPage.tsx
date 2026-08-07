@@ -286,12 +286,6 @@ function ConversationIdentity(props: {
   const email = props.conversation?.actorIdentity?.email?.trim();
   const owner = conversationActorLabel(props.conversation);
   const id = props.conversationId ?? props.conversation?.id;
-  const location = props.conversation
-    ? slackLocationLabel(props.conversation, {
-        includeId: false,
-      })
-    : undefined;
-  const sourceUrl = props.detail?.sourceUrl ?? props.conversation?.sourceUrl;
   const ownerNode = owner ? (
     email ? (
       <Link
@@ -318,22 +312,14 @@ function ConversationIdentity(props: {
   return (
     <>
       <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 md:hidden">
-        {location ? (
-          <span className="min-w-0 max-w-full truncate">
-            <SourceLocation label={location} sourceUrl={sourceUrl} />
-          </span>
-        ) : null}
-        {location && ownerNode ? (
-          <span className="text-dashboard-text-muted">·</span>
-        ) : null}
         {ownerNode ? (
           <span className="min-w-0 max-w-full truncate">{ownerNode}</span>
         ) : null}
         {sentryLink ? (
           <>
-            {(location || ownerNode) && (
+            {ownerNode ? (
               <span className="text-dashboard-text-muted">·</span>
-            )}
+            ) : null}
             {sentryLink}
           </>
         ) : null}
@@ -395,6 +381,8 @@ function ConversationStats(props: {
   });
   const sourceUrl = props.detail?.sourceUrl ?? props.conversation.sourceUrl;
   const durationLabel = formatConversationDuration(props.conversation);
+  const live =
+    (props.detail?.status ?? props.conversation.status) === "active";
   const rawStats: Array<MetricListItem | undefined> = [
     location
       ? {
@@ -425,6 +413,7 @@ function ConversationStats(props: {
                     ).length
                   : undefined
               }
+              live={live}
               modelUsage={props.detail?.modelUsage}
               summary={tokenSummary}
             />
@@ -434,7 +423,8 @@ function ConversationStats(props: {
       : undefined,
     costSummary ||
     props.detail?.auxiliaryCosts ||
-    props.conversation.auxiliaryCosts
+    props.conversation.auxiliaryCosts ||
+    live
       ? {
           content: (
             <CostMetric
@@ -442,6 +432,7 @@ function ConversationStats(props: {
                 props.detail?.auxiliaryCosts ??
                 props.conversation.auxiliaryCosts
               }
+              live={live}
               modelUsage={props.detail?.modelUsage}
               summary={costSummary}
             />
@@ -460,7 +451,11 @@ function ConversationStats(props: {
     !props.detail || (toolSummary && toolSummary.total > 0)
       ? {
           content: (
-            <ToolCallsMetric loading={!props.detail} summary={toolSummary} />
+            <ToolCallsMetric
+              live={live}
+              loading={!props.detail}
+              summary={toolSummary}
+            />
           ),
           key: "tools",
         }
@@ -471,7 +466,7 @@ function ConversationStats(props: {
   );
 
   return (
-    <div className="col-span-full mt-1 hidden border-t border-white/[0.07] pt-3 md:block">
+    <div className="col-span-full mt-1 border-t border-white/[0.07] pt-3">
       <MetricList
         className="break-words text-xs leading-[1.5] text-dashboard-text-muted"
         items={stats}
