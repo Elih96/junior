@@ -8,8 +8,8 @@ import {
   slackEvals,
   visibleAssistantText,
   visibleThreadReplies,
-} from "../../src/helpers";
-import { warmSandboxSnapshot } from "../../src/snapshot-warmup";
+} from "../../../src/helpers";
+import { warmSandboxSnapshot } from "../../../src/snapshot-warmup";
 
 const SNAPSHOT_WARMUP_TIMEOUT_MS = 10 * 60 * 1000;
 
@@ -114,7 +114,10 @@ describeEval("Slack Message Delivery", slackEvals, (it) => {
     expect(sendFilesCalls).toEqual([
       expect.objectContaining({
         status: "ok",
-        result: expect.objectContaining({ ok: true, status: "success" }),
+        result: expect.objectContaining({
+          file_count: 1,
+          file_ids: expect.arrayContaining([expect.any(String)]),
+        }),
       }),
     ]);
     expect(hasImageAttachment(result.session)).toBe(true);
