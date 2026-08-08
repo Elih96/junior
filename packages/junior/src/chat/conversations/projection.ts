@@ -15,7 +15,9 @@ import type {
   AuthorizationKind,
   ConversationEvent,
 } from "@/chat/conversations/history";
+import type { RepositoryInstructions } from "@/chat/repository-instructions";
 import {
+  agentsInstructionsUpdatedEvent,
   authenticationLinkedEvent,
   authenticationUnlinkedEvent,
   JUNIOR_NATIVE_EVENT_NAMESPACE,
@@ -554,6 +556,104 @@ export async function recordAuthenticationUnlinked(
   args: AuthenticationAccountChangeArgs,
 ): Promise<void> {
   await recordAuthenticationAccountChange("unlinked", args);
+}
+
+type AgentsInstructionsTransitionArgs = {
+  conversationId: string;
+  instructions?: RepositoryInstructions;
+  turnId: string;
+};
+
+type AgentsEventContent = {
+  action: "loaded" | "replaced" | "cleared";
+  directory?: string;
+  fingerprint: string;
+};
+
+async function loadAgentsEvent(conversationId: string): Promise<
+  | {
+      content: AgentsEventContent;
+      seq: number;
+    }
+  | undefined
+> {
+  const event = await getConversationEventStore().loadLatestStructuredEvent(
+    conversationId,
+    JUNIOR_NATIVE_EVENT_NAMESPACE,
+    agentsInstructionsUpdatedEvent.eventName,
+  );
+  if (!event || event.data.type !== "structured_event") return undefined;
+  return {
+    content: agentsInstructionsUpdatedEvent.parse(
+      event.data.content,
+    ) as AgentsEventContent,
+    seq: event.seq,
+  };
+}
+
+function agentsInstructionsIdempotencyKey(args: {
+  action: "loaded" | "replaced" | "cleared";
+  fingerprint: string;
+  previousSeq?: number;
+  turnId: string;
+}): string {
+  const previous = args.previousSeq ?? "none";
+  return (
+    `native:${JUNIOR_NATIVE_EVENT_NAMESPACE}:agents_instructions_updated:` +
+    `${args.turnId}:${args.action}:${previous}->${args.fingerprint}`
+  );
+}
+
+/** Record one AGENTS.md bootstrap transition as host transcript metadata. */
+export async function recordAgentsInstructionsUpdated(
+  args: AgentsInstructionsTransitionArgs,
+): Promise<void> {
+  const previous = await loadAgentsEvent(args.conversationId);
+  const instructions = args.instructions;
+  if (
+    previous &&
+    ((!instructions && previous.content.action === "cleared") ||
+      (instructions &&
+        previous.content.action !== "cleared" &&
+        previous.content.fingerprint === instructions.fingerprint &&
+        previous.content.directory === instructions.directory))
+  ) {
+    return;
+  }
+  const action = !instructions
+    ? "cleared"
+    : previous && previous.content.action !== "cleared"
+      ? "replaced"
+      : "loaded";
+  const fingerprint = instructions?.fingerprint ?? "cleared";
+  const content = agentsInstructionsUpdatedEvent.parse({
+    action,
+    fingerprint,
+    sources: instructions?.sources ?? [],
+    ...(instructions ? { directory: instructions.directory } : {}),
+    ...(instructions
+      ? { textBytes: Buffer.byteLength(instructions.text, "utf8") }
+      : {}),
+  });
+  await getConversationEventStore().append(args.conversationId, [
+    {
+      createdAtMs: Date.now(),
+      idempotencyKey: agentsInstructionsIdempotencyKey({
+        action,
+        fingerprint,
+        previousSeq: previous?.seq,
+        turnId: args.turnId,
+      }),
+      data: {
+        type: "structured_event",
+        namespace: JUNIOR_NATIVE_EVENT_NAMESPACE,
+        name: agentsInstructionsUpdatedEvent.eventName,
+        version: agentsInstructionsUpdatedEvent.version,
+        turnId: args.turnId,
+        content,
+      },
+    },
+  ]);
 }
 
 /** Load a previously selected execution profile for a resumed turn. */

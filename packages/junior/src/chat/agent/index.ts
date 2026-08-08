@@ -44,6 +44,7 @@ import {
   loadConnectedMcpProviders,
   loadTurnRoute,
   openConversationProjection,
+  recordAgentsInstructionsUpdated,
   recordToolExecutionStarted,
   recordMcpProviderConnected,
   recordTurnRoute,
@@ -529,7 +530,10 @@ async function executeAgentRunInPrivacyContext(
           source: storedTurnRoute.source,
         };
       }
-    } else if (activeModelProfile === STANDARD_MODEL_PROFILE && handoffEnabled) {
+    } else if (
+      activeModelProfile === STANDARD_MODEL_PROFILE &&
+      handoffEnabled
+    ) {
       turnRoute = await selectTurnRoute({
         completeObject,
         conversationContext: input.conversationContext,
@@ -795,6 +799,24 @@ async function executeAgentRunInPrivacyContext(
     const initialRepositoryInstructions = wiring.getSandboxRef()
       ? await wiring.captureRepositoryInstructions()
       : undefined;
+    const recordAgentsTransition = async (
+      instructions: typeof initialRepositoryInstructions,
+    ) => {
+      try {
+        await recordAgentsInstructionsUpdated({
+          conversationId,
+          instructions,
+          turnId,
+        });
+      } catch (error) {
+        // Host-only transcript markers are best-effort reporting writes; a
+        // failed append must not abort the in-flight model turn.
+        logException(error, "agent.agents_instructions_event.append.failed");
+      }
+    };
+    if (initialRepositoryInstructions) {
+      await recordAgentsTransition(initialRepositoryInstructions);
+    }
     const getPendingAuthPause = wiring.getPendingAuthPause;
     const toolsWithoutHandoff = wiring.agentTools.filter(
       (tool) => tool.name !== HANDOFF_TOOL_NAME,
@@ -871,6 +893,7 @@ async function executeAgentRunInPrivacyContext(
       capture: wiring.captureRepositoryInstructions,
       hasSandbox: () => Boolean(wiring.getSandboxRef()),
       initialInstructions: initialRepositoryInstructions,
+      onTransition: recordAgentsTransition,
       promptContextContentParts,
       restoredMessages: existingSessionRecord?.piMessages,
       restoredProvenance: existingSessionRecord?.piMessageProvenance,
