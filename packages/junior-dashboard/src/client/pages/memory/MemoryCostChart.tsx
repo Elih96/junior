@@ -1,6 +1,8 @@
 import {
   ActivityChartDateLabels,
+  ActivityChartGrid,
   ActivityTooltipRows,
+  ChartSvg,
   createActivityChartLayout,
   formatActivityDate,
 } from "../../components/charts/ActivityChart";
@@ -40,11 +42,10 @@ export function MemoryCostChart(props: {
     0.01,
     ...days.map((day) => day.extraction.costUsd + day.recall.costUsd),
   );
-  const layout = createActivityChartLayout(200);
   // Cost charts need a wider left gutter for currency tick labels.
-  const left = 64;
-  const plotWidth = layout.width - left - layout.right;
-  const step = days.length > 0 ? plotWidth / days.length : plotWidth;
+  const layout = createActivityChartLayout(200, { left: 64 });
+  const step =
+    days.length > 0 ? layout.plotWidth / days.length : layout.plotWidth;
   const barWidth = Math.max(2, Math.min(13, step * 0.68));
 
   return (
@@ -76,43 +77,22 @@ export function MemoryCostChart(props: {
       </div>
 
       <div className="relative mt-4 overflow-hidden">
-        <svg
+        <ChartSvg
           aria-label={`Memory extraction and recall cost during the last ${props.range} days`}
-          className="block h-auto min-h-40 w-full"
-          role="img"
-          viewBox={`0 0 ${layout.width} ${layout.height}`}
+          className="min-h-40"
+          layout={layout}
         >
-          {[maximum, maximum / 2, 0].map((value, index) => {
-            const y = layout.top + index * (layout.plotHeight / 2);
-            return (
-              <g key={index}>
-                <line
-                  stroke="rgba(255,255,255,0.07)"
-                  strokeDasharray="3 5"
-                  x1={left}
-                  x2={layout.width - layout.right}
-                  y1={y}
-                  y2={y}
-                />
-                <text
-                  fill="rgba(255,255,255,0.34)"
-                  fontFamily="ui-monospace, monospace"
-                  fontSize="12"
-                  textAnchor="end"
-                  x={left - 7}
-                  y={y + 3}
-                >
-                  {formatCostSummary({ total: value })}
-                </text>
-              </g>
-            );
-          })}
+          <ActivityChartGrid
+            format={(value) => formatCostSummary({ total: value })}
+            layout={layout}
+            maximum={maximum}
+          />
           {days.map((day, index) => {
             const extractionHeight =
               (day.extraction.costUsd / maximum) * layout.plotHeight;
             const recallHeight =
               (day.recall.costUsd / maximum) * layout.plotHeight;
-            const x = left + index * step + (step - barWidth) / 2;
+            const x = layout.left + index * step + (step - barWidth) / 2;
             const dayTotal = day.extraction.costUsd + day.recall.costUsd;
             return (
               <Tooltip
@@ -174,10 +154,10 @@ export function MemoryCostChart(props: {
           })}
           <ActivityChartDateLabels
             dates={days.map((day) => day.date)}
-            layout={{ ...layout, left }}
-            xPosition={(index) => left + index * step + step / 2}
+            layout={layout}
+            xPosition={(index) => layout.left + index * step + step / 2}
           />
-        </svg>
+        </ChartSvg>
         {runs === 0 ? (
           <div className="pointer-events-none absolute inset-0 grid place-items-center pt-12 font-mono text-xs text-dashboard-text-muted">
             No memory extraction or recall ran in this period.
