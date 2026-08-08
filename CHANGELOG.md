@@ -1,4 +1,21 @@
 # Changelog
+## 0.142.0
+
+### New Features ✨
+
+- (tasks) Generate and display short task titles by @sentry-junior in [#1318](https://github.com/getsentry/junior/pull/1318)
+
+### Bug Fixes 🐛
+
+- (dashboard) Render Guardian review bars by @sentry-junior in [#1325](https://github.com/getsentry/junior/pull/1325)
+- (scheduler) Require action review for delete and run-now by @sentry-junior in [#1324](https://github.com/getsentry/junior/pull/1324)
+- (slack) Route silent acknowledgements through reactions by @sentry-junior in [#1322](https://github.com/getsentry/junior/pull/1322)
+
+### Internal Changes 🔧
+
+- (chat) Remove unused conversation working stats by @sentry-junior in [#1323](https://github.com/getsentry/junior/pull/1323)
+- (evals) Align scheduled post intent with Guardian by @sentry-junior in [#1326](https://github.com/getsentry/junior/pull/1326)
+
 ## 0.141.0
 
 ### New Features ✨
