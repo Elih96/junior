@@ -941,6 +941,8 @@ describe("local agent runner", () => {
     );
 
     const state = await getPersistedThreadState(conversationId!);
+    expect(state.conversation).not.toHaveProperty("stats");
+    expect(state.conversation).not.toHaveProperty("backfill");
     const conversation = coerceThreadConversationState(state);
     await hydrateConversationMessages({
       conversation,
