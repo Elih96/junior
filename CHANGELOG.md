@@ -1,4 +1,29 @@
 # Changelog
+## 0.144.0
+
+### New Features ✨
+
+#### Dashboard
+
+- Add task navigation with shared filters by @sentry-junior in [#1339](https://github.com/getsentry/junior/pull/1339)
+- Add opt-in average line to activity charts by @sentry-junior in [#1338](https://github.com/getsentry/junior/pull/1338)
+- Link task-triggered conversations back to their task by @sentry-junior in [#1306](https://github.com/getsentry/junior/pull/1306)
+- Show daily profile usage in activity tooltips by @sentry-junior in [#1340](https://github.com/getsentry/junior/pull/1340)
+
+#### Other
+
+- (scheduler) Move scheduled tasks via list and update by @sentry-junior in [#1336](https://github.com/getsentry/junior/pull/1336)
+
+### Bug Fixes 🐛
+
+- (github) Treat sandbox clone as ordinary read work by @sentry-junior in [#1333](https://github.com/getsentry/junior/pull/1333)
+- (scheduler) Point management errors at current destination by @sentry-junior in [#1341](https://github.com/getsentry/junior/pull/1341)
+
+### Internal Changes 🔧
+
+- (dashboard) Share secondary navigation by @sentry-junior in [#1337](https://github.com/getsentry/junior/pull/1337)
+- (deps) Bump react-router from 7.16.0 to 7.18.2 by @dependabot in [#1295](https://github.com/getsentry/junior/pull/1295)
+
 ## 0.143.0
 
 ### Bug Fixes 🐛
