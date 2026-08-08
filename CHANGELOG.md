@@ -1,4 +1,24 @@
 # Changelog
+## 0.143.0
+
+### Bug Fixes 🐛
+
+#### Dashboard
+
+- Share chart header and axis label components by @sentry-junior in [#1329](https://github.com/getsentry/junior/pull/1329)
+- Share page-level time range selectors by @sentry-junior in [#1330](https://github.com/getsentry/junior/pull/1330)
+
+### Internal Changes 🔧
+
+#### Dashboard
+
+- Extract shared drawer components by @sentry-junior in [#1334](https://github.com/getsentry/junior/pull/1334)
+- Enable oxlint React hooks rules by @sentry-junior in [#1332](https://github.com/getsentry/junior/pull/1332)
+
+#### Other
+
+- (evals) Prefer natural user-led prompts by @sentry-junior in [#1327](https://github.com/getsentry/junior/pull/1327)
+
 ## 0.142.0
 
 ### New Features ✨
