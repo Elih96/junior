@@ -111,6 +111,7 @@ describe("persistAuthPauseSessionRecord", () => {
     expect(set.mock.calls.at(-1)?.[1]).toMatchObject({
       runtimeContext: [runtimeContext],
     });
+    expect(set.mock.calls.at(-1)?.[1]).not.toHaveProperty("modelId");
     expect(set.mock.calls.at(-1)?.[2]).toBe(24 * 60 * 60 * 1000);
     expect(appendToList).toHaveBeenCalledTimes(1);
     expect(appendToList.mock.calls[0]?.[0]).toBe(
@@ -211,6 +212,149 @@ describe("persistAuthPauseSessionRecord", () => {
     expect(sessionRecord).not.toHaveProperty("source");
     expect(sessionRecord).not.toHaveProperty("destination");
     expect(sessionRecord).not.toHaveProperty("actor");
+  });
+
+  it("keeps ops metadata in SQL and out of Redis turn-session records", async () => {
+    const { getStateAdapter } = await import("@/chat/state/adapter");
+    const { upsertAgentTurnSessionRecord } =
+      await import("@/chat/state/turn-session");
+    const { getConversationStore } = await import("@/chat/db");
+    const stateAdapter = getStateAdapter();
+    const set = vi.spyOn(stateAdapter, "set");
+    const actor = {
+      platform: "slack",
+      teamId: "T123",
+      userId: "U123",
+    } as const;
+    const usage = { inputTokens: 7, outputTokens: 3 };
+
+    await upsertAgentTurnSessionRecord({
+      actor,
+      channelName: "runtime-team",
+      conversationId: "slack:C123:ops-bag",
+      cumulativeDurationMs: 1_500,
+      cumulativeUsage: usage,
+      destination: SLACK_DESTINATION,
+      loadedSkillNames: ["github-code"],
+      modelId: "openai/gpt-5.6",
+      piMessages: [userMessage("ship it")],
+      reasoningLevel: "high",
+      sessionId: "turn-ops-bag",
+      sliceId: 1,
+      source: SLACK_SOURCE,
+      state: "running",
+    });
+
+    const redisRecord = set.mock.calls.at(-1)?.[1];
+    for (const field of [
+      "actors",
+      "channelName",
+      "cumulativeDurationMs",
+      "cumulativeUsage",
+      "loadedSkillNames",
+      "modelId",
+      "reasoningLevel",
+    ]) {
+      expect(redisRecord).not.toHaveProperty(field);
+    }
+    await expect(
+      getConversationStore().get({ conversationId: "slack:C123:ops-bag" }),
+    ).resolves.toMatchObject({
+      channelName: "runtime-team",
+      executionMetrics: { durationMs: 1_500, usage },
+    });
+  });
+
+  it("keeps session metrics when a work-lease mirror advances the execution run", async () => {
+    const { getConversationStore } = await import("@/chat/db");
+    const { getAgentTurnSessionRecord, upsertAgentTurnSessionRecord } =
+      await import("@/chat/state/turn-session");
+    const conversationStore = getConversationStore();
+    const conversationId = "local:metrics-work-lease";
+    const sessionId = "turn-metrics-work-lease";
+
+    await upsertAgentTurnSessionRecord({
+      conversationId,
+      cumulativeDurationMs: 1_500,
+      cumulativeUsage: { inputTokens: 7 },
+      modelId: "test/model",
+      piMessages: [userMessage("metered turn")],
+      sessionId,
+      sliceId: 1,
+      state: "running",
+    });
+    const conversation = await conversationStore.get({ conversationId });
+    expect(conversation).toBeDefined();
+    await conversationStore.recordExecution({
+      conversationId,
+      createdAtMs: conversation!.createdAtMs,
+      execution: {
+        runId: "work-lease-mirror",
+        status: "running",
+        updatedAtMs: conversation!.execution.updatedAtMs! + 1,
+      },
+      lastActivityAtMs: conversation!.lastActivityAtMs,
+      metrics: null,
+      updatedAtMs: conversation!.updatedAtMs + 1,
+    });
+
+    const recovered = await getAgentTurnSessionRecord(
+      conversationId,
+      sessionId,
+    );
+    expect(recovered).toMatchObject({
+      cumulativeDurationMs: 1_500,
+      cumulativeUsage: { inputTokens: 7 },
+    });
+    await upsertAgentTurnSessionRecord({
+      conversationId,
+      modelId: "test/model",
+      piMessages: recovered!.piMessages,
+      sessionId,
+      sliceId: 2,
+      state: "awaiting_resume",
+    });
+    await expect(
+      conversationStore.get({ conversationId }),
+    ).resolves.toMatchObject({
+      executionMetrics: {
+        durationMs: 1_500,
+        runId: sessionId,
+        usage: { inputTokens: 7 },
+      },
+    });
+  });
+
+  it("does not inherit metrics from a prior session", async () => {
+    const { getConversationStore } = await import("@/chat/db");
+    const { recordAgentTurnSessionSummary, upsertAgentTurnSessionRecord } =
+      await import("@/chat/state/turn-session");
+    const conversationStore = getConversationStore();
+    const conversationId = "local:metrics-session-scope";
+
+    await recordAgentTurnSessionSummary({
+      conversationId,
+      cumulativeDurationMs: 1_500,
+      cumulativeUsage: { inputTokens: 7 },
+      sessionId: "turn-first",
+      sliceId: 1,
+      state: "completed",
+    });
+    await upsertAgentTurnSessionRecord({
+      conversationId,
+      modelId: "test/model",
+      piMessages: [userMessage("second")],
+      sessionId: "turn-second",
+      sliceId: 1,
+      state: "running",
+    });
+
+    await expect(
+      conversationStore.get({ conversationId }),
+    ).resolves.toMatchObject({
+      execution: { runId: "turn-second" },
+      executionMetrics: { durationMs: 0 },
+    });
   });
 
   it("records Slack turn activity without replacing confirmed visibility", async () => {
@@ -1214,8 +1358,6 @@ describe("persistAuthPauseSessionRecord", () => {
     await expect(
       getAgentTurnSessionRecord("conversation-completed", "turn-completed"),
     ).resolves.toMatchObject({
-      modelId: "test-model",
-      reasoningLevel: "high",
       state: "completed",
       piMessages: [
         {
@@ -1440,41 +1582,6 @@ describe("persistAuthPauseSessionRecord", () => {
         resumeReason: "timeout",
       }),
     ).rejects.toThrow("changed before its committed boundary");
-  });
-
-  it("updates the active model and reasoning across slices", async () => {
-    const { getAgentTurnSessionRecord, upsertAgentTurnSessionRecord } =
-      await import("@/chat/state/turn-session");
-    const conversationId = "conversation-execution-profile";
-    const sessionId = "turn-execution-profile";
-    const messages = [userMessage("continue")];
-
-    await upsertAgentTurnSessionRecord({
-      conversationId,
-      sessionId,
-      sliceId: 1,
-      state: "awaiting_resume",
-      modelId: "openai/gpt-5.6",
-      reasoningLevel: "high",
-      resumeReason: "timeout",
-      piMessages: messages,
-    });
-    await upsertAgentTurnSessionRecord({
-      conversationId,
-      sessionId,
-      sliceId: 2,
-      state: "running",
-      modelId: "openai/gpt-5.6",
-      reasoningLevel: "low",
-      piMessages: messages,
-    });
-
-    await expect(
-      getAgentTurnSessionRecord(conversationId, sessionId),
-    ).resolves.toMatchObject({
-      modelId: "openai/gpt-5.6",
-      reasoningLevel: "low",
-    });
   });
 
   it("keeps older turn records pinned to their committed projection after reset", async () => {

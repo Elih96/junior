@@ -41,6 +41,11 @@ export interface Conversation {
   createdAtMs: number;
   destination?: Destination;
   execution: ConversationExecution;
+  executionMetrics?: {
+    durationMs: number;
+    runId?: string;
+    usage?: AgentTurnUsage;
+  };
   lastActivityAtMs: number;
   lineage?: ConversationLineage;
   location?: Location;
