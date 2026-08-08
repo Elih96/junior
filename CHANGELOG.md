@@ -1,4 +1,33 @@
 # Changelog
+## 0.140.0
+
+### New Features ✨
+
+- (scheduler) Include dashboard task links in schedule tool results by @sentry-junior in [#1305](https://github.com/getsentry/junior/pull/1305)
+
+### Bug Fixes 🐛
+
+#### Scheduler
+
+- Keep completed one-off tasks visible to creators by @sentry-junior in [#1304](https://github.com/getsentry/junior/pull/1304)
+- Emit scheduled-task lifecycle telemetry by @sentry-junior in [#1303](https://github.com/getsentry/junior/pull/1303)
+
+### Internal Changes 🔧
+
+#### Chat
+
+- Thin turn-session recovery indexes by @sentry-junior in [#1313](https://github.com/getsentry/junior/pull/1313)
+- Shorten turn session retention by @sentry-junior in [#1308](https://github.com/getsentry/junior/pull/1308)
+
+#### Evals
+
+- Remove direct memory adjudication case by @sentry-junior in [#1314](https://github.com/getsentry/junior/pull/1314)
+- Move wave-2 event-task and scheduler contracts by @sentry-junior in [#1312](https://github.com/getsentry/junior/pull/1312)
+- Bump vitest-evals and use Check Run score by @sentry-junior in [#1307](https://github.com/getsentry/junior/pull/1307)
+- Trigger suites independently by @sentry-junior in [#1311](https://github.com/getsentry/junior/pull/1311)
+- Move wave-1 system contracts into integration by @sentry-junior in [#1309](https://github.com/getsentry/junior/pull/1309)
+- Use native pass-rate gating under Evals jobs by @sentry-junior in [#1294](https://github.com/getsentry/junior/pull/1294)
+
 ## 0.139.0
 
 ### New Features ✨
