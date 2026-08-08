@@ -45,6 +45,31 @@ function buildThreadStatePayload(
   return payload;
 }
 
+/**
+ * Merge a payload into thread or channel scratch with Junior's TTL.
+ *
+ * Chat SDK state writes hardcode a 30-day TTL. This boundary owns Junior's
+ * shorter retention policy for the same scratch keys.
+ */
+async function mergePersistedState(
+  key: string,
+  payload: Record<string, unknown>,
+): Promise<void> {
+  if (Object.keys(payload).length === 0) {
+    return;
+  }
+
+  const stateAdapter = getStateAdapter();
+  await stateAdapter.connect();
+  const existing = (await stateAdapter.get<Record<string, unknown>>(key)) ?? {};
+  await stateAdapter.set(
+    key,
+    { ...existing, ...payload },
+    JUNIOR_THREAD_STATE_TTL_MS,
+  );
+}
+
+/** Merge an artifact patch while preserving per-list column mappings. */
 export function mergeArtifactsState(
   artifacts: ThreadArtifactsState,
   patch: Partial<ThreadArtifactsState> | undefined,
@@ -80,16 +105,16 @@ export function getPersistedSandboxState(
   };
 }
 
-/** Persist a thread-state patch through the Chat SDK thread interface. */
+/** Persist a thread-state patch for a Chat thread handle. */
 export async function persistThreadState(
   thread: Thread,
   patch: ThreadStatePatch,
 ): Promise<void> {
   // The visible transcript is durable in SQL, keyed by the conversation id —
   // which is the thread's own id here (its thread-state key), the same way
-  // persistThreadStateById treats its thread id. Sync it at this Chat-SDK
-  // persist boundary so scratch and transcript stay symmetric with the
-  // id-based boundary and never diverge.
+  // persistThreadStateById treats its thread id. Sync it at this persist
+  // boundary so scratch and transcript stay symmetric with the id-based
+  // boundary and never diverge.
   if (patch.conversation) {
     await persistConversationMessages({
       conversation: patch.conversation,
@@ -107,11 +132,16 @@ export async function persistThreadRuntimeState(
   thread: Thread,
   patch: ThreadStatePatch,
 ): Promise<void> {
-  const payload = buildThreadStatePayload(patch);
-  if (Object.keys(payload).length === 0) {
-    return;
+  const threadId =
+    toOptionalString(thread.id) ??
+    toOptionalString((thread as { runId?: unknown }).runId);
+  if (!threadId) {
+    throw new Error("thread id is required to persist runtime scratch");
   }
-  await thread.setState(payload);
+  await mergePersistedState(
+    threadStateKey(threadId),
+    buildThreadStatePayload(patch),
+  );
 }
 
 /** Load the persisted state payload for a thread without requiring a Chat singleton. */
@@ -155,30 +185,26 @@ export async function persistThreadStateById(
     });
   }
 
-  const payload = buildThreadStatePayload(patch);
-  if (Object.keys(payload).length === 0) {
-    return;
-  }
-
-  const stateAdapter = getStateAdapter();
-  await stateAdapter.connect();
-  const key = threadStateKey(threadId);
-  const existing = (await stateAdapter.get<Record<string, unknown>>(key)) ?? {};
-  await stateAdapter.set(
-    key,
-    { ...existing, ...payload },
-    JUNIOR_THREAD_STATE_TTL_MS,
+  await mergePersistedState(
+    threadStateKey(threadId),
+    buildThreadStatePayload(patch),
   );
 }
 
+/** Resolve channel configuration from a Chat thread and persist it with Junior's TTL. */
 export function getChannelConfigurationService(
   thread: Thread,
 ): ChannelConfigurationService {
   const channel = thread.channel;
+  const channelId =
+    toOptionalString(thread.channelId) ?? toOptionalString(channel.id);
+  if (!channelId) {
+    throw new Error("channel id is required to load channel configuration");
+  }
   return createChannelConfigurationService({
-    load: async () => channel.state,
+    load: async () => await channel.state,
     save: async (state) => {
-      await channel.setState({
+      await mergePersistedState(channelStateKey(channelId), {
         configuration: state,
       });
     },
@@ -192,16 +218,9 @@ export function getChannelConfigurationServiceById(
   return createChannelConfigurationService({
     load: async () => await getPersistedChannelState(channelId),
     save: async (state) => {
-      const stateAdapter = getStateAdapter();
-      await stateAdapter.connect();
-      const key = channelStateKey(channelId);
-      const existing =
-        (await stateAdapter.get<Record<string, unknown>>(key)) ?? {};
-      await stateAdapter.set(
-        key,
-        { ...existing, configuration: state },
-        JUNIOR_THREAD_STATE_TTL_MS,
-      );
+      await mergePersistedState(channelStateKey(channelId), {
+        configuration: state,
+      });
     },
   });
 }
