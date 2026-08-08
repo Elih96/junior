@@ -1,4 +1,4 @@
-import { type ReactNode, useMemo } from "react";
+import { type ReactNode, useMemo, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import type { TaskSummary } from "@sentry/junior/api/schema";
@@ -14,6 +14,7 @@ import { Button, ToggleButton } from "../../components/Button";
 import { LoadingView } from "../../components/LoadingView";
 import { SearchInput } from "../../components/SearchInput";
 import { SelectableRow } from "../../components/SelectableRow";
+import type { TimeRangeDays } from "../../components/controls/TimeRangeSelector";
 import { Card } from "../../components/layout/Card";
 import { PageHeader } from "../../components/layout/PageHeader";
 import { deleteDashboardResource } from "../../http";
@@ -75,6 +76,7 @@ function taskMatches(task: TaskSummary, search: string): boolean {
 
 /** Render viewer-owned and public-workspace tasks in one native view. */
 export function TasksPage(props: { enabled: boolean }) {
+  const [range, setRange] = useState<TimeRangeDays>(30);
   const query = useTasksData(props.enabled);
   const queryClient = useQueryClient();
   const navigate = useNavigate();
@@ -134,10 +136,13 @@ export function TasksPage(props: { enabled: boolean }) {
       <section className="mx-auto grid w-full max-w-6xl gap-5">
         <PageHeader
           description="Scheduled and event-driven work created by users."
+          {...(query.data?.executionDays?.length
+            ? { onRangeChange: setRange, range }
+            : {})}
           title="Tasks"
         />
         {query.data?.executionDays?.length ? (
-          <TaskExecutionChart days={query.data.executionDays} />
+          <TaskExecutionChart days={query.data.executionDays} range={range} />
         ) : null}
         <Card className="grid gap-4 p-4 lg:grid-cols-[auto_auto_minmax(16rem,1fr)] lg:items-end">
           <TaskFilterGroup label="Scope">

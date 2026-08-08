@@ -10,7 +10,7 @@ import {
   Sparkles,
   UserRound,
 } from "lucide-react";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import {
   Navigate,
   NavLink,
@@ -23,6 +23,7 @@ import type { PluginUserPageLink } from "@sentry/junior-plugin-api";
 import { Button } from "../../components/Button";
 import { LoadingView } from "../../components/LoadingView";
 import { SelectableRow } from "../../components/SelectableRow";
+import type { TimeRangeDays } from "../../components/controls/TimeRangeSelector";
 import { Card } from "../../components/layout/Card";
 import { PageHeader } from "../../components/layout/PageHeader";
 import {
@@ -42,6 +43,7 @@ import { useMemoryRecord } from "./memoryRecord";
 
 /** Render the temporary first-class dashboard experience for memory. */
 export function MemoryPage(props: { page: PluginUserPageLink }) {
+  const [range, setRange] = useState<TimeRangeDays>(30);
   const location = useLocation();
   const { memoryId } = useParams();
   const basePath = "/memories";
@@ -68,6 +70,7 @@ export function MemoryPage(props: { page: PluginUserPageLink }) {
     >
       <PageHeader
         description={props.page.description}
+        {...(overview ? { onRangeChange: setRange, range } : {})}
         title={props.page.label}
       />
       <nav
@@ -82,7 +85,7 @@ export function MemoryPage(props: { page: PluginUserPageLink }) {
         </NavLink>
       </nav>
       {overview ? (
-        <MemoryOverview />
+        <MemoryOverview range={range} />
       ) : (
         <MemoryLibrary libraryPath={libraryPath} page={props.page} />
       )}
@@ -90,7 +93,7 @@ export function MemoryPage(props: { page: PluginUserPageLink }) {
   );
 }
 
-function MemoryOverview() {
+function MemoryOverview(props: { range: TimeRangeDays }) {
   const dashboardQuery = useMemoryDashboardData();
   if (dashboardQuery.error) {
     return (
@@ -115,9 +118,10 @@ function MemoryOverview() {
   return (
     <>
       <section className="grid gap-4 xl:grid-cols-2">
-        <MemoryTimeline days={dashboardQuery.data.days} />
+        <MemoryTimeline days={dashboardQuery.data.days} range={props.range} />
         <MemoryCostChart
           extractionDays={dashboardQuery.data.extractionDays}
+          range={props.range}
           recallDays={dashboardQuery.data.recallDays}
         />
       </section>
