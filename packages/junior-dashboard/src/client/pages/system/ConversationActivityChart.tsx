@@ -1,8 +1,10 @@
 import type { ConversationMetricDay } from "@sentry/junior/api/schema";
 
 import {
+  ActivityChartAverageLine,
   ActivityChartDateLabels,
   ActivityChartGrid,
+  activityChartAverage,
   ActivityTooltipRows,
   ChartSvg,
   createActivityChartLayout,
@@ -11,7 +13,10 @@ import {
 import { ChartHeader } from "../../components/charts/ChartHeader";
 import { Card } from "../../components/layout/Card";
 import { Tooltip } from "../../components/Tooltip";
-import { formatCompactNumber } from "../../format";
+import {
+  formatActivityChartAverage,
+  formatCompactNumber,
+} from "../../format";
 
 /** Plot root conversations with recorded activity each day. */
 export function ConversationActivityChart(props: {
@@ -21,7 +26,9 @@ export function ConversationActivityChart(props: {
   const maximum = Math.max(1, ...props.days.map((day) => day.conversations));
   const step = layout.plotWidth / Math.max(1, props.days.length);
   const barWidth = Math.max(2, Math.min(24, step * 0.68));
-  const total = props.days.reduce((sum, day) => sum + day.conversations, 0);
+  const values = props.days.map((day) => day.conversations);
+  const total = values.reduce((sum, value) => sum + value, 0);
+  const average = activityChartAverage(values);
 
   return (
     <Card>
@@ -78,6 +85,13 @@ export function ConversationActivityChart(props: {
               </Tooltip>
             );
           })}
+          <ActivityChartAverageLine
+            average={average}
+            format={formatActivityChartAverage}
+            layout={layout}
+            maximum={maximum}
+            stroke="#22d3ee"
+          />
           <ActivityChartDateLabels
             dates={props.days.map((day) => day.date)}
             layout={layout}
