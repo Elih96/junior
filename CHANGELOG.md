@@ -1,4 +1,25 @@
 # Changelog
+## 0.141.0
+
+### New Features ✨
+
+- (chat) Surface AGENTS.md in conversation transcripts by @sentry-junior in [#1321](https://github.com/getsentry/junior/pull/1321)
+
+### Bug Fixes 🐛
+
+- (dashboard) Add shared tooltips to memory charts by @sentry-junior in [#1317](https://github.com/getsentry/junior/pull/1317)
+
+### Internal Changes 🔧
+
+#### Chat
+
+- Write thread/channel scratch with Junior TTL by @sentry-junior in [#1320](https://github.com/getsentry/junior/pull/1320)
+- Remove turn-session ops metadata from Redis by @sentry-junior in [#1315](https://github.com/getsentry/junior/pull/1315)
+
+#### Other
+
+- (evals) Split suites into independent workflows by @sentry-junior in [#1319](https://github.com/getsentry/junior/pull/1319)
+
 ## 0.140.0
 
 ### New Features ✨
