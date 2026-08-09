@@ -1,13 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
-import type { ConversationSearchScope } from "@/chat/conversations/search";
+import type { ConversationMessageSearchScope } from "@/chat/conversations/message-search";
 import { migrateSchema } from "@/chat/conversations/sql/migrations";
 import { createSqlConversationEventStore } from "@/chat/conversations/sql/history";
-import { createSqlConversationSearchStore } from "@/chat/conversations/sql/search";
+import { createSqlConversationMessageSearchStore } from "@/chat/conversations/sql/message-search";
 import { createSqlStore } from "@/chat/conversations/sql/store";
-import { createSlackConversationSearchTool } from "@/chat/slack/tools/conversation-search";
+import { createSlackConversationMessageSearchTool } from "@/chat/slack/tools/conversation-message-search";
+import { ToolInputError } from "@/chat/tools/execution/tool-input-error";
 import { createLocalJuniorSqlFixture } from "../fixtures/sql";
 
-const scope: ConversationSearchScope = {
+const scope: ConversationMessageSearchScope = {
   kind: "public_provider_tenant",
   provider: "slack",
   providerTenantId: "T123",
@@ -20,7 +21,7 @@ async function executeTool<TInput>(tool: any, input: TInput) {
   return await tool.execute(input, {} as any);
 }
 
-describe("searchConversationHistory", () => {
+describe("searchConversationMessages", () => {
   it("searches the authorized public workspace and returns cross-channel permalinks", async () => {
     const fixture = await createLocalJuniorSqlFixture();
 
@@ -28,9 +29,10 @@ describe("searchConversationHistory", () => {
       await migrateSchema(fixture.sql);
       const conversations = createSqlStore(fixture.sql);
       const events = createSqlConversationEventStore(fixture.sql);
-      const search = createSqlConversationSearchStore(fixture.sql);
+      const search = createSqlConversationMessageSearchStore(fixture.sql);
       await conversations.recordActivity({
         conversationId: "slack:CARCHIVE:1700000000.100000",
+        channelName: "archive",
         destination: {
           platform: "slack",
           teamId: "T123",
@@ -56,7 +58,7 @@ describe("searchConversationHistory", () => {
           "https://example.slack.com/archives/CARCHIVE/p1700000000100000",
         ),
       );
-      const tool = createSlackConversationSearchTool(
+      const tool = createSlackConversationMessageSearchTool(
         scope,
         "slack:CREQUEST:1700000000.900000",
         {
@@ -67,6 +69,7 @@ describe("searchConversationHistory", () => {
 
       const result = await executeTool(tool, {
         query: "launch checklist",
+        channel_id: null,
         limit: null,
       });
 
@@ -77,7 +80,7 @@ describe("searchConversationHistory", () => {
       expect(result).toEqual({
         query: "launch checklist",
         count: 1,
-        threads: [
+        matches: [
           {
             conversation_id: "slack:CARCHIVE:1700000000.100000",
             thread_ts: "1700000000.100000",
@@ -85,11 +88,45 @@ describe("searchConversationHistory", () => {
             message_role: "user",
             message_timestamp: "2026-07-01T12:00:00.000Z",
             excerpt: expect.stringContaining("rollback owner"),
+            channel_id: "CARCHIVE",
+            channel_name: "archive",
             permalink:
               "https://example.slack.com/archives/CARCHIVE/p1700000000100000",
           },
         ],
       });
+
+      const filtered = await executeTool(tool, {
+        channel_id: "CARCHIVE",
+        query: null,
+        limit: null,
+      });
+      expect(filtered).toEqual({
+        channel_id: "CARCHIVE",
+        count: 1,
+        matches: [
+          expect.objectContaining({
+            channel_id: "CARCHIVE",
+            conversation_id: "slack:CARCHIVE:1700000000.100000",
+          }),
+        ],
+      });
+
+      await expect(
+        executeTool(tool, {
+          channel_id: null,
+          query: null,
+          limit: null,
+        }),
+      ).rejects.toBeInstanceOf(ToolInputError);
+
+      await expect(
+        executeTool(tool, {
+          channel_id: "not-a-channel",
+          query: null,
+          limit: null,
+        }),
+      ).rejects.toBeInstanceOf(ToolInputError);
     } finally {
       await fixture.close();
     }

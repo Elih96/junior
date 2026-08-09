@@ -6,7 +6,7 @@ import {
   getConversationStore,
   getDb,
 } from "@/chat/db";
-import { createQueryConversationEventsTool } from "@/chat/tools/query-conversation-events";
+import { createSearchConversationEventsTool } from "@/chat/tools/search-conversation-events";
 import type { ToolRuntimeContext } from "@/chat/tools/types";
 import { juniorConversationEvents } from "@/db/schema";
 
@@ -41,7 +41,7 @@ function context(): SlackToolRuntimeContext {
 }
 
 async function executeTool(input: Record<string, unknown>) {
-  const tool = createQueryConversationEventsTool(context());
+  const tool = createSearchConversationEventsTool(context());
   if (!tool.execute) throw new Error("tool execute function missing");
   return await tool.execute(input, {});
 }
@@ -65,7 +65,7 @@ async function recordSlackConversation(args: {
   });
 }
 
-describe("queryConversationEvents", () => {
+describe("searchConversationEvents", () => {
   afterEach(async () => {
     await closeDb();
   });
@@ -140,6 +140,44 @@ describe("queryConversationEvents", () => {
     });
     expect(page.events[1]).not.toMatchObject({
       data: { replacementHistory: expect.anything() },
+    });
+
+    await expect(
+      executeTool({
+        after_seq: 0,
+        limit: 2,
+      }),
+    ).resolves.toMatchObject({
+      conversation_id: CURRENT_CONVERSATION_ID,
+      events: [
+        { seq: 1, data: { type: "message", text: "second" } },
+        {
+          seq: 2,
+          data: {
+            type: "handoff",
+            replacement_history_count: 1,
+          },
+        },
+      ],
+    });
+    await expect(
+      executeTool({
+        conversation_id: null,
+        after_seq: 0,
+        limit: 2,
+      }),
+    ).resolves.toMatchObject({
+      conversation_id: CURRENT_CONVERSATION_ID,
+      events: [
+        { seq: 1, data: { type: "message", text: "second" } },
+        {
+          seq: 2,
+          data: {
+            type: "handoff",
+            replacement_history_count: 1,
+          },
+        },
+      ],
     });
 
     await expect(

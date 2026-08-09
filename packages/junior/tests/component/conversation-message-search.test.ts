@@ -2,12 +2,12 @@ import { describe, expect, it } from "vitest";
 import { migrateSchema } from "@/chat/conversations/sql/migrations";
 import type { ConversationMessageRole } from "@/chat/conversations/messages";
 import { createSqlConversationEventStore } from "@/chat/conversations/sql/history";
-import { createSqlConversationSearchStore } from "@/chat/conversations/sql/search";
+import { createSqlConversationMessageSearchStore } from "@/chat/conversations/sql/message-search";
 import { createSqlStore } from "@/chat/conversations/sql/store";
 import type { ConversationPrivacy } from "@/chat/conversation-privacy";
 import { createLocalJuniorSqlFixture } from "../fixtures/sql";
 
-describe("conversation search", () => {
+describe("conversation message search", () => {
   it("returns only public user and assistant messages from the authorized workspace", async () => {
     const fixture = await createLocalJuniorSqlFixture();
 
@@ -15,10 +15,11 @@ describe("conversation search", () => {
       await migrateSchema(fixture.sql);
       const conversations = createSqlStore(fixture.sql);
       const events = createSqlConversationEventStore(fixture.sql);
-      const search = createSqlConversationSearchStore(fixture.sql);
+      const search = createSqlConversationMessageSearchStore(fixture.sql);
 
       const seed = async (args: {
         channelId: string;
+        channelName?: string;
         conversationId: string;
         message: string;
         role?: ConversationMessageRole;
@@ -35,6 +36,7 @@ describe("conversation search", () => {
           nowMs: 1_750_000_000_000,
           source: "slack",
           visibility: args.visibility,
+          ...(args.channelName ? { channelName: args.channelName } : {}),
         });
         await events.append(args.conversationId, [
           {
@@ -57,12 +59,14 @@ describe("conversation search", () => {
       });
       await seed({
         channelId: "CREQUEST",
+        channelName: "launch",
         conversationId: "slack:CREQUEST:1700000000.200000",
         message: "The launch checklist needs a rollback owner.",
         visibility: "public",
       });
       await seed({
         channelId: "CARCHIVE",
+        channelName: "archive",
         conversationId: "slack:CARCHIVE:1700000000.300000",
         message: "The launch checklist also needs a database backup step.",
         role: "assistant",
@@ -91,8 +95,8 @@ describe("conversation search", () => {
 
       const results = await search.search({
         currentConversationId: "slack:CREQUEST:1700000000.100000",
+        filters: { query: "launch checklist" },
         limit: 10,
-        query: "launch checklist",
         scope: {
           kind: "public_provider_tenant",
           provider: "slack",
@@ -104,11 +108,13 @@ describe("conversation search", () => {
       expect(results).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
+            channelName: "launch",
             conversationId: "slack:CREQUEST:1700000000.200000",
             providerDestinationId: "CREQUEST",
             role: "user",
           }),
           expect.objectContaining({
+            channelName: "archive",
             conversationId: "slack:CARCHIVE:1700000000.300000",
             providerDestinationId: "CARCHIVE",
             role: "assistant",
@@ -118,6 +124,42 @@ describe("conversation search", () => {
       expect(results.map((result) => result.excerpt).join(" ")).not.toMatch(
         /private|system|other workspace/i,
       );
+
+      const channelOnly = await search.search({
+        currentConversationId: "slack:CREQUEST:1700000000.100000",
+        filters: { channelId: "CARCHIVE" },
+        limit: 10,
+        scope: {
+          kind: "public_provider_tenant",
+          provider: "slack",
+          providerTenantId: "T123",
+        },
+      });
+      expect(channelOnly).toEqual([
+        expect.objectContaining({
+          conversationId: "slack:CARCHIVE:1700000000.300000",
+          providerDestinationId: "CARCHIVE",
+        }),
+      ]);
+
+      const combined = await search.search({
+        currentConversationId: "slack:CREQUEST:1700000000.100000",
+        filters: {
+          channelId: "CREQUEST",
+          query: "rollback",
+        },
+        limit: 10,
+        scope: {
+          kind: "public_provider_tenant",
+          provider: "slack",
+          providerTenantId: "T123",
+        },
+      });
+      expect(combined).toEqual([
+        expect.objectContaining({
+          conversationId: "slack:CREQUEST:1700000000.200000",
+        }),
+      ]);
     } finally {
       await fixture.close();
     }
