@@ -1,4 +1,19 @@
 # Changelog
+## 0.145.0
+
+### New Features ✨
+
+- (dashboard) Compact task conversation header by @sentry-junior in [#1347](https://github.com/getsentry/junior/pull/1347)
+
+### Documentation 📚
+
+- (github) Improve PR description guidance by @sentry-junior in [#1345](https://github.com/getsentry/junior/pull/1345)
+
+### Internal Changes 🔧
+
+- (chat) Simplify durable conversation execution by @sentry-junior in [#1344](https://github.com/getsentry/junior/pull/1344)
+- (evals) Run suites only on eval changes or labels by @sentry-junior in [#1348](https://github.com/getsentry/junior/pull/1348)
+
 ## 0.144.0
 
 ### New Features ✨
