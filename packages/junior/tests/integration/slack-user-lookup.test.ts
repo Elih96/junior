@@ -1,6 +1,11 @@
+import { eq } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 import { createSlackSource } from "@sentry/junior-plugin-api";
+import { getSqlExecutor } from "@/chat/db";
+import { upsertIdentity } from "@/chat/identities/sql";
+import { parseSlackTeamId } from "@/chat/slack/ids";
 import { createSlackUserLookupTool } from "@/chat/slack/tools/user-lookup";
+import { juniorIdentities } from "@/db/schema";
 import { usersInfoOk, usersListPage } from "../fixtures/slack/factories/api";
 import {
   getCapturedSlackApiCalls,
@@ -14,6 +19,12 @@ async function executeTool<TInput>(tool: any, input: TInput) {
   }
   const prepared = tool.prepareArguments?.(input) ?? input;
   return await tool.execute(prepared, {} as any);
+}
+
+function lookupTool() {
+  const teamId = parseSlackTeamId("T0TEST");
+  if (!teamId) throw new Error("invalid test team id");
+  return createSlackUserLookupTool(teamId);
 }
 
 describe("slackUserLookup", () => {
@@ -37,7 +48,7 @@ describe("slackUserLookup", () => {
         }),
       });
 
-      const tool = createSlackUserLookupTool();
+      const tool = lookupTool();
       const result = await executeTool(tool, {
         mode: "user_id",
         value: "U039RR91S",
@@ -66,6 +77,13 @@ describe("slackUserLookup", () => {
       });
 
       expect(getCapturedSlackApiCalls("users.info")).toHaveLength(1);
+      await expect(
+        getSqlExecutor()
+          .db()
+          .select({ id: juniorIdentities.providerSubjectId })
+          .from(juniorIdentities)
+          .where(eq(juniorIdentities.providerSubjectId, "U039RR91S")),
+      ).resolves.toEqual([{ id: "U039RR91S" }]);
     });
 
     it("returns user without custom fields when none are set", async () => {
@@ -77,7 +95,7 @@ describe("slackUserLookup", () => {
         }),
       });
 
-      const tool = createSlackUserLookupTool();
+      const tool = lookupTool();
       const result = await executeTool(tool, {
         mode: "user_id",
         value: "U0BASIC",
@@ -100,7 +118,7 @@ describe("slackUserLookup", () => {
     it("handles user not found", async () => {
       queueSlackApiError("users.info", { error: "user_not_found" });
 
-      const tool = createSlackUserLookupTool();
+      const tool = lookupTool();
       await expect(
         executeTool(tool, {
           mode: "user_id",
@@ -128,7 +146,7 @@ describe("slackUserLookup", () => {
         }),
       });
 
-      const tool = createSlackUserLookupTool();
+      const tool = lookupTool();
       const result = await executeTool(tool, {
         mode: "email",
         value: "emailuser@sentry.io",
@@ -147,12 +165,69 @@ describe("slackUserLookup", () => {
       expect(getCapturedSlackApiCalls("users.lookupByEmail")).toHaveLength(1);
     });
 
+    it("uses a stored identity before asking Slack", async () => {
+      await upsertIdentity(getSqlExecutor(), {
+        kind: "user",
+        provider: "slack",
+        providerTenantId: "T0TEST",
+        providerSubjectId: "U0STORED",
+        email: "stored@sentry.io",
+        emailVerified: true,
+        displayName: "Stored User",
+        handle: "stored",
+      });
+
+      const result = await executeTool(lookupTool(), {
+        mode: "email",
+        value: "stored@sentry.io",
+      });
+
+      expect(result).toMatchObject({
+        mention: "<@U0STORED>",
+        user: { id: "U0STORED", name: "stored" },
+      });
+      expect(getCapturedSlackApiCalls("users.lookupByEmail")).toHaveLength(0);
+    });
+
+    it("throws when several stored identities share an email", async () => {
+      await upsertIdentity(getSqlExecutor(), {
+        kind: "user",
+        provider: "slack",
+        providerTenantId: "T0TEST",
+        providerSubjectId: "U0ONE",
+        email: "shared@sentry.io",
+        emailVerified: true,
+        displayName: "One",
+        handle: "one",
+      });
+      await upsertIdentity(getSqlExecutor(), {
+        kind: "user",
+        provider: "slack",
+        providerTenantId: "T0TEST",
+        providerSubjectId: "U0TWO",
+        email: "shared@sentry.io",
+        emailVerified: true,
+        displayName: "Two",
+        handle: "two",
+      });
+
+      await expect(
+        executeTool(lookupTool(), {
+          mode: "email",
+          value: "shared@sentry.io",
+        }),
+      ).rejects.toThrow(
+        "Multiple Slack users share verified email shared@sentry.io in workspace T0TEST",
+      );
+      expect(getCapturedSlackApiCalls("users.lookupByEmail")).toHaveLength(0);
+    });
+
     it("returns error when email not found", async () => {
       queueSlackApiError("users.lookupByEmail", {
         error: "users_not_found",
       });
 
-      const tool = createSlackUserLookupTool();
+      const tool = lookupTool();
       await expect(
         executeTool(tool, {
           mode: "email",
@@ -180,7 +255,7 @@ describe("slackUserLookup", () => {
         }),
       });
 
-      const tool = createSlackUserLookupTool();
+      const tool = lookupTool();
       const result = await executeTool(tool, {
         mode: "query",
         value: "markus",
@@ -210,7 +285,7 @@ describe("slackUserLookup", () => {
         }),
       });
 
-      const tool = createSlackUserLookupTool();
+      const tool = lookupTool();
       const result = await executeTool(tool, {
         mode: "query",
         value: "zzzzzz",
@@ -233,7 +308,7 @@ describe("slackUserLookup", () => {
         }),
       });
 
-      const tool = createSlackUserLookupTool();
+      const tool = lookupTool();
       const result = await executeTool(tool, {
         mode: "query",
         value: "junior",
@@ -263,7 +338,7 @@ describe("slackUserLookup", () => {
         }),
       });
 
-      const tool = createSlackUserLookupTool();
+      const tool = lookupTool();
       const result = await executeTool(tool, {
         mode: "query",
         value: "alice",
@@ -289,7 +364,7 @@ describe("slackUserLookup", () => {
         }),
       });
 
-      const tool = createSlackUserLookupTool();
+      const tool = lookupTool();
       const result = await executeTool(tool, {
         mode: "query",
         value: "alice",
@@ -309,7 +384,7 @@ describe("slackUserLookup", () => {
         provided: "chat:write",
       });
 
-      const tool = createSlackUserLookupTool();
+      const tool = lookupTool();
       await expect(
         executeTool(tool, { mode: "query", value: "alice" }),
       ).rejects.toMatchObject({
@@ -328,7 +403,7 @@ describe("slackUserLookup", () => {
     it("leaves internal Slack failures unexpected", async () => {
       queueSlackApiError("users.list", { error: "fatal_error" });
 
-      const tool = createSlackUserLookupTool();
+      const tool = lookupTool();
       await expect(
         executeTool(tool, { mode: "query", value: "alice" }),
       ).rejects.toMatchObject({
@@ -353,7 +428,7 @@ describe("slackUserLookup", () => {
         }),
       });
 
-      const tool = createSlackUserLookupTool();
+      const tool = lookupTool();
       const result = await executeTool(tool, {
         mode: "query",
         value: "user",
@@ -366,7 +441,7 @@ describe("slackUserLookup", () => {
 
   describe("input validation", () => {
     it("requires mode and value in the model-facing schema", async () => {
-      const tool = createSlackUserLookupTool();
+      const tool = lookupTool();
 
       expect(tool.inputSchema).toMatchObject({
         type: "object",
@@ -383,7 +458,7 @@ describe("slackUserLookup", () => {
     });
 
     it("rejects the previous identifier fields", async () => {
-      const tool = createSlackUserLookupTool();
+      const tool = lookupTool();
       await expect(executeTool(tool, { user_id: "U123" })).rejects.toThrow(
         "Invalid tool arguments",
       );
@@ -439,7 +514,7 @@ describe("slackUserLookup", () => {
         }),
       });
 
-      const tool = createSlackUserLookupTool();
+      const tool = lookupTool();
       const result = await executeTool(tool, {
         mode: "user_id",
         value: "U0GH",
