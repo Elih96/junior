@@ -1,4 +1,37 @@
 # Changelog
+## 0.146.0
+
+### New Features ✨
+
+- (conversations) Expand and align retained conversation tools by @sentry-junior in [#1355](https://github.com/getsentry/junior/pull/1355)
+- (slack) Resolve identity-backed mentions by @sentry-junior in [#1358](https://github.com/getsentry/junior/pull/1358)
+
+### Bug Fixes 🐛
+
+#### Slack
+
+- Render blocks in secondary attachments by @erickreutz in [#1346](https://github.com/getsentry/junior/pull/1346)
+- Return mention format from user lookup by @sentry-junior in [#1352](https://github.com/getsentry/junior/pull/1352)
+
+#### Other
+
+- (tools) Rank catalog searches by relevance by @dcramer in [#1351](https://github.com/getsentry/junior/pull/1351)
+
+### Documentation 📚
+
+#### Policy
+
+- Add agent-steering anti prompt-bloat rules by @sentry-junior in [#1354](https://github.com/getsentry/junior/pull/1354)
+- Tighten frontend component taste rules by @sentry-junior in [#1353](https://github.com/getsentry/junior/pull/1353)
+
+#### Other
+
+- (policies) Rewrite policies in plain English by @sentry-junior in [#1350](https://github.com/getsentry/junior/pull/1350)
+
+### Internal Changes 🔧
+
+- (chat) Drop dead turn-cursor model metadata by @sentry-junior in [#1356](https://github.com/getsentry/junior/pull/1356)
+
 ## 0.145.0
 
 ### New Features ✨
