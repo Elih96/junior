@@ -108,7 +108,7 @@ import {
   isResourceEventSlackMessage,
   RESOURCE_EVENT_SYSTEM_ACTOR,
 } from "@/chat/resource-events/actor";
-import type { AgentContinueRequest } from "@/chat/services/agent-continue";
+import type { PausedTurnRequest } from "@/chat/task-execution/turn-wake";
 import {
   ConversationTurnBoundaryError,
   CooperativeTurnYieldError,
@@ -131,12 +131,12 @@ import type { PiMessage } from "@/chat/pi/messages";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { getAssistantReplyText } from "@/chat/services/assistant-reply";
 import {
-  abandonAgentTurnSessionRecord,
-  failAgentTurnSessionRecord,
-  getAgentTurnSessionRecord,
-  recordAgentTurnSessionSummary,
-} from "@/chat/state/turn-session";
-import { completeDeliveredTurn } from "@/chat/services/turn-session-record";
+  abandonTurnRecord,
+  failTurnRecord,
+  getTurnRecord,
+  recordTurnSummary,
+  saveTurnCheckpoint,
+} from "@/chat/task-execution/checkpoint";
 import { resolveDestinationVisibility } from "@/chat/conversations/destination-visibility";
 import { getConversationStore } from "@/chat/db";
 import {
@@ -299,8 +299,6 @@ function queuedInstructionProvenance(
   return instructionProvenanceFor(author);
 }
 
-
-
 async function resolveChannelName(thread: Thread): Promise<string | undefined> {
   const existingName = thread.channel.name?.trim();
   if (existingName) {
@@ -363,7 +361,7 @@ async function loadPiMessagesForTurn(args: {
   }
 
   if (args.activeTurnId) {
-    const sessionRecord = await getAgentTurnSessionRecord(
+    const sessionRecord = await getTurnRecord(
       args.conversationId,
       args.activeTurnId,
     );
@@ -394,13 +392,13 @@ export interface ReplyExecutorServices {
   agentRunner: AgentRunner;
   contextCompactor: ContextCompactor;
   generateThreadTitle: ConversationMemoryService["generateThreadTitle"];
-  getAwaitingAgentContinueRequest: (args: {
+  getPausedTurnRequest: (args: {
     conversationId: string;
-    sessionId: string;
-  }) => Promise<AgentContinueRequest | undefined>;
+    turnId: string;
+  }) => Promise<PausedTurnRequest | undefined>;
   lookupSlackUser: typeof lookupSlackUser;
   turnLifecycle: ConversationTurnLifecycle;
-  scheduleAgentContinue: (request: AgentContinueRequest) => Promise<void>;
+  wakePausedTurn: (request: PausedTurnRequest) => Promise<void>;
   scheduleSessionCompletedPluginTasks: (params: {
     conversationId: string;
     sessionId: string;
@@ -569,8 +567,7 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
         if (!executionActor || !credentialContext) {
           throw new Error("Slack reply execution requires an actor");
         }
-        const actor =
-          "userId" in executionActor ? executionActor : undefined;
+        const actor = "userId" in executionActor ? executionActor : undefined;
         const slackActorId = actor?.userId;
 
         const preparedState =
@@ -795,27 +792,26 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
           return;
         }
         if (conversationId && activeTurnId) {
-          const resumeRequest =
-            await deps.services.getAwaitingAgentContinueRequest({
-              conversationId,
-              sessionId: activeTurnId,
-            });
-          if (resumeRequest) {
+          const pausedTurn = await deps.services.getPausedTurnRequest({
+            conversationId,
+            turnId: activeTurnId,
+          });
+          if (pausedTurn) {
             // Durable event-log append first: rescheduling a continuation
             // does not consume the message, and `ack` may only
             // fire after the input is model-visible.
-            if (!(await appendParkedTurnInput(resumeRequest.sessionId))) {
+            if (!(await appendParkedTurnInput(pausedTurn.turnId))) {
               // A live resume holds the thread lock; leave the mailbox
               // message pending so the next drain re-delivers it after the
               // resume completes.
               throw new TurnInputDeferredError();
             }
             try {
-              await deps.services.scheduleAgentContinue(resumeRequest);
+              await deps.services.wakePausedTurn(pausedTurn);
             } catch (error) {
               logException(error, "agent.continue.schedule.failed", {
-                "app.ai.resume_session_version": resumeRequest.expectedVersion,
-                "app.ai.resume_session_id": resumeRequest.sessionId,
+                "app.ai.resume_session_version": pausedTurn.expectedVersion,
+                "app.ai.resume_session_id": pausedTurn.turnId,
                 ...(messageTs ? { "messaging.message.id": messageTs } : {}),
               });
               throw error;
@@ -829,11 +825,11 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
             return;
           }
 
-          const sessionRecord = await getAgentTurnSessionRecord(
+          const sessionRecord = await getTurnRecord(
             conversationId,
             activeTurnId,
           );
-          if (sessionRecord?.state === "awaiting_resume") {
+          if (sessionRecord?.state === "paused") {
             if (sessionRecord.resumeReason === "auth") {
               // A user follow-up supersedes the auth-parked run: answer it
               // now as a fresh turn instead of consuming it into a pause that
@@ -842,9 +838,9 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
               // authorization link reusable, and the abandoned record turns a
               // late OAuth callback into a stale no-op instead of a competing
               // run.
-              await abandonAgentTurnSessionRecord({
+              await abandonTurnRecord({
                 conversationId,
-                sessionId: activeTurnId,
+                turnId: activeTurnId,
                 errorMessage:
                   "Auth-parked session superseded by a new user message",
               });
@@ -855,12 +851,12 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
               });
               activeTurnId = undefined;
             } else {
-              await failAgentTurnSessionRecord({
+              await failTurnRecord({
                 conversationId,
                 expectedVersion: sessionRecord.version,
-                sessionId: activeTurnId,
+                turnId: activeTurnId,
                 errorMessage:
-                  "Awaiting agent continuation metadata could not be materialized",
+                  "Awaiting paused-turn metadata could not be materialized",
               });
               markTurnFailed({
                 conversation: preparedState.conversation,
@@ -935,10 +931,10 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
           // Fire-and-forget: both calls are best-effort and must not delay
           // reply generation. Keep them independent so a failure in one does
           // not suppress observability of the other.
-          void recordAgentTurnSessionSummary({
+          void recordTurnSummary({
             channelName,
             conversationId,
-            sessionId: turnId,
+            turnId: turnId,
             sliceId: 1,
             startedAtMs: turnStartedAtMs,
             state: "running",
@@ -1023,7 +1019,7 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
           if (!dispatchId) {
             return;
           }
-          await recordAgentTurnSessionSummary({
+          await recordTurnSummary({
             channelName,
             conversationId,
             destination,
@@ -1033,7 +1029,7 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
             ...(acceptedDeliveryId
               ? { resultMessageId: acceptedDeliveryId }
               : {}),
-            sessionId: turnId,
+            turnId: turnId,
             sliceId: 1,
             source,
             startedAtMs: message.metadata.dateSent.getTime(),
@@ -1043,7 +1039,7 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
         };
         let latestArtifacts = preparedState.artifacts;
         let assistantTitleArtifacts: Partial<ThreadArtifactsState> = {};
-        let agentContinueScheduleError: unknown;
+        let turnWakeError: unknown;
         let boundaryFailureCode: "agent_run_failed" | "delivery_failed" =
           "agent_run_failed";
         let finalizedFailureEventId: string | undefined;
@@ -1161,14 +1157,14 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
           if (slackTs && options.execution?.dispatch?.id) {
             try {
               await persistWithRetry(() =>
-                recordAgentTurnSessionSummary({
+                recordTurnSummary({
                   channelName,
                   conversationId,
                   destination,
                   destinationVisibility,
                   dispatchId: options.execution?.dispatch?.id,
                   resultMessageId: slackTs,
-                  sessionId: turnId,
+                  turnId: turnId,
                   sliceId: 1,
                   source,
                   startedAtMs: message.metadata.dateSent.getTime(),
@@ -1499,14 +1495,14 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
             }
             if (!destination || !conversationId) {
               throw new Error(
-                "Agent continuation requires a destination and conversation id",
+                "Paused turn requires a destination and conversation id",
               );
             }
             try {
-              await deps.services.scheduleAgentContinue({
+              await deps.services.wakePausedTurn({
                 conversationId,
                 destination,
-                sessionId: turnId,
+                turnId: turnId,
                 expectedVersion: outcome.resumeVersion,
               });
               shouldPersistFailureState = false;
@@ -1516,7 +1512,7 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
                 "app.ai.resume_session_version": outcome.resumeVersion,
               });
               shouldPersistFailureState = true;
-              agentContinueScheduleError = scheduleError;
+              turnWakeError = scheduleError;
               throw scheduleError;
             }
             return;
@@ -1571,16 +1567,17 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
             // regenerate an accepted reply. Persist canonical message
             // facts next, then update Redis runtime scratch independently.
             if (conversationId && reply.piMessages?.length) {
-              await completeDeliveredTurn({
+              await saveTurnCheckpoint({
+                mode: "completed",
                 channelName,
                 conversationId,
+                turnId,
                 durationMs: reply.diagnostics.durationMs,
                 usage: reply.diagnostics.usage,
                 reasoningLevel: reply.diagnostics.reasoningLevel,
                 destination,
                 destinationVisibility,
                 source,
-                sessionId: turnId,
                 sliceId: 1,
                 dispatchOutcome:
                   reply.diagnostics.outcome === "success"
@@ -1599,12 +1596,12 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
                 dispatchId: options.execution?.dispatch?.id,
               });
             } else if (conversationId) {
-              await recordAgentTurnSessionSummary({
+              await recordTurnSummary({
                 channelName,
                 conversationId,
                 cumulativeDurationMs: reply.diagnostics.durationMs,
                 cumulativeUsage: reply.diagnostics.usage,
-                sessionId: turnId,
+                turnId: turnId,
                 sliceId: 1,
                 startedAtMs: message.metadata.dateSent.getTime(),
                 state: "completed",
@@ -1742,7 +1739,7 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
             shouldPersistFailureState = false;
             throw error;
           }
-          if (error === agentContinueScheduleError) {
+          if (error === turnWakeError) {
             shouldPersistFailureState = true;
           }
           shouldPersistFailureState = true;
@@ -1774,15 +1771,12 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
             const recoveryText = buildCanvasRecoveryReply(createdCanvasUrl);
             await deliverAssistantMessage(recoveryText, dispatchOutcome);
             if (conversationId) {
-              const sessionRecord = await getAgentTurnSessionRecord(
-                conversationId,
-                turnId,
-              );
+              const sessionRecord = await getTurnRecord(conversationId, turnId);
               if (sessionRecord) {
-                await failAgentTurnSessionRecord({
+                await failTurnRecord({
                   conversationId,
                   expectedVersion: sessionRecord.version,
-                  sessionId: turnId,
+                  turnId: turnId,
                   errorMessage,
                 });
               }
@@ -1832,10 +1826,10 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
             });
             if (conversationId) {
               try {
-                await recordAgentTurnSessionSummary({
+                await recordTurnSummary({
                   channelName,
                   conversationId,
-                  sessionId: turnId,
+                  turnId: turnId,
                   sliceId: 1,
                   startedAtMs: message.metadata.dateSent.getTime(),
                   state: "failed",
@@ -1853,15 +1847,15 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
                     : {}),
                   traceId: getActiveTraceId(),
                 });
-                const sessionRecord = await getAgentTurnSessionRecord(
+                const sessionRecord = await getTurnRecord(
                   conversationId,
                   turnId,
                 );
                 if (sessionRecord) {
-                  await failAgentTurnSessionRecord({
+                  await failTurnRecord({
                     conversationId,
                     expectedVersion: sessionRecord.version,
-                    sessionId: turnId,
+                    turnId: turnId,
                     errorMessage:
                       "Agent turn failed before assistant output handling completed",
                   });

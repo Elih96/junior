@@ -50,9 +50,9 @@ async function recordCompletedSession(args: {
   conversationId: string;
   sessionId: string;
 }): Promise<void> {
-  const { upsertAgentTurnSessionRecord } =
-    await import("@/chat/state/turn-session");
-  await upsertAgentTurnSessionRecord({
+  const { upsertTurnRecord } =
+    await import("@/chat/task-execution/turn-cursor");
+  await upsertTurnRecord({
     actor: {
       fullName: "Local CLI",
       platform: "local",
@@ -66,7 +66,7 @@ async function recordCompletedSession(args: {
     },
     modelId: "test/model",
     piMessages: completedMessages(),
-    sessionId: args.sessionId,
+    turnId: args.sessionId,
     sliceId: 1,
     source: createLocalSource(args.conversationId),
     state: "completed",

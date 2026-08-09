@@ -4,9 +4,9 @@ import { getConversationStore } from "@/chat/db";
 import { disconnectStateAdapter } from "@/chat/state/adapter";
 import { persistThreadStateById } from "@/chat/runtime/thread-state";
 import {
-  getAgentTurnSessionRecord,
-  upsertAgentTurnSessionRecord,
-} from "@/chat/state/turn-session";
+  getTurnRecord,
+  upsertTurnRecord,
+} from "@/chat/task-execution/turn-cursor";
 import { neverRunAgentRunner } from "../../fixtures/agent-runner";
 import { SLACK_DESTINATION } from "../../fixtures/conversation-work";
 
@@ -52,7 +52,7 @@ async function seedConversationRouting(args: {
   });
 }
 
-describe("agent continuation runner callbacks", () => {
+describe("paused turn runner callbacks", () => {
   beforeEach(async () => {
     process.env.JUNIOR_STATE_ADAPTER = "memory";
     await disconnectStateAdapter();
@@ -67,12 +67,12 @@ describe("agent continuation runner callbacks", () => {
   it("fails the session when delivery succeeded but completion state did not persist", async () => {
     const conversationId = "slack:C123:1712345.0005";
     const sessionId = "turn_msg_5";
-    const sessionRecord = await upsertAgentTurnSessionRecord({
+    const sessionRecord = await upsertTurnRecord({
       modelId: "test/model",
       conversationId,
-      sessionId,
+      turnId: sessionId,
       sliceId: 2,
-      state: "awaiting_resume",
+      state: "paused",
       destination: SLACK_DESTINATION,
       source: SLACK_SOURCE,
       resumeReason: "timeout",
@@ -115,15 +115,14 @@ describe("agent continuation runner callbacks", () => {
       },
     });
 
-    const { continueSlackAgentRun } =
-      await import("@/chat/runtime/agent-continue-runner");
+    const { runPausedTurn } = await import("@/chat/task-execution/paused-turn");
 
     await expect(
-      continueSlackAgentRun(
+      runPausedTurn(
         {
           conversationId,
           destination: SLACK_DESTINATION,
-          sessionId,
+          turnId: sessionId,
           expectedVersion: sessionRecord.version,
         },
         {
@@ -134,7 +133,7 @@ describe("agent continuation runner callbacks", () => {
               throw new Error("Expected the continuation to prepare");
             }
             if (!prepared.replyContext) {
-              throw new Error("Expected prepared continuation reply context");
+              throw new Error("Expected prepared paused-turn reply context");
             }
             // Redis no longer stores execution actor; bare author + team rebuild.
             expect(prepared.replyContext.routing.actor).toEqual({
@@ -152,7 +151,7 @@ describe("agent continuation runner callbacks", () => {
       ),
     ).resolves.toBe(true);
     await expect(
-      getAgentTurnSessionRecord(conversationId, sessionId),
+      getTurnRecord(conversationId, sessionId),
     ).resolves.toMatchObject({
       state: "failed",
       errorMessage:
@@ -165,12 +164,12 @@ describe("agent continuation runner callbacks", () => {
     const sessionId = "turn_msg_7";
     // Destination-only upsert leaves sessionSource unset so resume hard-fails
     // at the SQL routing boundary instead of rebuilding from redis/source.
-    const sessionRecord = await upsertAgentTurnSessionRecord({
+    const sessionRecord = await upsertTurnRecord({
       modelId: "test/model",
       conversationId,
-      sessionId,
+      turnId: sessionId,
       sliceId: 2,
-      state: "awaiting_resume",
+      state: "paused",
       destination: SLACK_DESTINATION,
       resumeReason: "timeout",
       actor: {
@@ -211,15 +210,14 @@ describe("agent continuation runner callbacks", () => {
       },
     });
 
-    const { continueSlackAgentRun } =
-      await import("@/chat/runtime/agent-continue-runner");
+    const { runPausedTurn } = await import("@/chat/task-execution/paused-turn");
 
     await expect(
-      continueSlackAgentRun(
+      runPausedTurn(
         {
           conversationId,
           destination: SLACK_DESTINATION,
-          sessionId,
+          turnId: sessionId,
           expectedVersion: sessionRecord.version,
         },
         {
@@ -234,7 +232,7 @@ describe("agent continuation runner callbacks", () => {
       `Conversation ${conversationId} is missing durable routing metadata`,
     );
     await expect(
-      getAgentTurnSessionRecord(conversationId, sessionId),
+      getTurnRecord(conversationId, sessionId),
     ).resolves.toMatchObject({
       state: "failed",
       errorMessage: `Conversation ${conversationId} is missing durable routing metadata`,
@@ -250,12 +248,12 @@ describe("agent continuation runner callbacks", () => {
       threadTs: "1712345.0008",
       visibility: "private",
     });
-    const sessionRecord = await upsertAgentTurnSessionRecord({
+    const sessionRecord = await upsertTurnRecord({
       modelId: "test/model",
       conversationId,
-      sessionId,
+      turnId: sessionId,
       sliceId: 2,
-      state: "awaiting_resume",
+      state: "paused",
       resumeReason: "timeout",
       actor: {
         platform: "slack",
@@ -303,15 +301,14 @@ describe("agent continuation runner callbacks", () => {
       },
     });
 
-    const { continueSlackAgentRun } =
-      await import("@/chat/runtime/agent-continue-runner");
+    const { runPausedTurn } = await import("@/chat/task-execution/paused-turn");
 
     await expect(
-      continueSlackAgentRun(
+      runPausedTurn(
         {
           conversationId,
           destination: SLACK_DESTINATION,
-          sessionId,
+          turnId: sessionId,
           expectedVersion: sessionRecord.version,
         },
         {
@@ -322,7 +319,7 @@ describe("agent continuation runner callbacks", () => {
               throw new Error("Expected the continuation to prepare");
             }
             if (!prepared.replyContext) {
-              throw new Error("Expected prepared continuation reply context");
+              throw new Error("Expected prepared paused-turn reply context");
             }
             expect(prepared.replyContext.routing.source).toEqual(sessionSource);
             return true;
@@ -331,21 +328,21 @@ describe("agent continuation runner callbacks", () => {
       ),
     ).resolves.toBe(true);
     await expect(
-      getAgentTurnSessionRecord(conversationId, sessionId),
+      getTurnRecord(conversationId, sessionId),
     ).resolves.toMatchObject({
-      state: "awaiting_resume",
+      state: "paused",
     });
   });
 
   it("fails before continuing when the turn user message has no author id", async () => {
     const conversationId = "slack:C123:1712345.0006";
     const sessionId = "turn_msg_6";
-    const sessionRecord = await upsertAgentTurnSessionRecord({
+    const sessionRecord = await upsertTurnRecord({
       modelId: "test/model",
       conversationId,
-      sessionId,
+      turnId: sessionId,
       sliceId: 2,
-      state: "awaiting_resume",
+      state: "paused",
       destination: SLACK_DESTINATION,
       resumeReason: "timeout",
       piMessages: [
@@ -382,18 +379,17 @@ describe("agent continuation runner callbacks", () => {
       },
     });
 
-    const { continueSlackAgentRun } =
-      await import("@/chat/runtime/agent-continue-runner");
+    const { runPausedTurn } = await import("@/chat/task-execution/paused-turn");
 
     // Missing author identity must never throw out of the continue callback
     // (issue #727: a throw NACKs the queue delivery and wedges the
     // conversation); it terminally fails the session instead.
     await expect(
-      continueSlackAgentRun(
+      runPausedTurn(
         {
           conversationId,
           destination: SLACK_DESTINATION,
-          sessionId,
+          turnId: sessionId,
           expectedVersion: sessionRecord.version,
         },
         {
@@ -409,7 +405,7 @@ describe("agent continuation runner callbacks", () => {
       ),
     ).resolves.toBe(true);
     await expect(
-      getAgentTurnSessionRecord(conversationId, sessionId),
+      getTurnRecord(conversationId, sessionId),
     ).resolves.toMatchObject({
       state: "failed",
     });

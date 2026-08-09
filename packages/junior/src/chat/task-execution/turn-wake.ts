@@ -1,8 +1,7 @@
 /**
- * Durable agent continuation scheduling.
+ * Continue a paused turn via the conversation work queue.
  *
- * This module owns the queue handoff used when an agent run pauses at a safe
- * Pi continuation boundary and needs another execution slice.
+ * Wake-only: mailbox/lease own liveness; this just nudges the worker.
  */
 import type { StateAdapter } from "chat";
 import type { Destination } from "@sentry/junior-plugin-api";
@@ -12,9 +11,9 @@ import {
   type TurnSessionRouting,
 } from "@/chat/services/turn-session-routing";
 import {
-  failAgentTurnSessionRecord,
-  getAgentTurnSessionRecord,
-} from "@/chat/state/turn-session";
+  failTurnRecord,
+  loadTurnCheckpoint,
+} from "@/chat/task-execution/checkpoint";
 import type { ConversationWorkQueue } from "@/chat/task-execution/queue";
 import {
   ensureConversationWake,
@@ -22,36 +21,37 @@ import {
 } from "@/chat/task-execution/store";
 import { getVercelConversationWorkQueue } from "@/chat/task-execution/vercel-queue";
 
-export interface AgentContinueRequest {
+export interface PausedTurnRequest {
   conversationId: string;
   destination: Destination;
   expectedVersion: number;
-  sessionId: string;
+  turnId: string;
 }
 
-export interface ScheduleAgentContinueOptions {
+interface TurnWakeOptions {
   nowMs?: number;
   queue?: ConversationWorkQueue;
   state?: StateAdapter;
 }
 
-/** Build the queue request for an awaiting automatic agent continuation. */
-export async function getAwaitingAgentContinueRequest(args: {
+/** Build the worker input for a paused turn. */
+export async function getPausedTurnRequest(args: {
   conversationId: string;
   conversationStore?: ConversationStore;
-  sessionId: string;
-}): Promise<AgentContinueRequest | undefined> {
-  const sessionRecord = await getAgentTurnSessionRecord(
-    args.conversationId,
-    args.sessionId,
-  );
+  turnId: string;
+}): Promise<PausedTurnRequest | undefined> {
+  const checkpoint = await loadTurnCheckpoint({
+    conversationId: args.conversationId,
+    turnId: args.turnId,
+  });
+  const turn = checkpoint.record;
   if (
-    !sessionRecord ||
-    sessionRecord.state !== "awaiting_resume" ||
-    (sessionRecord.resumeReason !== "timeout" &&
-      sessionRecord.resumeReason !== "yield" &&
-      sessionRecord.resumeReason !== "retry") ||
-    (sessionRecord.resumeReason === "timeout" && sessionRecord.sliceId < 2)
+    !turn ||
+    turn.state !== "paused" ||
+    (turn.resumeReason !== "timeout" &&
+      turn.resumeReason !== "yield" &&
+      turn.resumeReason !== "retry") ||
+    (turn.resumeReason === "timeout" && turn.sliceId < 2)
   ) {
     return undefined;
   }
@@ -62,10 +62,10 @@ export async function getAwaitingAgentContinueRequest(args: {
       conversationStore: args.conversationStore,
     });
   } catch (error) {
-    await failAgentTurnSessionRecord({
+    await failTurnRecord({
       conversationId: args.conversationId,
-      expectedVersion: sessionRecord.version,
-      sessionId: args.sessionId,
+      expectedVersion: turn.version,
+      turnId: args.turnId,
       errorMessage: error instanceof Error ? error.message : String(error),
     });
     return undefined;
@@ -74,15 +74,15 @@ export async function getAwaitingAgentContinueRequest(args: {
   return {
     conversationId: args.conversationId,
     destination: routing.destination,
-    sessionId: args.sessionId,
-    expectedVersion: sessionRecord.version,
+    turnId: args.turnId,
+    expectedVersion: turn.version,
   };
 }
 
-/** Schedule durable conversation work to continue a paused agent run. */
-export async function scheduleAgentContinue(
-  request: AgentContinueRequest,
-  options: ScheduleAgentContinueOptions = {},
+/** Wake the conversation worker for a paused turn. */
+export async function wakePausedTurn(
+  request: PausedTurnRequest,
+  options: TurnWakeOptions = {},
 ): Promise<void> {
   const nowMs = options.nowMs ?? Date.now();
   await requestConversationWork({
@@ -97,7 +97,7 @@ export async function scheduleAgentContinue(
     idempotencyKey: [
       "agent-continue",
       request.conversationId,
-      request.sessionId,
+      request.turnId,
       request.expectedVersion,
       nowMs,
     ].join(":"),
