@@ -579,7 +579,8 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
               options.explicitMention || message.isMention,
             ),
             queuedMessages: options.queuedMessages,
-            channelConfiguration: options.execution?.channelConfiguration,
+            destination,
+            locationConfiguration: options.execution?.locationConfiguration,
             context: {
               threadId,
               actorId: slackActorId,
@@ -870,7 +871,7 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
         const configReply = options.execution?.skipProviderDefaultConfig
           ? undefined
           : await maybeApplyProviderDefaultConfigRequest({
-              channelConfiguration: preparedState.channelConfiguration,
+              locationConfiguration: preparedState.locationConfiguration,
               actorId: actor?.userId,
               text: effectiveUserText,
             });
@@ -1386,7 +1387,7 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
             },
             policy: {
               configuration: preparedState.configuration,
-              channelConfiguration: preparedState.channelConfiguration,
+              locationConfiguration: preparedState.locationConfiguration,
               disabledFeatures:
                 options.execution?.disabledFeatures ??
                 (message.author.isBot === true

@@ -8,7 +8,11 @@
 import type { ReplyAttribution } from "@sentry/junior-plugin-api";
 import { botConfig } from "@/chat/config";
 import { standardModelId } from "@/chat/model-profile";
-import type { ChannelConfigurationService } from "@/chat/configuration/types";
+import { configValueSchema } from "@/chat/configuration/types";
+import type {
+  ConfigValue,
+  LocationConfigurationService,
+} from "@/chat/configuration/types";
 import {
   RetryableDeliveryError,
   type AgentRunRequest,
@@ -117,12 +121,18 @@ async function postSlackMessageBestEffort(
 
 /** Create a read-only configuration service from persisted values. */
 function createReadOnlyConfigService(
-  values: Record<string, unknown>,
-): ChannelConfigurationService {
+  rawValues: Record<string, unknown>,
+): LocationConfigurationService {
+  const values: Record<string, ConfigValue> = Object.fromEntries(
+    Object.entries(rawValues).map(([key, value]) => [
+      key,
+      configValueSchema.parse(value),
+    ]),
+  );
   const entries = Object.entries(values).map(([key, value]) => ({
     key,
     value,
-    scope: "conversation" as const,
+    scope: "location" as const,
     updatedAt: new Date().toISOString(),
   }));
 
@@ -136,7 +146,7 @@ function createReadOnlyConfigService(
       entries.filter((entry) => !prefix || entry.key.startsWith(prefix)),
     resolve: async (key) => values[key],
     resolveValues: async ({ keys, prefix } = {}) => {
-      const filtered: Record<string, unknown> = {};
+      const filtered: Record<string, ConfigValue> = {};
       for (const [key, value] of Object.entries(values)) {
         if (prefix && !key.startsWith(prefix)) continue;
         if (keys && !keys.includes(key)) continue;
@@ -352,8 +362,8 @@ function createResumeReplyContext(
   const requestDeadline = getTurnRequestDeadline();
   const threadId =
     args.lockKey ?? getDefaultLockKey(args.channelId, args.threadTs);
-  const persistedChannelConfiguration =
-    replyContext.policy?.channelConfiguration ??
+  const persistedLocationConfiguration =
+    replyContext.policy?.locationConfiguration ??
     (replyContext.policy?.configuration
       ? createReadOnlyConfigService(replyContext.policy.configuration)
       : undefined);
@@ -380,7 +390,7 @@ function createResumeReplyContext(
       ...replyContext.policy,
       turnDeadlineAtMs:
         replyContext.policy?.turnDeadlineAtMs ?? requestDeadline?.deadlineAtMs,
-      channelConfiguration: persistedChannelConfiguration,
+      locationConfiguration: persistedLocationConfiguration,
     },
     state: replyContext.state,
     observers: {
