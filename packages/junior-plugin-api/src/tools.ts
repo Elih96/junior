@@ -1,10 +1,10 @@
 import type {
-  PluginContext,
-  LocalInvocationContext,
-  PluginEmbedder,
-  Identity,
-  PluginModel,
   Actor,
+  Identity,
+  LocalInvocationContext,
+  PluginContext,
+  PluginEmbedder,
+  PluginModel,
   SlackInvocationContext,
   User,
 } from "./context";
@@ -514,7 +514,7 @@ interface BaseToolRegistrationHookContext extends PluginContext {
   /**
    * Opaque Junior conversation/session identity for this turn.
    * Interactive Slack turns use `slack:{channelId}:{threadTs}`.
-   * Scheduled/API turns use an internal id such as `agent-dispatch:{id}`.
+   * Scheduled/web turns use an internal id such as `agent-dispatch:{id}`.
    * Do not parse as Slack unless the value starts with `slack:`.
    */
   conversationId?: string;

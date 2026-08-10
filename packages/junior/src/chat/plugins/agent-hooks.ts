@@ -381,7 +381,8 @@ export async function getPluginSystemPromptContributions(
     try {
       const pluginContributions = await hook({
         ...systemPromptPluginContext(plugin),
-        platform: source.platform,
+        // Plugin system prompts only distinguish Slack vs non-Slack surfaces.
+        platform: source.platform === "slack" ? "slack" : "local",
       });
       const result =
         systemPromptMessageArraySchema.safeParse(pluginContributions);
@@ -590,9 +591,21 @@ export function getPluginTools(
           "Local plugin tool context requires local destination",
         );
       }
+      if (
+        context.source.platform !== "local" &&
+        context.source.platform !== "web"
+      ) {
+        throw new TypeError(
+          "Local plugin tool context requires a local or web source",
+        );
+      }
       pluginContext = {
         ...basePluginContext(plugin),
-        actor: context.actor?.platform === "local" ? context.actor : undefined,
+        actor:
+          context.actor?.platform === "local" ||
+          context.actor?.platform === "web"
+            ? context.actor
+            : undefined,
         conversationId: context.conversationId,
         ...(annotations ? { annotations } : {}),
         destination: context.destination,

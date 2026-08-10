@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto";
 import {
   getSourceKey,
-  isPrivateSource,
   type PluginRunContext,
   type PluginRunTranscriptEntry,
   type PluginTaskContext,
+  type Source,
 } from "@sentry/junior-plugin-api";
 import { z } from "zod";
 import {
@@ -56,6 +56,21 @@ const extractedMemoryCacheSchema = z.union([
 
 /** Where a passively extracted memory may be stored, or dropped when unproven. */
 type MemoryRouteTarget = "drop" | "personal" | "conversation";
+
+/**
+ * V1 passive learning opts in by Source branch, then public vs private.
+ * Public API is the same as public Slack: shared conversation evidence may
+ * learn. Private sources stay out. Local remains available for QA.
+ */
+function allowsPassiveMemoryExtraction(source: Source): boolean {
+  switch (source.platform) {
+    case "local":
+      return true;
+    case "web":
+    case "slack":
+      return source.visibility === "public";
+  }
+}
 
 function recordCapturedMemory(
   captured: ReturnType<typeof capturedMemory>[],
@@ -232,8 +247,9 @@ export async function processMemorySession(
   ) {
     return;
   }
-  // V1 passive learning only stores public channel facts outside local QA.
-  if (run.source.platform !== "local" && isPrivateSource(run.source)) {
+  // V1 passive learning is a Source-branch policy: local QA always, public
+  // Slack/API by visibility, private sources never.
+  if (!allowsPassiveMemoryExtraction(run.source)) {
     return;
   }
   const sourceKey = getSourceKey(run.source);

@@ -321,11 +321,19 @@ export async function wireAgentTools(
     if (toolDestination.platform !== "local") {
       throw new TypeError("Local tool runtime requires a local destination");
     }
+    if (runSource.platform !== "local" && runSource.platform !== "web") {
+      throw new TypeError(
+        "Local tool runtime requires a local or web source",
+      );
+    }
     toolRuntimeContext = {
       ...commonToolRuntimeContext,
       destination: toolDestination,
       actor:
-        args.currentActor?.platform === "local" ? args.currentActor : undefined,
+        args.currentActor?.platform === "local" ||
+        args.currentActor?.platform === "web"
+          ? args.currentActor
+          : undefined,
       source: runSource,
     };
   }

@@ -440,24 +440,26 @@ function buildRuntimeSection(params: {
 }
 
 function formatSourceLines(source: Source): string[] {
-  if (source.platform === "local") {
-    return [
-      "- source.platform: local",
-      `- source.conversation_id: ${escapeXml(source.conversationId)}`,
-    ];
+  switch (source.platform) {
+    case "web":
+    case "local":
+      return [
+        `- source.platform: ${source.platform}`,
+        `- source.conversation_id: ${escapeXml(source.conversationId)}`,
+      ];
+    case "slack":
+      return [
+        "- source.platform: slack",
+        `- source.team_id: ${escapeXml(source.teamId)}`,
+        `- source.channel_id: ${escapeXml(source.channelId)}`,
+        ...(source.messageTs
+          ? [`- source.message_ts: ${escapeXml(source.messageTs)}`]
+          : []),
+        ...(source.threadTs
+          ? [`- source.thread_ts: ${escapeXml(source.threadTs)}`]
+          : []),
+      ];
   }
-
-  return [
-    "- source.platform: slack",
-    `- source.team_id: ${escapeXml(source.teamId)}`,
-    `- source.channel_id: ${escapeXml(source.channelId)}`,
-    ...(source.messageTs
-      ? [`- source.message_ts: ${escapeXml(source.messageTs)}`]
-      : []),
-    ...(source.threadTs
-      ? [`- source.thread_ts: ${escapeXml(source.threadTs)}`]
-      : []),
-  ];
 }
 
 function formatDestinationLines(destination: Destination): string[] {
@@ -688,7 +690,10 @@ const STATIC_SYSTEM_PROMPTS: Record<PromptPlatform, string> = {
 
 /** Return byte-stable platform instructions shared by every conversation and turn. */
 export function buildSystemPrompt(params: { source: Source }): string {
-  return STATIC_SYSTEM_PROMPTS[params.source.platform];
+  // web/dashboard turns use the local (non-Slack) instruction surface.
+  const platform: PromptPlatform =
+    params.source.platform === "slack" ? "slack" : "local";
+  return STATIC_SYSTEM_PROMPTS[platform];
 }
 
 /** Build volatile runtime context that belongs in the user turn, not the system prompt. */

@@ -37,6 +37,7 @@ import {
   memoryRuntimeContextSchema,
   type MemoryRuntimeContext,
   type MemoryScope,
+  type MemorySourcePlatform,
 } from "./types";
 import {
   deriveMemoryScope,
@@ -383,26 +384,47 @@ function boundedLimit(value: number | undefined, fallback: number): number {
   return Math.min(200, Math.max(1, Math.floor(value)));
 }
 
+/** Map runtime Source platform onto the durable memory source platform. */
+function memorySourcePlatform(
+  source: MemoryRuntimeContext["source"],
+): MemorySourcePlatform {
+  switch (source.platform) {
+    case "slack":
+      return "slack";
+    case "local":
+      return "local";
+    case "web":
+      return "web";
+  }
+}
+
 /** Build the durable source attribution key from runtime-owned source fields. */
 function sourceKey(ctx: MemoryRuntimeContext): string {
-  if (ctx.source.platform === "local") {
-    return ctx.source.conversationId;
+  switch (ctx.source.platform) {
+    case "web":
+    case "local":
+      return ctx.source.conversationId;
+    case "slack": {
+      const threadKey = ctx.source.threadTs ?? ctx.source.messageTs;
+      if (!threadKey) {
+        throw new Error(
+          "Memory source requires a Slack message or thread timestamp.",
+        );
+      }
+      return `slack:${ctx.source.teamId}:${ctx.source.channelId}:${threadKey}`;
+    }
   }
-  const threadKey = ctx.source.threadTs ?? ctx.source.messageTs;
-  if (!threadKey) {
-    throw new Error(
-      "Memory source requires a Slack message or thread timestamp.",
-    );
-  }
-  return `slack:${ctx.source.teamId}:${ctx.source.channelId}:${threadKey}`;
 }
 
 function sourceChannelPrefix(ctx: MemoryRuntimeContext): string | undefined {
-  if (ctx.source.platform !== "slack") {
-    return undefined;
+  switch (ctx.source.platform) {
+    case "slack":
+      // TODO(v0.82.0): Replace Slack source-key prefix matching with typed source proximity metadata.
+      return `slack:${ctx.source.teamId}:${ctx.source.channelId}:`;
+    case "web":
+    case "local":
+      return undefined;
   }
-  // TODO(v0.82.0): Replace Slack source-key prefix matching with typed source proximity metadata.
-  return `slack:${ctx.source.teamId}:${ctx.source.channelId}:`;
 }
 
 /** Parse one SQL row into the public memory record projection. */
@@ -788,7 +810,7 @@ async function rememberDuplicateIdempotency(args: {
       scope: args.scope.scope,
       scopeKey: args.scope.scopeKey,
       sourceKey: sourceKey(args.runtimeContext),
-      sourcePlatform: args.runtimeContext.source.platform,
+      sourcePlatform: memorySourcePlatform(args.runtimeContext.source),
       subjectKey: args.subject.subjectKey,
       subjectType: args.subject.subjectType,
       supersededAtMs: args.nowMs,
@@ -1305,7 +1327,7 @@ export function createMemoryStore(
           scope: scope.scope,
           scopeKey: scope.scopeKey,
           sourceKey: sourceKey(runtimeContext),
-          sourcePlatform: runtimeContext.source.platform,
+          sourcePlatform: memorySourcePlatform(runtimeContext.source),
           subjectKey: subject.subjectKey,
           subjectType: subject.subjectType,
           kind: input.kind,
