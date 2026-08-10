@@ -1,6 +1,9 @@
-import { readCanvas, writeCanvasMarkdown } from "@/chat/slack/tools/canvas/api";
-import { resolveCanvasTarget } from "@/chat/slack/tools/canvas/context";
-import { normalizeCanvasMarkdown } from "@/chat/slack/tools/canvas/markdown";
+import { readCanvas, writeCanvasMarkdown } from "@/chat/slack/tool-support/canvas/api";
+import {
+  resolveCanvasTarget,
+  slackCanvasRefParam,
+} from "@/chat/slack/tool-support/canvas/context";
+import { normalizeCanvasMarkdown } from "@/chat/slack/tool-support/canvas/markdown";
 import { z } from "zod";
 import { juniorToolOutputSchema } from "@/chat/tool-support/structured-result";
 import { zodTool } from "@/chat/tool-support/zod-tool";
@@ -56,14 +59,11 @@ export function createSlackCanvasEditTool(state: ToolState) {
       readOnlyHint: false,
     },
     description:
-      "Edit one Slack canvas with exact markdown replacements. Use for precise changes to existing Canvas content; prefer this over slackCanvasWrite for targeted changes. Each oldText must match exactly, be unique, and not overlap another edit. Returns a diff. Multiple changes to the same canvas: use one edits[] call.",
+      "Edit a Slack canvas with exact markdown replacements. Returns a diff.",
     prepareArguments: prepareCanvasEditArguments,
     executionMode: "sequential",
     inputSchema: z.object({
-      canvas: z
-        .string()
-        .min(1)
-        .describe("Canvas/file ID (e.g. `F0ABCDEF`) or Slack canvas/docs URL."),
+      canvas: slackCanvasRefParam,
       edits: z
         .array(editReplacementSchema)
         .min(1)

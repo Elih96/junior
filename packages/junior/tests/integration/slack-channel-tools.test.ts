@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { createSlackSource } from "@sentry/junior-plugin-api";
+import { createSlackChannelJoinTool } from "@/chat/slack/tools/channel-join";
 import { createSlackChannelListMessagesTool } from "@/chat/slack/tools/channel-list-messages";
 import { createSlackMessageAddReactionTool } from "@/chat/slack/tools/message-add-reaction";
 import { createSendFilesTool } from "@/chat/slack/tools/send-files";
-import type { SlackToolContext } from "@/chat/slack/tools/context";
+import type { SlackToolContext } from "@/chat/slack/tool-support/context";
 import { readSandboxFileUpload } from "@/chat/tools/sandbox/file-uploads";
 import { ToolInputError } from "@/chat/tools/execution/tool-input-error";
 import type { SandboxWorkspace } from "@/chat/sandbox/workspace";
@@ -12,6 +13,9 @@ import { parseSlackChannelId, parseSlackTeamId } from "@/chat/slack/ids";
 import { parseSlackMessageTs } from "@/chat/slack/timestamp";
 import {
   conversationsHistoryPage,
+  conversationsInfoOk,
+  conversationsJoinOk,
+  conversationsListPage,
   reactionsAddOk,
 } from "../fixtures/slack/factories/api";
 import {
@@ -596,6 +600,57 @@ describe("slack channel tools", () => {
     });
   });
 
+  it("lists history for another public channel when channel_id is provided", async () => {
+    queueSlackApiResponse("conversations.info", {
+      body: conversationsInfoOk({
+        channelId: "C0OTHER",
+        isPrivate: false,
+      }),
+    });
+    queueSlackApiResponse("conversations.history", {
+      body: conversationsHistoryPage({
+        messages: [{ ts: "1700000000.700", text: "other-channel", user: "U3" }],
+      }),
+    });
+    const tool = createSlackChannelListMessagesTool(
+      createContext("list other channel", {
+        sourceChannelId: "C123",
+      }),
+    );
+
+    const result = await executeTool(tool, {
+      channel_id: "C0OTHER",
+      limit: 5,
+    });
+
+    expect(result).toMatchObject({
+      channel_id: "C0OTHER",
+      count: 1,
+    });
+    expect(getCapturedSlackApiCalls("conversations.info")).toHaveLength(1);
+    expect(
+      getCapturedSlackApiCalls("conversations.history")[0]?.params,
+    ).toMatchObject({
+      channel: "C0OTHER",
+    });
+  });
+
+  it("blocks history for a private channel_id outside the current conversation", async () => {
+    queueSlackApiResponse("conversations.info", {
+      body: conversationsInfoOk({
+        channelId: "C0PRIVATE",
+        isPrivate: true,
+      }),
+    });
+    const tool = createSlackChannelListMessagesTool(
+      createContext("list private channel"));
+
+    await expect(
+      executeTool(tool, { channel_id: "C0PRIVATE" }),
+    ).rejects.toThrow("private");
+    expect(getCapturedSlackApiCalls("conversations.history")).toHaveLength(0);
+  });
+
   it("adds a reaction to the implicitly targeted inbound message", async () => {
     queueSlackApiResponse("reactions.add", {
       body: reactionsAddOk(),
@@ -692,4 +747,120 @@ describe("slack channel tools", () => {
     });
     expect(getCapturedSlackApiCalls("reactions.add")).toHaveLength(1);
   });
+
+  it("lists history when channel_id is a public channel name", async () => {
+    queueSlackApiResponse("conversations.list", {
+      body: conversationsListPage({
+        channels: [
+          { id: "C0PROJ", name: "proj-foo", is_member: true, is_private: false },
+        ],
+      }),
+    });
+    queueSlackApiResponse("conversations.info", {
+      body: conversationsInfoOk({
+        channelId: "C0PROJ",
+        name: "proj-foo",
+        isPrivate: false,
+        isMember: true,
+      }),
+    });
+    queueSlackApiResponse("conversations.history", {
+      body: conversationsHistoryPage({
+        messages: [{ ts: "1700000000.710", text: "named-id", user: "U3" }],
+      }),
+    });
+    const tool = createSlackChannelListMessagesTool(
+      createContext("list by name in channel_id"));
+    const result = await executeTool(tool, {
+      channel_id: "#proj-foo",
+      limit: 5,
+    });
+    expect(result).toMatchObject({
+      channel_id: "C0PROJ",
+      channel_name: "proj-foo",
+      count: 1,
+    });
+  });
+
+  it("joins a public channel on demand", async () => {
+    queueSlackApiResponse("conversations.info", {
+      body: conversationsInfoOk({
+        channelId: "C0JOIN",
+        name: "announce",
+        isPrivate: false,
+        isMember: false,
+      }),
+    });
+    queueSlackApiResponse("conversations.join", {
+      body: conversationsJoinOk({ channelId: "C0JOIN", name: "announce" }),
+    });
+    const tool = createSlackChannelJoinTool(createContext("join channel"));
+    const result = await executeTool(tool, { channel_id: "C0JOIN" });
+    expect(result).toMatchObject({
+      channel_id: "C0JOIN",
+      channel_name: "announce",
+      joined: true,
+      already_member: false,
+    });
+    expect(getCapturedSlackApiCalls("conversations.join")).toHaveLength(1);
+  });
+
+  it("joins a public channel when channel_id is a channel name", async () => {
+    queueSlackApiResponse("conversations.list", {
+      body: conversationsListPage({
+        channels: [
+          { id: "C0JOINNAME", name: "join-me", is_member: false, is_private: false },
+        ],
+      }),
+    });
+    queueSlackApiResponse("conversations.info", {
+      body: conversationsInfoOk({
+        channelId: "C0JOINNAME",
+        name: "join-me",
+        isPrivate: false,
+        isMember: false,
+      }),
+    });
+    queueSlackApiResponse("conversations.join", {
+      body: conversationsJoinOk({ channelId: "C0JOINNAME", name: "join-me" }),
+    });
+    const tool = createSlackChannelJoinTool(createContext("join by name"));
+    const result = await executeTool(tool, { channel_id: "#join-me" });
+    expect(result).toMatchObject({
+      channel_id: "C0JOINNAME",
+      channel_name: "join-me",
+      joined: true,
+    });
+  });
+
+  it("joins then retries channel history when not in channel", async () => {
+    queueSlackApiResponse("conversations.info", {
+      body: conversationsInfoOk({
+        channelId: "C0JOINME",
+        name: "joinme",
+        isPrivate: false,
+        isMember: false,
+      }),
+    });
+    queueSlackApiError("conversations.history", { error: "not_in_channel" });
+    queueSlackApiResponse("conversations.join", {
+      body: conversationsJoinOk({ channelId: "C0JOINME", name: "joinme" }),
+    });
+    queueSlackApiResponse("conversations.history", {
+      body: conversationsHistoryPage({
+        messages: [{ ts: "1700000000.900", text: "after-join", user: "U4" }],
+      }),
+    });
+    const tool = createSlackChannelListMessagesTool(
+      createContext("history after join"));
+    const result = await executeTool(tool, { channel_id: "C0JOINME", limit: 5 });
+    expect(result).toMatchObject({
+      channel_id: "C0JOINME",
+      joined_channel: true,
+      count: 1,
+    });
+    expect(getCapturedSlackApiCalls("conversations.join")).toHaveLength(1);
+    expect(getCapturedSlackApiCalls("conversations.history")).toHaveLength(2);
+  });
+
 });

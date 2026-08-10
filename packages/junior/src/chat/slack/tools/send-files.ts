@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { uploadFilesToConversation } from "@/chat/slack/outbound";
-import type { SlackToolContext } from "@/chat/slack/tools/context";
+import type { SlackToolContext } from "@/chat/slack/tool-support/context";
 import { z } from "zod";
 import { zodTool } from "@/chat/tool-support/zod-tool";
 import { ToolInputError } from "@/chat/tools/execution/tool-input-error";
@@ -69,7 +69,7 @@ export function createSendFilesTool(
       readOnlyHint: false,
     },
     description:
-      "Send one or more sandbox files into the active Slack conversation. Use when the user asks to attach, send, or share files here, in this conversation, or in this thread. Do not use for ordinary assistant text, top-level channel posts, other named channels, inline @mentions, or pinging mentioned users.",
+      "Send one or more sandbox files into the active Slack conversation.",
     inputSchema: z.object({
       files: z
         .array(sandboxFileReferenceSchema)

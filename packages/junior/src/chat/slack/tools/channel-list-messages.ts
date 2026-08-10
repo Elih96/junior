@@ -4,14 +4,22 @@ import { parseSlackThreadId } from "@/chat/slack/context";
 import type { SlackChannelId } from "@/chat/slack/ids";
 import type { SlackMessageTs } from "@/chat/slack/timestamp";
 import {
-  optionalSlackTimestampParam,
   parseSlackTimestampParam,
+  slackTimestampParam,
 } from "@/chat/slack/timestamp-param";
+import {
+  checkSlackChannelReadAccess,
+  joinPublicChannelForRead,
+} from "@/chat/slack/tool-support/channel-access";
+import {
+  resolveOptionalSlackChannelRef,
+  slackChannelRefParam,
+} from "@/chat/slack/tool-support/channel-target";
 import { z } from "zod";
 import { juniorToolOutputSchema } from "@/chat/tool-support/structured-result";
 import { zodTool } from "@/chat/tool-support/zod-tool";
 import { ToolInputError } from "@/chat/tools/execution/tool-input-error";
-import type { SlackToolContext } from "@/chat/slack/tools/context";
+import type { SlackToolContext } from "@/chat/slack/tool-support/context";
 
 const booleanInput = (description: string) =>
   z
@@ -22,7 +30,7 @@ const booleanInput = (description: string) =>
     .describe(description);
 
 /**
- * Accept numeric Slack ts bounds and recover matching Junior
+ * Accept numeric Slack ts bounds and recover matching
  * `slack:<channel>:<ts>` references before Slack API calls.
  */
 function normalizeRangeTimestamp(
@@ -59,11 +67,11 @@ function normalizeRangeTimestamp(
   return timestamp;
 }
 
-/** Create the active-channel history tool with preflight timestamp normalization. */
+/** Create the channel history tool with optional cross-channel targets. */
 export function createSlackChannelListMessagesTool(context: SlackToolContext) {
   return zodTool({
     description:
-      "List channel messages from Slack history in the active channel context. Use when the user asks for recent or historical channel context outside this thread. Do not use for live monitoring or when current thread context already answers the question.",
+      "List messages from Slack channel history. Defaults to the active channel. Pass `channel_id` to read another public channel.",
     annotations: {
       destructiveHint: false,
       idempotentHint: true,
@@ -71,6 +79,7 @@ export function createSlackChannelListMessagesTool(context: SlackToolContext) {
       readOnlyHint: true,
     },
     inputSchema: z.object({
+      channel_id: slackChannelRefParam.optional(),
       limit: z.coerce
         .number()
         .int()
@@ -83,12 +92,12 @@ export function createSlackChannelListMessagesTool(context: SlackToolContext) {
         .min(1)
         .describe("Optional cursor to continue from a prior call.")
         .optional(),
-      oldest: optionalSlackTimestampParam(
-        "Optional oldest message timestamp (Slack ts) for range filtering.",
-      ),
-      latest: optionalSlackTimestampParam(
-        "Optional latest message timestamp (Slack ts) for range filtering.",
-      ),
+      oldest: slackTimestampParam(
+        "Oldest message timestamp (Slack ts) for range filtering.",
+      ).optional(),
+      latest: slackTimestampParam(
+        "Latest message timestamp (Slack ts) for range filtering.",
+      ).optional(),
       inclusive: booleanInput(
         "Whether oldest/latest bounds should be inclusive.",
       ).optional(),
@@ -102,6 +111,7 @@ export function createSlackChannelListMessagesTool(context: SlackToolContext) {
     }),
     outputSchema: juniorToolOutputSchema,
     execute: async ({
+      channel_id,
       limit,
       cursor,
       oldest,
@@ -109,9 +119,23 @@ export function createSlackChannelListMessagesTool(context: SlackToolContext) {
       inclusive,
       max_pages,
     }) => {
-      const targetChannelId = context.destinationChannelId;
-      if (!targetChannelId) {
-        throw new ToolInputError("No active Slack destination is available.");
+      const target = await resolveOptionalSlackChannelRef({
+        field: "channel_id",
+        value: channel_id,
+        defaultChannelId: context.destinationChannelId,
+      });
+      const targetChannelId = target.channelId;
+
+      const access = await checkSlackChannelReadAccess({
+        currentChannelIds: [
+          context.destinationChannelId,
+          context.sourceChannelId,
+        ],
+        targetChannelId,
+        teamId: context.teamId,
+      });
+      if (!access.allowed) {
+        throw new ToolInputError(access.error);
       }
 
       const normalizedOldest = normalizeRangeTimestamp(
@@ -131,9 +155,8 @@ export function createSlackChannelListMessagesTool(context: SlackToolContext) {
         throw new ToolInputError(normalizedLatest.error);
       }
 
-      let result;
-      try {
-        result = await listChannelMessages({
+      const readHistory = async () =>
+        listChannelMessages({
           channelId: targetChannelId,
           limit: limit ?? 100,
           cursor,
@@ -142,7 +165,40 @@ export function createSlackChannelListMessagesTool(context: SlackToolContext) {
           inclusive,
           maxPages: max_pages,
         });
+
+      let result: Awaited<ReturnType<typeof listChannelMessages>> | undefined;
+      let joined = false;
+      let channelName = access.channelName ?? target.channelName;
+      let readError: unknown;
+      try {
+        result = await readHistory();
       } catch (error) {
+        readError = error;
+        const canJoin =
+          error instanceof SlackActionError &&
+          error.code === "not_in_channel" &&
+          access.isMember !== true;
+        if (canJoin) {
+          const joinResult = await joinPublicChannelForRead({
+            channelName,
+            targetChannelId,
+          });
+          if (!joinResult.ok) {
+            throw new ToolInputError(joinResult.error);
+          }
+          joined = true;
+          channelName = joinResult.channelName ?? channelName;
+          try {
+            result = await readHistory();
+            readError = undefined;
+          } catch (retryError) {
+            readError = retryError;
+          }
+        }
+      }
+
+      if (!result) {
+        const error = readError;
         if (
           error instanceof SlackActionError &&
           error.apiError === "invalid_cursor"
@@ -152,17 +208,35 @@ export function createSlackChannelListMessagesTool(context: SlackToolContext) {
             { cause: error },
           );
         }
+        if (error instanceof SlackActionError) {
+          if (error.code === "not_in_channel") {
+            throw new ToolInputError(
+              "Could not read this Slack channel history because the bot is not in the channel.",
+              { cause: error },
+            );
+          }
+          if (error.code === "missing_scope") {
+            throw new ToolInputError(
+              "Could not read this Slack channel history because this installation is missing history scopes.",
+              { cause: error },
+            );
+          }
+          throw new ToolInputError(
+            "Could not read this Slack channel history.",
+            { cause: error },
+          );
+        }
         throw error;
       }
 
-      const summary = {
+      return {
         channel_id: targetChannelId,
+        ...(channelName ? { channel_name: channelName } : {}),
+        ...(joined ? { joined_channel: true } : {}),
         count: result.messages.length,
         messages: result.messages,
         ...(result.nextCursor ? { next_cursor: result.nextCursor } : {}),
       };
-
-      return summary;
     },
   });
 }

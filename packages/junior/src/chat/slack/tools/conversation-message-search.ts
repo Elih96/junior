@@ -2,15 +2,14 @@ import { z } from "zod";
 import type {
   ConversationMessageSearchFilters,
   ConversationMessageSearchScope,
-  ConversationMessageSearchStore,
 } from "@/chat/conversations/message-search";
 import { CONVERSATIONS_TOOL_SOURCE } from "@/chat/conversations/tool-source";
 import { getConversationMessageSearchStore } from "@/chat/db";
 import { parseSlackThreadId } from "@/chat/slack/context";
 import {
-  parseRequiredSlackChannelIdParam,
-  slackChannelIdParam,
-} from "@/chat/slack/id-param";
+  resolveSlackChannelRef,
+  slackChannelRefParam,
+} from "@/chat/slack/tool-support/channel-target";
 import { getSlackMessagePermalink } from "@/chat/slack/outbound";
 import { juniorToolOutputSchema } from "@/chat/tool-support/structured-result";
 import { zodTool } from "@/chat/tool-support/zod-tool";
@@ -39,27 +38,19 @@ const conversationMessageSearchOutputSchema = juniorToolOutputSchema.extend({
   ),
 });
 
-interface ConversationMessageSearchToolDeps {
-  getPermalink?: typeof getSlackMessagePermalink;
-  store?: ConversationMessageSearchStore;
-}
-
-function resolveSearchFilters(input: {
+async function resolveSearchFilters(input: {
   channel_id?: string | null;
   query?: string | null;
-}): ConversationMessageSearchFilters {
+}): Promise<ConversationMessageSearchFilters> {
   const query = input.query?.trim() || undefined;
   let channelId: string | undefined;
 
-  if (input.channel_id != null) {
-    const parsed = parseRequiredSlackChannelIdParam(
-      "channel_id",
-      input.channel_id,
-    );
-    if (!parsed.ok) {
-      throw new ToolInputError(parsed.error);
-    }
-    channelId = parsed.value;
+  if (input.channel_id != null && input.channel_id.trim() !== "") {
+    const target = await resolveSlackChannelRef({
+      field: "channel_id",
+      value: input.channel_id,
+    });
+    channelId = target.channelId;
   }
 
   if (!query && !channelId) {
@@ -78,11 +69,10 @@ function resolveSearchFilters(input: {
 export function createSlackConversationMessageSearchTool(
   scope: ConversationMessageSearchScope,
   currentConversationId: string,
-  deps: ConversationMessageSearchToolDeps = {},
 ) {
   return zodTool({
     description:
-      "Search retained user and assistant messages in public Junior conversations across the current Slack workspace. Excludes the current conversation.",
+      "Search retained user and assistant messages from public conversations in this Slack workspace. Excludes the current conversation. Not live Slack workspace search.",
     exposure: "deferred",
     source: CONVERSATIONS_TOOL_SOURCE,
     annotations: {
@@ -93,11 +83,7 @@ export function createSlackConversationMessageSearchTool(
     },
     inputSchema: z
       .object({
-        channel_id: slackChannelIdParam(
-          "Destination Slack channel ID; no active-channel default.",
-        )
-          .nullable()
-          .optional(),
+        channel_id: slackChannelRefParam.nullable().optional(),
         query: z
           .string()
           .trim()
@@ -118,15 +104,14 @@ export function createSlackConversationMessageSearchTool(
       .strict(),
     outputSchema: conversationMessageSearchOutputSchema,
     execute: async (input) => {
-      const filters = resolveSearchFilters(input);
-      const store = deps.store ?? getConversationMessageSearchStore();
+      const filters = await resolveSearchFilters(input);
+      const store = getConversationMessageSearchStore();
       const matches = await store.search({
         currentConversationId,
         filters,
         limit: input.limit ?? DEFAULT_LIMIT,
         scope,
       });
-      const getPermalink = deps.getPermalink ?? getSlackMessagePermalink;
       const matchesOutput = await Promise.all(
         matches.map(async (match) => {
           const reference = parseSlackThreadId(match.conversationId);
@@ -138,7 +123,7 @@ export function createSlackConversationMessageSearchTool(
               "Stored Slack conversation search returned an invalid destination",
             );
           }
-          const permalink = await getPermalink({
+          const permalink = await getSlackMessagePermalink({
             channelId: reference.channelId,
             messageTs: reference.threadTs,
           });

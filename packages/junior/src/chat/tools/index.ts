@@ -1,4 +1,4 @@
-import { resolveChannelCapabilities } from "@/chat/slack/tools/channel-capabilities";
+import { resolveChannelCapabilities } from "@/chat/slack/tool-support/channel-capabilities";
 import { botConfig } from "@/chat/config";
 import { createBashTool } from "@/chat/tools/sandbox/bash";
 import { createEditFileTool } from "@/chat/tools/sandbox/edit-file";
@@ -19,10 +19,11 @@ import { createResourceEventTools } from "@/chat/tools/resource-events";
 import { getResourceEventCatalog } from "@/chat/resource-events/runtime-catalog";
 import { createEventTaskTools } from "@/chat/tools/event-tasks";
 import { createScheduledTaskTools } from "@/chat/tools/scheduled-tasks";
+import { createSlackChannelJoinTool } from "@/chat/slack/tools/channel-join";
 import { createSlackChannelListMessagesTool } from "@/chat/slack/tools/channel-list-messages";
 import { createSlackConversationMessageSearchTool } from "@/chat/slack/tools/conversation-message-search";
 import { createSlackPublicSearchTool } from "@/chat/slack/tools/public-search";
-import { getSlackToolContext } from "@/chat/slack/tools/context";
+import { getSlackToolContext } from "@/chat/slack/tool-support/context";
 import { createSlackMessageAddReactionTool } from "@/chat/slack/tools/message-add-reaction";
 import { createSendFilesTool } from "@/chat/slack/tools/send-files";
 import { createSlackCanvasCreateTool } from "@/chat/slack/tools/canvas/create";
@@ -155,6 +156,7 @@ export function createTools(
     tools.slackCanvasEdit = createSlackCanvasEditTool(state);
     tools.slackCanvasWrite = createSlackCanvasWriteTool(state);
     tools.slackThreadRead = createSlackThreadReadTool(slackContext);
+    tools.slackChannelJoin = createSlackChannelJoinTool(slackContext);
     if (context.conversationId && slackContext.source.visibility === "public") {
       tools.searchConversationMessages =
         createSlackConversationMessageSearchTool(
@@ -166,7 +168,9 @@ export function createTools(
           context.conversationId,
         );
     }
-    if (context.source.platform === "slack" && context.slackActionToken) {
+    // Always register public search in Slack turns. Without an action token the
+    // tool stays visible and returns an honest interactive-turn limit.
+    if (context.source.platform === "slack") {
       tools.slackPublicSearch = createSlackPublicSearchTool(
         context.slackActionToken,
       );
@@ -204,10 +208,10 @@ export function createTools(
       );
     }
 
-    if (outputCapabilities?.canPostToChannel) {
-      tools.slackChannelListMessages =
-        createSlackChannelListMessagesTool(slackContext);
-    }
+    // Channel history is available in any Slack context, including DMs, so the
+    // model can read the active destination or another accessible public channel.
+    tools.slackChannelListMessages =
+      createSlackChannelListMessagesTool(slackContext);
 
     if (rawChannelCapabilities.canAddReactions) {
       tools.addReaction = createSlackMessageAddReactionTool(

@@ -1,4 +1,5 @@
-import { addListItems } from "@/chat/slack/tools/list/api";
+import { addListItems } from "@/chat/slack/tool-support/list/api";
+import { slackListIdParam } from "@/chat/slack/tool-support/list/params";
 import {
   parseRequiredSlackUserIdParam,
   slackUserIdParam,
@@ -19,10 +20,9 @@ export function createSlackListAddItemsTool(state: ToolState) {
       openWorldHint: true,
       readOnlyHint: false,
     },
-    description:
-      "Add tasks to a Slack list. Use the list_id from the list create result or conversation history.",
+    description: "Add tasks to a Slack list.",
     inputSchema: z.object({
-      list_id: z.string().min(1).describe("ID of the Slack list to update."),
+      list_id: slackListIdParam,
       items: z
         .array(z.string().min(1))
         .min(1)

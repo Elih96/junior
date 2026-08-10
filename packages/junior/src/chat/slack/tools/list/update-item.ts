@@ -1,4 +1,8 @@
-import { updateListItem } from "@/chat/slack/tools/list/api";
+import { updateListItem } from "@/chat/slack/tool-support/list/api";
+import {
+  slackListIdParam,
+  slackListItemIdParam,
+} from "@/chat/slack/tool-support/list/params";
 import { z } from "zod";
 import { juniorToolOutputSchema } from "@/chat/tool-support/structured-result";
 import { zodTool } from "@/chat/tool-support/zod-tool";
@@ -15,14 +19,14 @@ const booleanInput = (description: string) =>
 
 const updateListItemInputSchema = z.union([
   z.object({
-    list_id: z.string().min(1).describe("ID of the Slack list to update."),
-    item_id: z.string().min(1).describe("ID of the Slack list item to update."),
+    list_id: slackListIdParam,
+    item_id: slackListItemIdParam,
     completed: booleanInput("Optional completion status update."),
     title: z.string().min(1).describe("Optional new item title.").optional(),
   }),
   z.object({
-    list_id: z.string().min(1).describe("ID of the Slack list to update."),
-    item_id: z.string().min(1).describe("ID of the Slack list item to update."),
+    list_id: slackListIdParam,
+    item_id: slackListItemIdParam,
     completed: booleanInput("Optional completion status update.").optional(),
     title: z.string().min(1).describe("Optional new item title."),
   }),
@@ -37,8 +41,7 @@ export function createSlackListUpdateItemTool(state: ToolState) {
       openWorldHint: true,
       readOnlyHint: false,
     },
-    description:
-      "Update an item in a Slack list. Use list_id and item_id from prior tool results or conversation history.",
+    description: "Update an item in a Slack list.",
     inputSchema: updateListItemInputSchema,
     outputSchema: juniorToolOutputSchema,
     execute: async ({ list_id, item_id, completed, title }) => {
