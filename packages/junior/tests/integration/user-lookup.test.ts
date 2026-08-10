@@ -269,6 +269,137 @@ describe("userLookup", () => {
       });
     });
 
+    it("keeps ambiguous first-name hits multi-match", async () => {
+      queueSlackApiResponse("users.list", {
+        body: usersListPage({
+          members: [
+            {
+              id: "U_COLIN_CURTIN",
+              name: "colin.curtin",
+              realName: "Colin Curtin",
+              displayName: "Colin Curtin (Square)",
+            },
+            {
+              id: "U_COLIN_KAWAI",
+              name: "colin.kawai",
+              realName: "Colin Kawai",
+              displayName: "Colin Kawai",
+            },
+          ],
+        }),
+      });
+
+      const result = await executeTool(lookupTool(), {
+        provider: "slack",
+        query: "colin",
+      });
+
+      expect(result).toMatchObject({
+        provider: "slack",
+        query: "colin",
+        count: 2,
+      });
+      expect(result.mention).toBeUndefined();
+      expect(result.users.map((user: { id: string }) => user.id).sort()).toEqual(
+        ["U_COLIN_CURTIN", "U_COLIN_KAWAI"],
+      );
+    });
+
+    it("ranks a multi-token name above another first-name match", async () => {
+      queueSlackApiResponse("users.list", {
+        body: usersListPage({
+          members: [
+            {
+              id: "U_OTHER_COLIN",
+              name: "colin.curtin",
+              realName: "Colin Curtin",
+              displayName: "Colin Curtin",
+            },
+            {
+              id: "U_FULL_COLIN",
+              name: "colin.kawai",
+              realName: "Colin Kawai",
+              displayName: "Colin Kawai",
+            },
+          ],
+        }),
+      });
+
+      const result = await executeTool(lookupTool(), {
+        provider: "slack",
+        query: "colin kawai",
+      });
+
+      expect(result).toMatchObject({
+        count: 1,
+        mention: "<@U_FULL_COLIN>",
+        user: { id: "U_FULL_COLIN" },
+      });
+    });
+
+    it("keeps accented last-name tokens intact", async () => {
+      queueSlackApiResponse("users.list", {
+        body: usersListPage({
+          members: [
+            {
+              id: "U_GARCIA",
+              name: "maria.garcia",
+              realName: "Maria García",
+              displayName: "Maria García",
+            },
+            {
+              id: "U_OTHER",
+              name: "maria.other",
+              realName: "Maria Other",
+              displayName: "Maria Other",
+            },
+          ],
+        }),
+      });
+
+      const result = await executeTool(lookupTool(), {
+        provider: "slack",
+        query: "garcía",
+      });
+
+      expect(result).toMatchObject({
+        count: 1,
+        mention: "<@U_GARCIA>",
+        user: { id: "U_GARCIA" },
+      });
+    });
+
+    it("ranks an exact name above a longer prefix hit", async () => {
+      queueSlackApiResponse("users.list", {
+        body: usersListPage({
+          members: [
+            {
+              id: "U_ALEX",
+              name: "alex",
+              realName: "Alex",
+              displayName: "Alex",
+            },
+            {
+              id: "U_ALEXANDRA",
+              name: "alexandra",
+              realName: "Alexandra",
+              displayName: "Alexandra",
+            },
+          ],
+        }),
+      });
+
+      const result = await executeTool(lookupTool(), {
+        provider: "slack",
+        query: "alex",
+      });
+
+      expect(result.users.map((user: { id: string }) => user.id)).toEqual([
+        "U_ALEX",
+        "U_ALEXANDRA",
+      ]);
+    });
+
     it("returns empty results when no match", async () => {
       queueSlackApiResponse("users.list", {
         body: usersListPage({

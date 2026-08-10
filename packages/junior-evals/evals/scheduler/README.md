@@ -7,9 +7,10 @@ Hard-fail scheduler system contracts and their helpers live under `evals/integra
 - creator vs system credential mode
 - rescheduling existing tasks
 
-This folder keeps behavioral due-occurrence delivery quality and its delivery-only helpers:
+This folder keeps behavioral due-occurrence delivery quality:
 
 - delivering due one-off and recurring scheduled task occurrences
+- addressing the known task creator without a name lookup
 
 Run the suites with:
 

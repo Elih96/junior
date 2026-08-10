@@ -37,17 +37,29 @@ function singleLineMetadataValue(value: string): string {
     .trim();
 }
 
+/** Render the due scheduled task as structured agent input. */
+function buildDispatchInput(task: ScheduledTask): string {
+  const creator = sanitizeScheduledTaskPrincipal(task.createdBy);
+  return [
+    "You are executing a scheduled task.",
+    "",
+    "Task:",
+    `- creator: <@${creator.slackUserId}>`,
+    "",
+    "Stored user instruction:",
+    task.task.text,
+  ].join("\n");
+}
+
 function buildDispatchMetadata(args: {
   nowMs: number;
   run: ScheduledRun;
   task: ScheduledTask;
 }): Record<string, string> {
-  const creator = sanitizeScheduledTaskPrincipal(args.task.createdBy);
   if (!args.task.task.text?.trim()) {
     throw new Error("Scheduled task text is required");
   }
   return {
-    creatorSlackUserId: creator.slackUserId,
     runId: args.run.id,
     schedule: singleLineMetadataValue(args.task.schedule.description),
     scheduleKind: args.task.schedule.kind,
@@ -410,7 +422,7 @@ export async function runScheduledTaskHeartbeat(args: {
             : {}),
           destination: task.destination,
           destinationVisibility: task.conversationAccess.visibility,
-          input: task.task.text,
+          input: buildDispatchInput(task),
           metadata,
           replyAttribution: replyAttribution(task),
           source: dispatchSource(task),

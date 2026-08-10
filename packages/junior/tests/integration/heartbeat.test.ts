@@ -672,9 +672,15 @@ describe("plugin heartbeat", () => {
     expect(fetchMock).not.toHaveBeenCalled();
     expect(conversationWorkQueue.sentRecords()).toHaveLength(1);
     const dispatchRecord = await getDispatchRecord(running!.dispatchId!);
-    expect(dispatchRecord?.input).toBe(
-      "Post a digest. Summarize the latest state.",
-    );
+    expect(dispatchRecord?.input).toMatchInlineSnapshot(`
+      "You are executing a scheduled task.
+
+      Task:
+      - creator: <@U039RR91S>
+
+      Stored user instruction:
+      Post a digest. Summarize the latest state."
+    `);
     expect(dispatchRecord?.destination).toEqual(SLACK_DESTINATION);
     expect(dispatchRecord?.destinationVisibility).toBe("public");
     expect(dispatchRecord?.source).toEqual(
@@ -685,7 +691,6 @@ describe("plugin heartbeat", () => {
       }),
     );
     expect(dispatchRecord?.metadata).toMatchObject({
-      creatorSlackUserId: "U039RR91S",
       runId: `sched_plugin_1:${TEST_RUN_AT_MS}`,
       schedule: "Once at noon",
       scheduleKind: "one_off",
@@ -694,6 +699,7 @@ describe("plugin heartbeat", () => {
       taskId: "sched_plugin_1",
       timezone: "UTC",
     });
+    expect(dispatchRecord?.metadata).not.toHaveProperty("creatorSlackUserId");
     expect(dispatchRecord?.metadata).not.toHaveProperty("creatorUserName");
     expect(dispatchRecord?.metadata).not.toHaveProperty("creatorFullName");
     expect(dispatchRecord?.replyAttribution).toEqual({
