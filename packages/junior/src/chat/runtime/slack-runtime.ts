@@ -85,6 +85,7 @@ interface SteeringDrainContext {
 export interface SlackTurnOptions extends ReplyHooks {
   conversationId?: string;
   destination: Destination;
+  publishExternally?: boolean;
 }
 
 const THREAD_OPTOUT_ACK =
@@ -182,6 +183,7 @@ export interface SlackTurnRuntimeDependencies<TPreparedState> {
       onTurnStatePersisted?: () => Promise<void>;
       preparedState?: TPreparedState;
       queuedMessages?: QueuedTurnMessage[];
+      publishExternally?: boolean;
       drainSteeringMessages?: (
         accept: (messages: QueuedTurnMessage[]) => Promise<void>,
         context?: SteeringDrainContext,
@@ -357,6 +359,11 @@ function actorUserName(message: Message): string | undefined {
 }
 
 /** Build the Slack event runtime that routes mentions and subscribed messages. */
+/** Slack surfaces publish unless a caller opts out. */
+function shouldPublishExternally(publishExternally?: boolean): boolean {
+  return publishExternally !== false;
+}
+
 export function createSlackTurnRuntime<
   TPreparedState,
   TAssistantEvent extends AssistantLifecycleEvent = AssistantLifecycleEvent,
@@ -778,6 +785,7 @@ export function createSlackTurnRuntime<
             conversationId: hooks.conversationId,
             destination: hooks.destination,
             queuedMessages,
+            publishExternally: shouldPublishExternally(hooks.publishExternally),
             ack,
             onToolInvocation: toolInvocationHook,
             onTurnCompleted,
@@ -842,11 +850,13 @@ export function createSlackTurnRuntime<
           lifecycleError = error;
         }
         await hooks.beforeFirstResponsePost?.();
-        await postFallbackErrorReplyWithLogging({
-          thread,
-          eventId,
-          postFailureEventName: "mention.handler.failure_reply_post.failed",
-        });
+        if (shouldPublishExternally(hooks.publishExternally)) {
+          await postFallbackErrorReplyWithLogging({
+            thread,
+            eventId,
+            postFailureEventName: "mention.handler.failure_reply_post.failed",
+          });
+        }
         if (lifecycleError) throw lifecycleError;
       } finally {
         if (completed) {
@@ -1081,6 +1091,7 @@ export function createSlackTurnRuntime<
             conversationId: hooks.conversationId,
             destination: hooks.destination,
             preparedState,
+            publishExternally: shouldPublishExternally(hooks.publishExternally),
             beforeFirstResponsePost: hooks.beforeFirstResponsePost,
             queuedMessages,
             ack,
@@ -1150,12 +1161,14 @@ export function createSlackTurnRuntime<
           lifecycleError = error;
         }
         await hooks.beforeFirstResponsePost?.();
-        await postFallbackErrorReplyWithLogging({
-          thread,
-          eventId,
-          postFailureEventName:
-            "subscribed_message.handler.failure_reply_post.failed",
-        });
+        if (shouldPublishExternally(hooks.publishExternally)) {
+          await postFallbackErrorReplyWithLogging({
+            thread,
+            eventId,
+            postFailureEventName:
+              "subscribed_message.handler.failure_reply_post.failed",
+          });
+        }
         if (lifecycleError) throw lifecycleError;
       } finally {
         if (completed) {

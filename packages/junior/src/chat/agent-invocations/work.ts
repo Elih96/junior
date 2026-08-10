@@ -82,6 +82,7 @@ export function buildAgentInvocationInboundMessage(
       },
     },
     receivedAtMs: nowMs,
+    publishExternally: false,
     source: "internal",
   };
 }
@@ -366,6 +367,7 @@ export function createAgentInvocationWorker(options: {
           credentialContext: invocation.credentialContext,
           destination: invocation.destination,
           destinationVisibility: invocation.destinationVisibility,
+          publishExternally: context.publishExternally,
           source: invocation.source,
           surface: "internal",
         },

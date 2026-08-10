@@ -80,6 +80,7 @@ interface TurnCheckpointWrite {
   destinationVisibility?: ConversationPrivacy;
   dispatchId?: string;
   dispatchOutcome?: AgentDispatchOutcome;
+  publishExternally?: boolean;
   source?: Source;
   surface?: AgentTurnSurface;
   turnStartMessageIndex?: number;
@@ -183,6 +184,7 @@ function sharedWrite(args: TurnCheckpointWrite, latest?: TurnRecord) {
       destination: args.destination,
       destinationVisibility: args.destinationVisibility,
       dispatchId: args.dispatchId ?? latest?.dispatchId,
+      publishExternally: args.publishExternally ?? latest?.publishExternally,
       source: args.source,
       surface: args.surface ?? latest?.surface,
       traceId: getActiveTraceId() ?? latest?.traceId,

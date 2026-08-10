@@ -98,6 +98,9 @@ export type AgentInput = z.output<typeof agentInputSchema>;
 /** Durable delivery modes for pending inbound mailbox work. */
 export const inboundMessageDeliverySchema = z.enum(["defer", "interrupt"]);
 
+/** Whether this turn also publishes assistant output to the conversation destination. */
+export const publishExternallySchema = z.boolean();
+
 export type InboundMessageDelivery = z.output<
   typeof inboundMessageDeliverySchema
 >;
@@ -114,6 +117,7 @@ export const inboundMessageSchema = z
     injectedAtMs: z.number().finite().optional(),
     input: agentInputSchema,
     receivedAtMs: z.number().finite(),
+    publishExternally: publishExternallySchema,
     source: inboundMessageSourceSchema,
   })
   .strict();

@@ -577,16 +577,18 @@ async function resumeSlackTurnInContext(
       }
       failureCode = "delivery_failed";
       const deliveryState = await getDeliveryConversation();
-      let slackMessageTs: string[];
+      let slackMessageTs: string[] = [];
       try {
-        slackMessageTs = await sendSlackReply({
-          channelId: runArgs.channelId,
-          conversationId: runArgs.conversationId,
-          replyAttribution:
-            runArgs.replyContext?.routing.dispatch?.replyAttribution,
-          text,
-          threadTs: runArgs.threadTs,
-        });
+        if (runArgs.replyContext?.routing.publishExternally !== false) {
+          slackMessageTs = await sendSlackReply({
+            channelId: runArgs.channelId,
+            conversationId: runArgs.conversationId,
+            replyAttribution:
+              runArgs.replyContext?.routing.dispatch?.replyAttribution,
+            text,
+            threadTs: runArgs.threadTs,
+          });
+        }
       } catch (error) {
         if (isRetryableSlackPostError(error)) {
           throw new RetryableDeliveryError(error);

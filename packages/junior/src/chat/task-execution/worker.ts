@@ -41,6 +41,7 @@ export interface ConversationWorkerContext {
   checkIn(): Promise<boolean>;
   conversationId: string;
   destination?: Destination;
+  publishExternally: boolean;
   shouldYield(): boolean;
 }
 
@@ -84,19 +85,21 @@ function now(options: ProcessConversationWorkOptions): number {
   return options.nowMs?.() ?? Date.now();
 }
 
-function selectContiguousActorBatch(
+function selectContiguousTurnBatch(
   messages: readonly InboundMessage[],
 ): InboundMessage[] {
   const first = messages[0];
   if (!first) {
     return [];
   }
-  const nextActorIndex = messages.findIndex(
-    (message) => message.input.authorId !== first.input.authorId,
+  const nextTurnIndex = messages.findIndex(
+    (message) =>
+      message.input.authorId !== first.input.authorId ||
+      message.publishExternally !== first.publishExternally,
   );
   return messages.slice(
     0,
-    nextActorIndex === -1 ? messages.length : nextActorIndex,
+    nextTurnIndex === -1 ? messages.length : nextTurnIndex,
   );
 }
 
@@ -107,11 +110,11 @@ function selectAttemptMessages(work: ConversationWorkState): InboundMessage[] {
     (message) => message.delivery === "interrupt",
   );
   if (interrupts.length > 0) {
-    return selectContiguousActorBatch(interrupts);
+    return selectContiguousTurnBatch(interrupts);
   }
   return work.execution.status === "paused"
     ? []
-    : selectContiguousActorBatch(messages);
+    : selectContiguousTurnBatch(messages);
 }
 
 function nudgeIdempotencyKey(
@@ -517,6 +520,9 @@ async function processConversationWorkInContext(
       attemptMessageIds = attemptMessages.map(
         (message) => message.inboundMessageId,
       );
+      // Empty batches are resume-only. Adapters read the checkpoint flag; do
+      // not invent publish from destination presence.
+      const publishExternally = attemptMessages[0]?.publishExternally ?? false;
       attemptSelectedMessageIds = new Set(attemptMessageIds);
       const ack = async (): Promise<void> => {
         const acknowledged = await ackMessages({
@@ -547,6 +553,7 @@ async function processConversationWorkInContext(
         },
         conversationId,
         destination,
+        publishExternally,
         shouldYield,
         checkIn,
       };

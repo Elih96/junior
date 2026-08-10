@@ -404,6 +404,11 @@ interface ReplyExecutorDeps {
 }
 
 /** Build the shared reply handler that prepares, advances, and commits a turn. */
+/** Slack reply executor publishes unless a caller opts out. */
+function shouldPublishExternally(publishExternally?: boolean): boolean {
+  return publishExternally !== false;
+}
+
 export function createReplyToThread(deps: ReplyExecutorDeps) {
   return async function replyToThread(
     thread: Thread,
@@ -421,6 +426,7 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
       onTurnStatePersisted?: () => Promise<void>;
       preparedState?: PreparedTurnState;
       queuedMessages?: QueuedTurnMessage[];
+      publishExternally?: boolean;
       execution?: DispatchTurnContext;
       skipBackfill?: boolean;
       drainSteeringMessages?: (
@@ -587,6 +593,9 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
           );
           try {
             await beforeFirstResponsePost();
+            if (!shouldPublishExternally(options.publishExternally)) {
+              return;
+            }
             if (channelId && threadTs) {
               await sendSlackReply({
                 channelId,
@@ -849,7 +858,9 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
             });
         if (configReply) {
           await beforeFirstResponsePost();
-          await thread.post(buildSlackOutputMessage(configReply.text));
+          if (shouldPublishExternally(options.publishExternally)) {
+            await thread.post(buildSlackOutputMessage(configReply.text));
+          }
           markConversationMessage(
             preparedState.conversation,
             preparedState.userMessageId,
@@ -1038,21 +1049,23 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
           // classified as retryable delivery errors.
           await beforeFirstResponsePost();
           try {
-            if (channelId && thread.adapter.name === "slack") {
-              slackMessageTs = await sendSlackReply({
-                channelId,
-                conversationId,
-                replyAttribution: options.execution?.dispatch?.replyAttribution,
-                text,
-                ...(threadTs ? { threadTs } : {}),
-              });
-            } else {
-              for (const part of splitSlackReplyText(text)) {
-                const postedMessageTs = (
-                  await thread.post(buildSlackOutputMessage(part))
-                ).id;
-                if (postedMessageTs) {
-                  slackMessageTs.push(postedMessageTs);
+            if (shouldPublishExternally(options.publishExternally)) {
+              if (channelId && thread.adapter.name === "slack") {
+                slackMessageTs = await sendSlackReply({
+                  channelId,
+                  conversationId,
+                  replyAttribution: options.execution?.dispatch?.replyAttribution,
+                  text,
+                  ...(threadTs ? { threadTs } : {}),
+                });
+              } else {
+                for (const part of splitSlackReplyText(text)) {
+                  const postedMessageTs = (
+                    await thread.post(buildSlackOutputMessage(part))
+                  ).id;
+                  if (postedMessageTs) {
+                    slackMessageTs.push(postedMessageTs);
+                  }
                 }
               }
             }
@@ -1337,6 +1350,7 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
               slackConversation,
               source,
               destination,
+              publishExternally: shouldPublishExternally(options.publishExternally),
               ...(destinationVisibility ? { destinationVisibility } : {}),
               surface: options.execution?.surface ?? "slack",
               dispatch: options.execution?.dispatch,

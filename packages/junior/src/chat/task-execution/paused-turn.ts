@@ -534,6 +534,9 @@ async function runPausedTurnInContext(
               credentialContext,
               actor,
               destination: routingDestination,
+              // Slack resume publishes unless the checkpoint opted out.
+              // Missing means legacy/in-flight Slack turns still post.
+              publishExternally: activeTurn.publishExternally !== false,
               source,
               toolChannelId: destination.channelId,
             },

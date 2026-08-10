@@ -114,6 +114,8 @@ export interface AgentRunRouting {
    */
   slackActionToken?: SlackActionToken;
   destination: Destination;
+  /** When true, also publish assistant output to the conversation destination. */
+  publishExternally?: boolean;
   /** Confirmed visibility of the destination where this run is delivered. */
   destinationVisibility?: ConversationPrivacy;
   surface?: AgentTurnSurface;
