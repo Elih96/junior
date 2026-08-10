@@ -20,10 +20,10 @@ export default defineApiRoute({
   responseSchema: locationDetailReportSchema,
   handler: async (c) => {
     const { locationId } = parseParams(locationParamsSchema, c.req.param());
-    const verifiedViewerEmail = c.get("verifiedViewerEmail");
+    const viewer = c.get("viewer");
     const report = await readLocationDetail(
       locationId,
-      verifiedViewerEmail ? { verifiedViewerEmail } : {},
+      viewer ? { verifiedViewerEmail: viewer.email } : {},
     );
     if (!report) throwApiError(404, "Location not found.");
     return report;

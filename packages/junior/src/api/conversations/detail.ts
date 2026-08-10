@@ -187,10 +187,10 @@ export default defineApiRoute({
       c.req.param(),
     );
     const query = parseQuery(conversationDetailQuerySchema, c.req.query());
-    const verifiedViewerEmail = c.get("verifiedViewerEmail");
+    const viewer = c.get("viewer");
     const report = await readConversationDetail(conversationId, {
       ...query,
-      ...(verifiedViewerEmail ? { verifiedViewerEmail } : {}),
+      ...(viewer ? { verifiedViewerEmail: viewer.email } : {}),
     });
     if (!report) throwApiError(404, "Conversation not found.");
     return report;

@@ -80,10 +80,10 @@ export default defineApiRoute({
       conversationEventsQuerySchema,
       c.req.query(),
     );
-    const verifiedViewerEmail = c.get("verifiedViewerEmail");
+    const viewer = c.get("viewer");
     const report = await readConversationEvents(conversationId, before, {
       limit,
-      ...(verifiedViewerEmail ? { verifiedViewerEmail } : {}),
+      ...(viewer ? { verifiedViewerEmail: viewer.email } : {}),
     });
     if (!report) throwApiError(404, "Conversation not found.");
     return report;

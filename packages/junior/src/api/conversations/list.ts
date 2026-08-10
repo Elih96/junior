@@ -264,10 +264,10 @@ export default defineApiRoute({
       conversationFeedQuerySchema,
       c.req.query(),
     );
-    const verifiedViewerEmail = c.get("verifiedViewerEmail");
+    const viewer = c.get("viewer");
     return readConversationFeed({
       ...(actorEmail ? { actorEmail } : {}),
-      ...(verifiedViewerEmail ? { verifiedViewerEmail } : {}),
+      ...(viewer ? { verifiedViewerEmail: viewer.email } : {}),
     });
   },
 });
