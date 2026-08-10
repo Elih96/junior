@@ -2,9 +2,12 @@ import { eq } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 import { createSlackSource } from "@sentry/junior-plugin-api";
 import { getSqlExecutor } from "@/chat/db";
-import { upsertIdentity } from "@/chat/identities/sql";
+import {
+  upsertIdentity,
+  upsertLinkedIdentity,
+} from "@/chat/identities/sql";
 import { parseSlackTeamId } from "@/chat/slack/ids";
-import { createSlackUserLookupTool } from "@/chat/slack/tools/user-lookup";
+import { createUserLookupTool } from "@/chat/tools/user-lookup";
 import { juniorIdentities } from "@/db/schema";
 import { usersInfoOk, usersListPage } from "../fixtures/slack/factories/api";
 import {
@@ -24,12 +27,12 @@ async function executeTool<TInput>(tool: any, input: TInput) {
 function lookupTool() {
   const teamId = parseSlackTeamId("T0TEST");
   if (!teamId) throw new Error("invalid test team id");
-  return createSlackUserLookupTool(teamId);
+  return createUserLookupTool(teamId, ["slack", "github"]);
 }
 
-describe("slackUserLookup", () => {
-  describe("user_id mode", () => {
-    it("returns a rich profile for a known user", async () => {
+describe("userLookup", () => {
+  describe("provider slack", () => {
+    it("returns a rich profile for a known user id", async () => {
       queueSlackApiResponse("users.info", {
         body: usersInfoOk({
           userId: "U039RR91S",
@@ -48,14 +51,15 @@ describe("slackUserLookup", () => {
         }),
       });
 
-      const tool = lookupTool();
-      const result = await executeTool(tool, {
-        mode: "user_id",
-        value: "U039RR91S",
+      const result = await executeTool(lookupTool(), {
+        provider: "slack",
+        query: "U039RR91S",
       });
 
       expect(result).toMatchObject({
-        mode: "user_id",
+        provider: "slack",
+        query: "U039RR91S",
+        count: 1,
         mention: "<@U039RR91S>",
         user: {
           id: "U039RR91S",
@@ -66,6 +70,7 @@ describe("slackUserLookup", () => {
           email: "david@sentry.io",
           is_bot: false,
           is_deleted: false,
+          mention: "<@U039RR91S>",
         },
       });
 
@@ -83,7 +88,7 @@ describe("slackUserLookup", () => {
           .select({ id: juniorIdentities.providerSubjectId })
           .from(juniorIdentities)
           .where(eq(juniorIdentities.providerSubjectId, "U039RR91S")),
-      ).resolves.toEqual([{ id: "U039RR91S" }]);
+      ).resolves.toEqual([]);
     });
 
     it("returns user without custom fields when none are set", async () => {
@@ -95,14 +100,13 @@ describe("slackUserLookup", () => {
         }),
       });
 
-      const tool = lookupTool();
-      const result = await executeTool(tool, {
-        mode: "user_id",
-        value: "U0BASIC",
+      const result = await executeTool(lookupTool(), {
+        provider: "slack",
+        query: "U0BASIC",
       });
 
       expect(result).toMatchObject({
-        mode: "user_id",
+        provider: "slack",
         user: {
           id: "U0BASIC",
           name: "basic",
@@ -118,11 +122,10 @@ describe("slackUserLookup", () => {
     it("handles user not found", async () => {
       queueSlackApiError("users.info", { error: "user_not_found" });
 
-      const tool = lookupTool();
       await expect(
-        executeTool(tool, {
-          mode: "user_id",
-          value: "U0NONEXISTENT",
+        executeTool(lookupTool(), {
+          provider: "slack",
+          query: "U0NONEXISTENT",
         }),
       ).rejects.toMatchObject({
         name: "ToolInputError",
@@ -133,9 +136,7 @@ describe("slackUserLookup", () => {
         },
       });
     });
-  });
 
-  describe("email mode", () => {
     it("finds a user by email", async () => {
       queueSlackApiResponse("users.lookupByEmail", {
         body: usersInfoOk({
@@ -146,14 +147,13 @@ describe("slackUserLookup", () => {
         }),
       });
 
-      const tool = lookupTool();
-      const result = await executeTool(tool, {
-        mode: "email",
-        value: "emailuser@sentry.io",
+      const result = await executeTool(lookupTool(), {
+        provider: "slack",
+        query: "emailuser@sentry.io",
       });
 
       expect(result).toMatchObject({
-        mode: "email",
+        provider: "slack",
         mention: "<@U0EMAIL>",
         user: {
           id: "U0EMAIL",
@@ -178,8 +178,8 @@ describe("slackUserLookup", () => {
       });
 
       const result = await executeTool(lookupTool(), {
-        mode: "email",
-        value: "stored@sentry.io",
+        provider: "slack",
+        query: "stored@sentry.io",
       });
 
       expect(result).toMatchObject({
@@ -213,8 +213,8 @@ describe("slackUserLookup", () => {
 
       await expect(
         executeTool(lookupTool(), {
-          mode: "email",
-          value: "shared@sentry.io",
+          provider: "slack",
+          query: "shared@sentry.io",
         }),
       ).rejects.toThrow(
         "Multiple Slack users share verified email shared@sentry.io in workspace T0TEST",
@@ -227,17 +227,14 @@ describe("slackUserLookup", () => {
         error: "users_not_found",
       });
 
-      const tool = lookupTool();
       await expect(
-        executeTool(tool, {
-          mode: "email",
-          value: "nobody@example.com",
+        executeTool(lookupTool(), {
+          provider: "slack",
+          query: "nobody@example.com",
         }),
       ).rejects.toThrow("No Slack user found");
     });
-  });
 
-  describe("query mode", () => {
     it("searches and ranks users by name", async () => {
       queueSlackApiResponse("users.list", {
         body: usersListPage({
@@ -255,20 +252,17 @@ describe("slackUserLookup", () => {
         }),
       });
 
-      const tool = lookupTool();
-      const result = await executeTool(tool, {
-        mode: "query",
-        value: "markus",
-      });
-
-      expect(result).toMatchObject({
-        mode: "query",
+      const result = await executeTool(lookupTool(), {
+        provider: "slack",
         query: "markus",
       });
 
-      // Should find Markus matches, ranked by relevance
+      expect(result).toMatchObject({
+        provider: "slack",
+        query: "markus",
+      });
+
       expect(result.users.length).toBeGreaterThanOrEqual(1);
-      // Display name exact match should come first
       expect(result.users[0]).toMatchObject({
         id: "U3",
         mention: "<@U3>",
@@ -285,14 +279,13 @@ describe("slackUserLookup", () => {
         }),
       });
 
-      const tool = lookupTool();
-      const result = await executeTool(tool, {
-        mode: "query",
-        value: "zzzzzz",
+      const result = await executeTool(lookupTool(), {
+        provider: "slack",
+        query: "zzzzzz",
       });
 
       expect(result).toMatchObject({
-        mode: "query",
+        provider: "slack",
         count: 0,
         users: [],
       });
@@ -308,14 +301,16 @@ describe("slackUserLookup", () => {
         }),
       });
 
-      const tool = lookupTool();
-      const result = await executeTool(tool, {
-        mode: "query",
-        value: "junior",
+      const result = await executeTool(lookupTool(), {
+        provider: "slack",
+        query: "junior",
       });
 
-      expect(result.users).toHaveLength(1);
-      expect(result.users[0].id).toBe("U2");
+      expect(result).toMatchObject({
+        count: 1,
+        mention: "<@U2>",
+        user: { id: "U2" },
+      });
     });
 
     it("reports truncated when the default page cap is reached", async () => {
@@ -338,10 +333,9 @@ describe("slackUserLookup", () => {
         }),
       });
 
-      const tool = lookupTool();
-      const result = await executeTool(tool, {
-        mode: "query",
-        value: "alice",
+      const result = await executeTool(lookupTool(), {
+        provider: "slack",
+        query: "alice",
       });
 
       expect(result).toMatchObject({
@@ -364,10 +358,9 @@ describe("slackUserLookup", () => {
         }),
       });
 
-      const tool = lookupTool();
-      const result = await executeTool(tool, {
-        mode: "query",
-        value: "alice",
+      const result = await executeTool(lookupTool(), {
+        provider: "slack",
+        query: "alice",
       });
 
       expect(result).toMatchObject({
@@ -384,13 +377,12 @@ describe("slackUserLookup", () => {
         provided: "chat:write",
       });
 
-      const tool = lookupTool();
       await expect(
-        executeTool(tool, { mode: "query", value: "alice" }),
+        executeTool(lookupTool(), { provider: "slack", query: "alice" }),
       ).rejects.toMatchObject({
         name: "ToolInputError",
         message:
-          "Slack user lookup is unavailable because this installation is missing the `users:read` scope.",
+          "User lookup is unavailable because this installation is missing the `users:read` scope.",
         cause: {
           name: "SlackActionError",
           code: "missing_scope",
@@ -403,9 +395,8 @@ describe("slackUserLookup", () => {
     it("leaves internal Slack failures unexpected", async () => {
       queueSlackApiError("users.list", { error: "fatal_error" });
 
-      const tool = lookupTool();
       await expect(
-        executeTool(tool, { mode: "query", value: "alice" }),
+        executeTool(lookupTool(), { provider: "slack", query: "alice" }),
       ).rejects.toMatchObject({
         name: "SlackActionError",
         code: "internal_error",
@@ -428,40 +419,225 @@ describe("slackUserLookup", () => {
         }),
       });
 
-      const tool = lookupTool();
-      const result = await executeTool(tool, {
-        mode: "query",
-        value: "user",
+      const result = await executeTool(lookupTool(), {
+        provider: "slack",
+        query: "user",
       });
 
-      expect(result.users).toHaveLength(1);
-      expect(result.users[0].id).toBe("U2");
+      expect(result).toMatchObject({
+        count: 1,
+        mention: "<@U2>",
+        user: { id: "U2" },
+      });
+    });
+  });
+
+  describe("provider github", () => {
+    async function seedLinkedIdentities(input: {
+      githubId: string;
+      githubHandle: string;
+      slackUserId: string;
+      slackHandle: string;
+    }) {
+      const slackIdentity = await upsertIdentity(getSqlExecutor(), {
+        kind: "user",
+        provider: "slack",
+        providerTenantId: "T0TEST",
+        providerSubjectId: input.slackUserId,
+        email: `${input.slackHandle}@sentry.io`,
+        emailVerified: true,
+        displayName: input.slackHandle,
+        handle: input.slackHandle,
+      });
+      if (!slackIdentity.userId) throw new Error("missing linked user");
+      await upsertLinkedIdentity(getSqlExecutor(), slackIdentity.userId, {
+        kind: "user",
+        provider: "github",
+        providerSubjectId: input.githubId,
+        handle: input.githubHandle,
+      });
+    }
+
+    it("returns the linked Slack mention for a provider handle", async () => {
+      await seedLinkedIdentities({
+        githubId: "12345",
+        githubHandle: "dcramer",
+        slackUserId: "U039RR91S",
+        slackHandle: "dcramer",
+      });
+
+      const result = await executeTool(lookupTool(), {
+        provider: "github",
+        query: "dcramer",
+      });
+
+      expect(result).toMatchObject({
+        provider: "github",
+        query: "dcramer",
+        count: 1,
+        mention: "<@U039RR91S>",
+        user: { id: "U039RR91S", name: "dcramer" },
+      });
+      expect(result.user).not.toHaveProperty("email");
+      expect(getCapturedSlackApiCalls("users.list")).toHaveLength(0);
+    });
+
+    it("uses the latest trusted provider handle", async () => {
+      const slackIdentity = await upsertIdentity(getSqlExecutor(), {
+        kind: "user",
+        provider: "slack",
+        providerTenantId: "T0TEST",
+        providerSubjectId: "U039RR91S",
+        email: "dcramer@sentry.io",
+        emailVerified: true,
+        handle: "dcramer",
+      });
+      if (!slackIdentity.userId) throw new Error("missing linked user");
+      await upsertLinkedIdentity(getSqlExecutor(), slackIdentity.userId, {
+        kind: "user",
+        provider: "github",
+        providerSubjectId: "12345",
+        handle: "old-login",
+      });
+      await upsertLinkedIdentity(getSqlExecutor(), slackIdentity.userId, {
+        kind: "user",
+        provider: "github",
+        providerSubjectId: "12345",
+        handle: "new-login",
+      });
+
+      await expect(
+        executeTool(lookupTool(), { provider: "github", query: "old-login" }),
+      ).resolves.toMatchObject({ count: 0, users: [] });
+      await expect(
+        executeTool(lookupTool(), { provider: "github", query: "new-login" }),
+      ).resolves.toMatchObject({
+        count: 1,
+        mention: "<@U039RR91S>",
+      });
+    });
+
+    it("accepts the provider subject id", async () => {
+      await seedLinkedIdentities({
+        githubId: "12345",
+        githubHandle: "dcramer",
+        slackUserId: "U039RR91S",
+        slackHandle: "dcramer",
+      });
+
+      const result = await executeTool(lookupTool(), {
+        provider: "github",
+        query: "12345",
+      });
+
+      expect(result).toMatchObject({
+        mention: "<@U039RR91S>",
+        user: { id: "U039RR91S" },
+      });
+    });
+
+    it("returns candidates when several provider identities share a handle", async () => {
+      await seedLinkedIdentities({
+        githubId: "1",
+        githubHandle: "shared-login",
+        slackUserId: "U1",
+        slackHandle: "alice",
+      });
+      await seedLinkedIdentities({
+        githubId: "2",
+        githubHandle: "shared-login",
+        slackUserId: "U2",
+        slackHandle: "bob",
+      });
+
+      const result = await executeTool(lookupTool(), {
+        provider: "github",
+        query: "shared-login",
+      });
+
+      expect(result).toMatchObject({
+        provider: "github",
+        query: "shared-login",
+        count: 2,
+      });
+      expect(result.mention).toBeUndefined();
+      expect(result.users).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ id: "U1", mention: "<@U1>" }),
+          expect.objectContaining({ id: "U2", mention: "<@U2>" }),
+        ]),
+      );
+    });
+
+    it("returns empty candidates when no stored provider identity matches", async () => {
+      const result = await executeTool(lookupTool(), {
+        provider: "github",
+        query: "nobody",
+      });
+
+      expect(result).toMatchObject({
+        provider: "github",
+        query: "nobody",
+        count: 0,
+        users: [],
+      });
+    });
+
+    it("treats SQL pattern characters as literal provider handles", async () => {
+      await seedLinkedIdentities({
+        githubId: "12345",
+        githubHandle: "dcramer",
+        slackUserId: "U039RR91S",
+        slackHandle: "dcramer",
+      });
+
+      for (const query of ["%", "_"]) {
+        await expect(
+          executeTool(lookupTool(), { provider: "github", query }),
+        ).resolves.toMatchObject({ count: 0, users: [] });
+      }
+    });
+
+    it("does not return provider identities without a linked Slack identity", async () => {
+      await upsertIdentity(getSqlExecutor(), {
+        kind: "user",
+        provider: "github",
+        providerSubjectId: "orphan",
+        handle: "orphan",
+      });
+
+      const result = await executeTool(lookupTool(), {
+        provider: "github",
+        query: "orphan",
+      });
+
+      expect(result).toMatchObject({ count: 0, users: [] });
     });
   });
 
   describe("input validation", () => {
-    it("requires mode and value in the model-facing schema", async () => {
+    it("requires provider and query in the model-facing schema", async () => {
       const tool = lookupTool();
 
+      expect(tool.annotations).toMatchObject({ readOnlyHint: true });
       expect(tool.inputSchema).toMatchObject({
         type: "object",
         additionalProperties: false,
-        required: ["mode", "value"],
+        required: ["provider", "query"],
         properties: {
-          mode: { enum: ["user_id", "email", "query"] },
-          value: { type: "string" },
+          provider: { enum: ["slack", "github"] },
+          query: { type: "string" },
         },
       });
       expect(
         Object.keys(tool.inputSchema.properties as Record<string, unknown>),
-      ).toEqual(["mode", "value"]);
+      ).toEqual(["provider", "query"]);
     });
 
-    it("rejects the previous identifier fields", async () => {
-      const tool = lookupTool();
-      await expect(executeTool(tool, { user_id: "U123" })).rejects.toThrow(
-        "Invalid tool arguments",
-      );
+    it("rejects the previous mode/value fields", async () => {
+      await expect(
+        executeTool(lookupTool(), { mode: "user_id", value: "U123" }),
+      ).rejects.toThrow("Invalid tool arguments");
     });
   });
 
@@ -492,40 +668,8 @@ describe("slackUserLookup", () => {
         },
       );
 
-      expect(tools).toHaveProperty("slackUserLookup");
-      expect(tools.slackUserLookup.description).toContain("Slack user");
-    });
-  });
-
-  describe("custom profile fields", () => {
-    it("returns custom profile fields as-is", async () => {
-      queueSlackApiResponse("users.info", {
-        body: usersInfoOk({
-          userId: "U0GH",
-          userName: "untitaker",
-          realName: "Markus Unterwaditzer",
-          fields: {
-            Xf042GITHUB: {
-              value: "https://github.com/untitaker",
-              alt: "untitaker",
-              label: "GitHub",
-            },
-          },
-        }),
-      });
-
-      const tool = lookupTool();
-      const result = await executeTool(tool, {
-        mode: "user_id",
-        value: "U0GH",
-      });
-
-      expect(result.user.profile_fields).toHaveLength(1);
-      expect(result.user.profile_fields[0]).toMatchObject({
-        id: "Xf042GITHUB",
-        label: "GitHub",
-        value: "https://github.com/untitaker",
-      });
+      expect(tools).toHaveProperty("userLookup");
+      expect(tools.userLookup.description).toContain("provider");
     });
   });
 });

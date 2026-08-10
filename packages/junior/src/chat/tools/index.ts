@@ -34,7 +34,7 @@ import { createSlackListCreateTool } from "@/chat/slack/tools/list/create";
 import { createSlackListGetItemsTool } from "@/chat/slack/tools/list/get-items";
 import { createSlackListUpdateItemTool } from "@/chat/slack/tools/list/update-item";
 import { createSlackThreadReadTool } from "@/chat/slack/tools/thread-read";
-import { createSlackUserLookupTool } from "@/chat/slack/tools/user-lookup";
+import { createUserLookupTool } from "@/chat/tools/user-lookup";
 import { createSystemTimeTool } from "@/chat/tools/system-time";
 import { createSearchConversationEventsTool } from "@/chat/tools/search-conversation-events";
 import { createHandoffTool } from "@/chat/tools/handoff/tool";
@@ -46,6 +46,7 @@ import type {
 } from "@/chat/tools/types";
 import type { PluginSandbox } from "@sentry/junior-plugin-api";
 import { getPluginTools } from "@/chat/plugins/agent-hooks";
+import { getOAuthAccountProviders } from "@/chat/plugins/credential-hooks";
 import { createWebFetchTool } from "@/chat/tools/web/fetch-tool";
 import { createWebSearchTool } from "@/chat/tools/web/search";
 import { createWriteFileTool } from "@/chat/tools/sandbox/write-file";
@@ -195,7 +196,14 @@ export function createTools(
         context.slackActionToken,
       );
     }
-    tools.slackUserLookup = createSlackUserLookupTool(slackContext.teamId);
+    const identityProviders = [
+      "slack",
+      ...getOAuthAccountProviders().filter((provider) => provider !== "slack"),
+    ] as [string, ...string[]];
+    tools.userLookup = createUserLookupTool(
+      slackContext.teamId,
+      identityProviders,
+    );
     tools.slackListCreate = createSlackListCreateTool(state);
     tools.slackListAddItems = createSlackListAddItemsTool(state);
     tools.slackListGetItems = createSlackListGetItemsTool(state);

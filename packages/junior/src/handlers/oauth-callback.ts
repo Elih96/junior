@@ -16,7 +16,13 @@ import {
   resumeSlackTurn,
 } from "@/chat/runtime/slack-resume";
 import { persistAuthPauseTurnState } from "@/chat/runtime/auth-pause-state";
-import { logException, logInfo, logWarn, withLogContext } from "@/chat/logging";
+import {
+  logException,
+  logInfo,
+  logWarn,
+  runBestEffort,
+  withLogContext,
+} from "@/chat/logging";
 import { htmlCallbackResponse } from "@/handlers/oauth-html";
 import {
   getLocationConfigurationService,
@@ -68,6 +74,13 @@ import type { AgentRunResult } from "@/chat/services/turn-result";
 import type { AgentRunner } from "@/chat/runtime/agent-runner";
 import { requireSlackDestination } from "@/chat/destination";
 import { relayLocalOAuthCallback } from "@/chat/local/oauth-relay";
+import { getSqlExecutor } from "@/chat/db";
+import {
+  upsertIdentity,
+  upsertLinkedIdentity,
+} from "@/chat/identities/sql";
+import { lookupSlackUserProfile } from "@/chat/slack/users";
+import { parseSlackUserId } from "@/chat/slack/ids";
 
 interface OAuthCallbackOptions {
   agentRunner: AgentRunner;
@@ -684,30 +697,66 @@ export async function GET(
     ...parsedTokenResponse,
     ...(account ? { account } : {}),
   });
+  const slackActor = stored.actor?.platform === "slack" ? stored.actor : undefined;
+  if (account && slackActor) {
+    await runBestEffort(
+      async () => {
+        const slackUserId = parseSlackUserId(slackActor.userId);
+        if (!slackUserId) {
+          throw new Error("OAuth Slack actor user id is invalid");
+        }
+        const profile = await lookupSlackUserProfile(slackUserId);
+        const slackIdentity = await upsertIdentity(getSqlExecutor(), {
+          kind: "user",
+          provider: "slack",
+          providerTenantId: slackActor.teamId,
+          providerSubjectId: profile.id,
+          displayName: profile.real_name || profile.display_name,
+          handle: profile.name,
+          ...(profile.email
+            ? { email: profile.email, emailVerified: true }
+            : {}),
+        });
+        if (!slackIdentity.userId) {
+          throw new Error("OAuth Slack identity is not linked to a user");
+        }
+        await upsertLinkedIdentity(getSqlExecutor(), slackIdentity.userId, {
+          kind: "user",
+          provider,
+          providerSubjectId: account.id,
+          displayName: account.displayName,
+          handle: account.handle ?? account.label,
+        });
+      },
+      "oauth.callback.identity_link.failed",
+      { "app.credential.provider": provider },
+    );
+  }
 
-  if (stored.resumeConversationId) {
-    try {
-      await recordAuthenticationLinked({
-        conversationId: stored.resumeConversationId,
-        provider,
-        actorId: stored.userId,
-        providerLabel,
-        ...(account?.label ? { accountLabel: account.label } : {}),
-        ...(stored.resumeSessionId
-          ? {
-              authorizationId: pluginAuthorizationId({
-                provider,
-                sessionId: stored.resumeSessionId,
-              }),
-              turnId: stored.resumeSessionId,
-            }
-          : {}),
-      });
-    } catch (error) {
-      logException(error, "oauth.callback.authentication_event.failed", {
-        "app.credential.provider": provider,
-      });
-    }
+  const resumeConversationId = stored.resumeConversationId;
+  if (resumeConversationId) {
+    await runBestEffort(
+      async () => {
+        await recordAuthenticationLinked({
+          conversationId: resumeConversationId,
+          provider,
+          actorId: stored.userId,
+          providerLabel,
+          ...(account?.label ? { accountLabel: account.label } : {}),
+          ...(stored.resumeSessionId
+            ? {
+                authorizationId: pluginAuthorizationId({
+                  provider,
+                  sessionId: stored.resumeSessionId,
+                }),
+                turnId: stored.resumeSessionId,
+              }
+            : {}),
+        });
+      },
+      "oauth.callback.authentication_event.failed",
+      { "app.credential.provider": provider },
+    );
   }
 
   if (stored.destination?.platform !== "local") {
