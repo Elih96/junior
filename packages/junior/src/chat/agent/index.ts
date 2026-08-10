@@ -85,7 +85,7 @@ import {
 import { nextProviderRetry } from "@/chat/services/provider-retry";
 import { nextEmptyOutputContinuation } from "@/chat/services/empty-output-continuation";
 import { getDiscardedRetryUsage } from "@/chat/agent/retry-usage";
-import { annotateTurnDeadlineToolResult } from "@/chat/tool-support/turn-deadline-result";
+import { projectTimedOutToolResult } from "@/chat/tool-support/timed-out-tool-result";
 import {
   configuredTurnRoute,
   selectTurnRoute,
@@ -1097,16 +1097,20 @@ async function executeAgentRunInPrivacyContext(
         return undefined;
       },
       afterToolCall: async ({ result, toolCall }, signal) => {
-        const deadlineResult =
+        // Host continuity is session-owned (`resumeReason: "timeout"` + auto
+        // continue). Only rewrite tool attempts that themselves aborted; a
+        // finished sibling must keep its real result. Project those preempted
+        // attempts onto the normal `timed_out` field — not cancelled jargon.
+        const timedOutResult =
           runResume.timedOut && signal?.aborted
-            ? annotateTurnDeadlineToolResult(result)
+            ? projectTimedOutToolResult(result)
             : undefined;
-        const sourceResult = deadlineResult ?? result;
+        const sourceResult = timedOutResult ?? result;
         const projectedResult = wiring.projectActionReviewResult(
           toolCall.id,
           sourceResult,
         );
-        return deadlineResult || projectedResult !== result
+        return timedOutResult || projectedResult !== result
           ? projectedResult
           : undefined;
       },

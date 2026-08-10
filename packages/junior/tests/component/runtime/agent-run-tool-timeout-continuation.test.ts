@@ -47,9 +47,7 @@ vi.mock("@/chat/pi/traced-stream", () => ({
 
       const timeoutContinuation =
         !options?.signal?.aborted &&
-        JSON.stringify(context.messages ?? []).includes(
-          '"cause":"turn_deadline"',
-        );
+        JSON.stringify(context.messages ?? []).includes('"timed_out":true');
       const message =
         call === 1
           ? {
@@ -280,13 +278,17 @@ describe("tool timeout continuation composition", () => {
     });
     expect(suspendedRecord?.piMessages.at(-1)).toMatchObject({
       role: "toolResult",
-      isError: true,
+      isError: false,
+      details: {
+        target: "run-the-targeted-cloudflare-test",
+        timed_out: true,
+      },
     });
-    expect(JSON.stringify(suspendedRecord?.piMessages.at(-1))).toContain(
-      '"cause":"turn_deadline"',
+    const suspendedToolResult = JSON.stringify(
+      suspendedRecord?.piMessages.at(-1),
     );
-    expect(JSON.stringify(suspendedRecord?.piMessages.at(-1))).toContain(
-      '"cause":"turn_deadline"',
+    expect(suspendedToolResult).not.toMatch(
+      /cancelled|turn_deadline|execution_slice|unconfirmed|deadline/i,
     );
 
     const resumed = await executeAgentRun(request);

@@ -93,7 +93,7 @@ import { upsertTurnRecord } from "@/chat/task-execution/turn-cursor";
 import { turnCursorKey } from "@/chat/task-execution/turn-cursor-keys";
 import { resetSkillDiscoveryCache } from "@/chat/skills";
 import { juniorToolOutputSchema } from "@/chat/tool-support/structured-result";
-import { annotateTurnDeadlineToolResult } from "@/chat/tool-support/turn-deadline-result";
+import { projectTimedOutToolResult } from "@/chat/tool-support/timed-out-tool-result";
 import { DEFAULT_MAX_CHARS, MAX_FETCH_CHARS } from "@/chat/tools/web/constants";
 import { truncateWebFetchContent } from "@/chat/tools/web/fetch-content";
 import { createWebFetchTool } from "@/chat/tools/web/fetch-tool";
@@ -1822,19 +1822,17 @@ function buildRuntimeServices(
             await runRequest.durability?.onInputCommitted?.();
             const nowMs = Date.now();
             const toolCallId = "eval-timeout-resume-tool-call";
-            const unknownOutcome = {
+            const abortedAttempt = {
               target: timeoutResume.tool_name,
               aborted: true,
-              message: "Command outcome was not confirmed.",
             };
-            const deadlineResult = annotateTurnDeadlineToolResult({
-              content: [{ type: "text", text: JSON.stringify(unknownOutcome) }],
-              details: unknownOutcome,
+            const timedOutResult = projectTimedOutToolResult({
+              content: [{ type: "text", text: JSON.stringify(abortedAttempt) }],
+              details: abortedAttempt,
             });
             if (
-              !deadlineResult?.content ||
-              deadlineResult.details === undefined ||
-              deadlineResult.isError !== true
+              !timedOutResult?.content ||
+              timedOutResult.details === undefined
             ) {
               throw new Error("Failed to build timeout continuation fixture");
             }
@@ -1865,9 +1863,9 @@ function buildRuntimeServices(
                 role: "toolResult",
                 toolCallId,
                 toolName: timeoutResume.tool_name,
-                content: deadlineResult.content,
-                details: deadlineResult.details,
-                isError: deadlineResult.isError,
+                content: timedOutResult.content,
+                details: timedOutResult.details,
+                isError: timedOutResult.isError,
                 timestamp: nowMs,
               },
             ] as PiMessage[];
