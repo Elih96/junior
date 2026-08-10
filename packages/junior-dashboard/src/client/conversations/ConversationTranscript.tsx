@@ -223,7 +223,12 @@ function TranscriptMessageHeader(props: {
   message: TranscriptViewMessage;
   conversation: ConversationTranscript;
 }) {
-  const metaParts = props.meta?.filter(isString) ?? [];
+  const source =
+    props.message.source ??
+    (props.conversation.surface === "slack" ? "slack" : undefined);
+  const sourceLabel =
+    source === "slack" ? "Slack" : source === "web" ? "Dashboard" : undefined;
+  const metaParts = [sourceLabel, ...(props.meta ?? [])].filter(isString);
   const metaText = metaParts.join(" · ");
 
   return (
