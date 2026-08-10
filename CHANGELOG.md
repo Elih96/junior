@@ -1,4 +1,61 @@
 # Changelog
+## 0.148.0
+
+### New Features ✨
+
+#### Conversations
+
+- Continue Slack roots from the dashboard by @sentry-junior in [#1384](https://github.com/getsentry/junior/pull/1384)
+- Run private API turns on the shared worker by @sentry-junior in [#1371](https://github.com/getsentry/junior/pull/1371)
+
+#### Dashboard
+
+- Improve tasks overview by @sentry-junior in [#1380](https://github.com/getsentry/junior/pull/1380)
+- Show conversation privacy notice by @sentry-junior in [#1372](https://github.com/getsentry/junior/pull/1372)
+
+#### Other
+
+- (slack) Expand public context reads for teammate UX by @sentry-junior in [#1388](https://github.com/getsentry/junior/pull/1388)
+
+### Bug Fixes 🐛
+
+#### Chat
+
+- Finish turn after Slack accepts the reply by @sentry-junior in [#1397](https://github.com/getsentry/junior/pull/1397)
+- Yield paused work after request deadline by @sentry-junior in [#1381](https://github.com/getsentry/junior/pull/1381)
+
+#### Dashboard
+
+- Unify chart legend styling by @dcramer in [#1390](https://github.com/getsentry/junior/pull/1390)
+- Restore the local viewer by @sentry-junior in [#1383](https://github.com/getsentry/junior/pull/1383)
+
+#### Slack
+
+- Safer name search and creator attribution by @sentry-junior in [#1396](https://github.com/getsentry/junior/pull/1396)
+- Resolve passive transcript actors by @dcramer in [#1379](https://github.com/getsentry/junior/pull/1379)
+
+#### Other
+
+- (agent-browser) Preinstall Playwright Chromium and stop false browser outages by @sentry-junior in [#1387](https://github.com/getsentry/junior/pull/1387)
+
+### Internal Changes 🔧
+
+#### Api
+
+- Default personalized API responses to no-store by @sentry-junior in [#1395](https://github.com/getsentry/junior/pull/1395)
+- Convert top-level routes to native Hono by @sentry-junior in [#1392](https://github.com/getsentry/junior/pull/1392)
+- Convert conversation routes to native Hono by @sentry-junior in [#1391](https://github.com/getsentry/junior/pull/1391)
+- Convert people routes to native Hono by @sentry-junior in [#1389](https://github.com/getsentry/junior/pull/1389)
+- Convert locations to native Hono routes by @sentry-junior in [#1386](https://github.com/getsentry/junior/pull/1386)
+- Convert personal tokens to native Hono routes by @sentry-junior in [#1382](https://github.com/getsentry/junior/pull/1382)
+- Use Hono validation for native routes by @sentry-junior in [#1378](https://github.com/getsentry/junior/pull/1378)
+- Pass viewer through reporting access by @sentry-junior in [#1376](https://github.com/getsentry/junior/pull/1376)
+- Put canonical User on request context by @sentry-junior in [#1374](https://github.com/getsentry/junior/pull/1374)
+
+#### Other
+
+- (conversations) Use publishExternally for external replies by @dcramer in [#1238](https://github.com/getsentry/junior/pull/1238)
+
 ## 0.147.0
 
 ### New Features ✨
