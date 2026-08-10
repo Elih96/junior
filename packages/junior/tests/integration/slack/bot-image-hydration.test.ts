@@ -187,6 +187,87 @@ describe("bot image hydration", () => {
     expect(listThreadRepliesMock).toHaveBeenCalledTimes(1);
   }, 20_000);
 
+  it("rebuilds summaries after the separate cache expires", async () => {
+    listThreadRepliesMock.mockResolvedValue([
+      {
+        ts: "1700000008.100",
+        files: [
+          {
+            id: "F_EXPIRED",
+            mimetype: "image/png",
+            url_private_download: "https://files.slack.com/private/expired.png",
+          },
+        ],
+      },
+    ]);
+    const downloadFileMock = vi.fn(async () => Buffer.from("downloaded-image"));
+    const completeTextMock = vi.fn(async () => ({
+      text: "Rebuilt screenshot summary",
+      message: {} as never,
+    }));
+    const { slackRuntime } = await createRuntime(
+      {
+        services: {
+          visionContext: {
+            listThreadReplies: listThreadRepliesMock,
+            downloadFile: downloadFileMock,
+            completeText: completeTextMock,
+          },
+          replyExecutor: {
+            agentRunner: { run: async () => makeSuccessOutcome() },
+          },
+        },
+      },
+      { AI_VISION_MODEL: "openai/gpt-5.4" },
+    );
+    const threadId = "slack:C0IMAGE:1700000008.000";
+    const seededConversation = coerceThreadConversationState({});
+    seededConversation.messages.push({
+      id: "1700000008.100",
+      role: "user",
+      text: "expired screenshot",
+      createdAtMs: 1700000008100,
+      meta: {
+        slackTs: "1700000008.100",
+        imageFileIds: ["F_EXPIRED"],
+        imagesHydrated: true,
+      },
+      author: { userId: "U-user", userName: "user" },
+    });
+    await persistConversationMessages({
+      conversation: seededConversation,
+      conversationId: threadId,
+    });
+    const thread = await createTestThread({ id: threadId });
+
+    await slackRuntime.handleNewMention(
+      thread,
+      createTestMessage({
+        id: "1700000008.200",
+        text: "what did that screenshot show?",
+        threadId,
+        isMention: true,
+        author: {
+          userId: "U-user",
+          userName: "user",
+          fullName: "User Example",
+          isBot: false,
+          isMe: false,
+        },
+      }),
+      { destination: createTestDestination(thread) },
+    );
+
+    expect(downloadFileMock).toHaveBeenCalledTimes(1);
+    expect(completeTextMock).toHaveBeenCalledTimes(1);
+    const { loadConversationVisionCache } = await import(
+      "@/chat/slack/vision-cache"
+    );
+    expect((await loadConversationVisionCache(threadId)).byFileId.F_EXPIRED).toEqual(
+      expect.objectContaining({ summary: "Rebuilt screenshot summary" }),
+    );
+  });
+
   it("does not hydrate thread images when AI_VISION_MODEL is unset", async () => {
     const { slackRuntime } = await createRuntime({
       services: {
@@ -241,27 +322,9 @@ describe("bot image hydration", () => {
 
     expect(listThreadRepliesMock).not.toHaveBeenCalled();
     const persistedState = (await thread.getState()) as {
-      conversation: {
-        messages: Array<{
-          author?: {
-            isBot?: boolean;
-          };
-          text: string;
-          meta?: {
-            attachmentCount?: number;
-            imageAttachmentCount?: number;
-            imagesHydrated?: boolean;
-            slackTs?: string;
-          };
-        }>;
-        vision: {
-          backfillCompletedAtMs?: number;
-        };
-      };
+      conversation: Record<string, unknown>;
     };
-    expect(
-      persistedState.conversation.vision.backfillCompletedAtMs,
-    ).toBeUndefined();
+    expect(persistedState.conversation).not.toHaveProperty("vision");
     const conversation = coerceThreadConversationState(await thread.getState());
     await hydrateConversationMessages({
       conversation,
@@ -401,19 +464,7 @@ describe("bot image hydration", () => {
     expect(downloadFileMock).toHaveBeenCalledTimes(1);
     expect(completeTextMock).toHaveBeenCalledTimes(1);
     const persistedState = (await secondThread.getState()) as {
-      conversation: {
-        messages: Array<{
-          id: string;
-          meta?: {
-            imagesHydrated?: boolean;
-            imageFileIds?: string[];
-          };
-        }>;
-        vision: {
-          backfillCompletedAtMs?: number;
-          byFileId: Record<string, { summary: string }>;
-        };
-      };
+      conversation: Record<string, unknown>;
     };
     const conversation = coerceThreadConversationState(await secondThread.getState());
     await hydrateConversationMessages({
@@ -429,12 +480,15 @@ describe("bot image hydration", () => {
         imageFileIds: ["F_OLD"],
       }),
     );
-    expect(persistedState.conversation.vision.byFileId.F_OLD?.summary).toBe(
+    expect(persistedState.conversation).not.toHaveProperty("vision");
+    const { loadConversationVisionCache } = await import(
+      "@/chat/slack/vision-cache"
+    );
+    const visionCache = await loadConversationVisionCache(secondThread.id);
+    expect(visionCache.byFileId.F_OLD?.summary).toBe(
       "Recovered screenshot context",
     );
-    expect(persistedState.conversation.vision.backfillCompletedAtMs).toBeTypeOf(
-      "number",
-    );
+    expect(visionCache.backfillCompletedAtMs).toBeTypeOf("number");
   });
 
   it("hydrates skipped passive screenshots when a later explicit mention needs them", async () => {
@@ -555,18 +609,7 @@ describe("bot image hydration", () => {
     expect(executeAgentRun).toHaveBeenCalledTimes(1);
 
     const persistedState = (await thread.getState()) as {
-      conversation: {
-        messages: Array<{
-          id: string;
-          meta?: {
-            imagesHydrated?: boolean;
-            imageFileIds?: string[];
-          };
-        }>;
-        vision: {
-          byFileId: Record<string, { summary: string }>;
-        };
-      };
+      conversation: Record<string, unknown>;
     };
     const conversation = coerceThreadConversationState(await thread.getState());
     await hydrateConversationMessages({
@@ -582,7 +625,12 @@ describe("bot image hydration", () => {
         imageFileIds: ["F_PASSIVE"],
       }),
     );
-    expect(persistedState.conversation.vision.byFileId.F_PASSIVE?.summary).toBe(
+    expect(persistedState.conversation).not.toHaveProperty("vision");
+    const { loadConversationVisionCache } = await import(
+      "@/chat/slack/vision-cache"
+    );
+    const visionCache = await loadConversationVisionCache(thread.id);
+    expect(visionCache.byFileId.F_PASSIVE?.summary).toBe(
       "Passive screenshot summary",
     );
   });
