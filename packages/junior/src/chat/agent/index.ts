@@ -39,7 +39,6 @@ import {
   type Skill,
 } from "@/chat/skills";
 import { McpToolManager } from "@/chat/mcp/tool-manager";
-import type { ThreadArtifactsState } from "@/chat/state/artifacts";
 import {
   loadConnectedMcpProviders,
   loadTurnRoute,
@@ -603,7 +602,6 @@ async function executeAgentRunInPrivacyContext(
 
     // ── Mutable turn state ───────────────────────────────────────────
     const generatedFiles: FileUpload[] = [];
-    const artifactStatePatch: Partial<ThreadArtifactsState> = {};
     const toolCalls: string[] = [];
     let agent: Agent | undefined;
     let pendingPiHookError: Error | undefined;
@@ -746,7 +744,6 @@ async function executeAgentRunInPrivacyContext(
       currentAgentMessages,
       currentTurnMessages,
       currentUserIntent,
-      artifactStatePatch,
       availableSkills,
       configurationValues,
       connectedMcpProviders,
@@ -848,7 +845,6 @@ async function executeAgentRunInPrivacyContext(
     } = await assemblePrompt({
       activeMcpCatalogs: wiring.activeMcpCatalogs,
       currentActor: actor,
-      artifactState: state.artifactState,
       availableSkills,
       configurationValues,
       contextContentParts: [
@@ -1561,7 +1557,6 @@ async function executeAgentRunInPrivacyContext(
     const result = buildTurnResult({
       newMessages,
       userInput,
-      artifactStatePatch,
       toolCalls,
       sandboxRef: wiring.getSandboxRef(),
       piMessages: [...agent.state.messages],

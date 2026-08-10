@@ -2707,19 +2707,12 @@ describe("bot handlers (integration)", () => {
           agentRunner: {
             run: async (request) => {
               const _text = request.input.messageText;
-              const context = {
-                ...flattenAgentRunRequestForTest(request),
-              };
-
               await vi.waitFor(() => {
                 expect(
                   fakeAdapter.titleCalls.some(
                     (call) => call.title === "Today's Date",
                   ),
                 ).toBe(true);
-              });
-              await context?.onArtifactStateUpdated?.({
-                lastCanvasId: "F_CANVAS",
               });
               return completedAgentRun({
                 text: "Today is April 16, 2026.",
@@ -2754,12 +2747,7 @@ describe("bot handlers (integration)", () => {
       { destination: createTestDestination(thread) },
     );
 
-    expect(await thread.getState()).toMatchObject({
-      artifacts: {
-        assistantTitle: "Today's Date",
-        lastCanvasId: "F_CANVAS",
-      },
-    });
+    expect(await thread.getState()).toMatchObject({});
   });
 
   it("thread title: does not generate title on subsequent replies", async () => {

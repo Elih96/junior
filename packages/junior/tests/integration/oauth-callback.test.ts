@@ -428,10 +428,6 @@ describe("oauth callback integration", () => {
             },
           },
         },
-        artifacts: {
-          assistantContextChannelId: "C999",
-          listColumnMap: {},
-        },
       });
     await seedVisibleTranscriptFromThreadState(
       stateAdapterModule.getStateAdapter(),
@@ -481,7 +477,7 @@ describe("oauth callback integration", () => {
           },
           destination: SLACK_DESTINATION,
           source: storedSource,
-          toolChannelId: "C999",
+          toolChannelId: "C123",
         }),
       }),
     );
@@ -591,9 +587,6 @@ describe("oauth callback integration", () => {
           },
         },
       },
-      artifacts: {
-        assistantContextChannelId: "COLD",
-      },
     };
     const freshState = {
       conversation: {
@@ -632,9 +625,6 @@ describe("oauth callback integration", () => {
             linkSentAtMs: 1,
           },
         },
-      },
-      artifacts: {
-        assistantContextChannelId: "CFRESH",
       },
     };
 
@@ -703,7 +693,7 @@ describe("oauth callback integration", () => {
           ),
         }),
         routing: expect.objectContaining({
-          toolChannelId: "CFRESH",
+          toolChannelId: "C123",
           destination: SLACK_DESTINATION,
         }),
       }),

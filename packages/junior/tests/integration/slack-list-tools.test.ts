@@ -1,32 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { createSlackListGetItemsTool } from "@/chat/slack/tools/list/get-items";
-import type { ToolState } from "@/chat/tools/types";
 import { slackListsItemsListPage } from "../fixtures/slack/factories/api";
 import {
   getCapturedSlackApiCalls,
   queueSlackApiError,
   queueSlackApiResponse,
 } from "../msw/handlers/slack-api";
-
-function createToolState(options: { currentListId?: string } = {}): ToolState {
-  const operationResultCache = new Map<string, unknown>();
-  const artifactState: Record<string, unknown> = {
-    listColumnMap: {},
-  };
-
-  return {
-    artifactState: artifactState as ToolState["artifactState"],
-    patchArtifactState: (patch) => {
-      Object.assign(artifactState, patch);
-    },
-    getCurrentListId: () => options.currentListId,
-    getOperationResult: <T>(operationKey: string): T | undefined =>
-      operationResultCache.get(operationKey) as T | undefined,
-    setOperationResult: (operationKey, result) => {
-      operationResultCache.set(operationKey, result);
-    },
-  };
-}
 
 async function executeTool<TInput>(tool: any, input: TInput) {
   if (typeof tool?.execute !== "function") {
@@ -36,26 +15,15 @@ async function executeTool<TInput>(tool: any, input: TInput) {
 }
 
 describe("slack list tools", () => {
-  it("does not expose model-selectable list_id in schema", () => {
-    const tool = createSlackListGetItemsTool(createToolState());
+  it("requires list_id in the schema", () => {
+    const tool = createSlackListGetItemsTool();
     expect(tool.inputSchema).toMatchObject({
       properties: {
+        list_id: expect.any(Object),
         limit: expect.any(Object),
       },
+      required: expect.arrayContaining(["list_id"]),
     });
-    expect(
-      (tool.inputSchema as { properties?: Record<string, unknown> }).properties
-        ?.list_id,
-    ).toBeUndefined();
-  });
-
-  it("returns an actionable error when list context is unavailable", async () => {
-    const tool = createSlackListGetItemsTool(createToolState());
-
-    await expect(executeTool(tool, { limit: 10 })).rejects.toThrow(
-      "No active list found in artifact context",
-    );
-    expect(getCapturedSlackApiCalls("slackLists.items.list")).toHaveLength(0);
   });
 
   it("paginates slack list item reads up to the requested limit", async () => {
@@ -70,13 +38,10 @@ describe("slack list tools", () => {
         items: [{ id: "ROW_2", fields: [] }],
       }),
     });
-    const tool = createSlackListGetItemsTool(
-      createToolState({
-        currentListId: "LIST_123",
-      }),
-    );
+    const tool = createSlackListGetItemsTool();
 
     const result = await executeTool(tool, {
+      list_id: "LIST_123",
       limit: 2,
     });
 
@@ -107,14 +72,11 @@ describe("slack list tools", () => {
       needed: "lists:read",
       provided: "chat:write",
     });
-    const tool = createSlackListGetItemsTool(
-      createToolState({
-        currentListId: "LIST_123",
-      }),
-    );
+    const tool = createSlackListGetItemsTool();
 
     await expect(
       executeTool(tool, {
+        list_id: "LIST_123",
         limit: 1,
       }),
     ).rejects.toMatchObject({

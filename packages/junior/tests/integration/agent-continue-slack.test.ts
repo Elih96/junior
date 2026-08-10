@@ -81,7 +81,6 @@ function createToolContext(
   }
 
   return {
-    artifactState: request.state?.artifactState,
     configuration: request.policy?.configuration,
     conversationId: request.conversationId,
     destination: request.routing.destination,
@@ -211,10 +210,6 @@ describe("paused turn Slack integration", () => {
     });
 
     await threadStateModule.persistThreadStateById(conversationId, {
-      artifacts: {
-        assistantContextChannelId: "C999",
-        listColumnMap: {},
-      },
       conversation: {
         schemaVersion: 1,
         compactions: [],
@@ -274,7 +269,7 @@ describe("paused turn Slack integration", () => {
           },
           destination: SLACK_DESTINATION,
           source: storedSource,
-          toolChannelId: "C999",
+          toolChannelId: "C123",
         }),
         state: expect.objectContaining({
           sandboxRef: undefined,
@@ -385,9 +380,6 @@ describe("paused turn Slack integration", () => {
     });
 
     await threadStateModule.persistThreadStateById(conversationId, {
-      artifacts: {
-        listColumnMap: {},
-      },
       conversation: {
         schemaVersion: 1,
         compactions: [],
@@ -575,7 +567,6 @@ describe("paused turn Slack integration", () => {
     });
 
     await threadStateModule.persistThreadStateById(conversationId, {
-      artifacts: { listColumnMap: {} },
       conversation: {
         schemaVersion: 1,
         compactions: [],
@@ -641,9 +632,6 @@ describe("paused turn Slack integration", () => {
     });
 
     await threadStateModule.persistThreadStateById(conversationId, {
-      artifacts: {
-        listColumnMap: {},
-      },
       conversation: {
         schemaVersion: 1,
         compactions: [],
@@ -721,9 +709,6 @@ describe("paused turn Slack integration", () => {
     });
 
     await threadStateModule.persistThreadStateById(conversationId, {
-      artifacts: {
-        listColumnMap: {},
-      },
       conversation: {
         schemaVersion: 1,
         compactions: [],
@@ -797,9 +782,6 @@ describe("paused turn Slack integration", () => {
     });
 
     await threadStateModule.persistThreadStateById(conversationId, {
-      artifacts: {
-        listColumnMap: {},
-      },
       conversation: {
         schemaVersion: 1,
         compactions: [],
@@ -872,9 +854,6 @@ describe("paused turn Slack integration", () => {
     });
 
     await threadStateModule.persistThreadStateById(conversationId, {
-      artifacts: {
-        listColumnMap: {},
-      },
       conversation: {
         schemaVersion: 1,
         compactions: [],
@@ -956,9 +935,6 @@ describe("paused turn Slack integration", () => {
     });
 
     await threadStateModule.persistThreadStateById(conversationId, {
-      artifacts: {
-        listColumnMap: {},
-      },
       conversation: {
         schemaVersion: 1,
         compactions: [],
@@ -1075,10 +1051,6 @@ describe("paused turn Slack integration", () => {
     });
 
     await threadStateModule.persistThreadStateById(conversationId, {
-      artifacts: {
-        assistantContextChannelId: "C999",
-        listColumnMap: {},
-      },
       conversation: {
         schemaVersion: 1,
         compactions: [],
