@@ -1,4 +1,29 @@
 # Changelog
+## 0.147.0
+
+### New Features ✨
+
+- (github) Add trusted data to check events by @sentry-junior in [#1363](https://github.com/getsentry/junior/pull/1363)
+- (telemetry) Track auxiliary model costs by @sentry-junior in [#1366](https://github.com/getsentry/junior/pull/1366)
+- (tools) Add provider-scoped userLookup by @sentry-junior in [#1359](https://github.com/getsentry/junior/pull/1359)
+
+### Bug Fixes 🐛
+
+- (agent) Stop turn timeouts looking like cancelled failures by @sentry-junior in [#1331](https://github.com/getsentry/junior/pull/1331)
+- (slack) Add team read scope by @dcramer in [#1360](https://github.com/getsentry/junior/pull/1360)
+
+### Documentation 📚
+
+- Enforce technical simplified English by @sentry-junior in [#1364](https://github.com/getsentry/junior/pull/1364)
+
+### Internal Changes 🔧
+
+#### Chat
+
+- Separate vision cache from thread scratch by @sentry-junior in [#1368](https://github.com/getsentry/junior/pull/1368)
+- Remove thread artifact state by @sentry-junior in [#1367](https://github.com/getsentry/junior/pull/1367)
+- Persist location configuration in SQL by @sentry-junior in [#1357](https://github.com/getsentry/junior/pull/1357)
+
 ## 0.146.0
 
 ### New Features ✨
