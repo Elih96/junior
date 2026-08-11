@@ -30,7 +30,6 @@ import {
   formatMessageTimestamp,
   transcriptMessageActorLabel,
   unavailableTranscriptLabel,
-  visualStatusForSummary,
 } from "../format";
 import { cn } from "../styles";
 import { conversationTranscriptMessages } from "./eventTranscript";
@@ -47,7 +46,10 @@ import { TranscriptText } from "./TranscriptText";
 import { TranscriptSubagentView } from "./TranscriptSubagentView";
 import { TranscriptContextEventView } from "./TranscriptContextEventView";
 import { TranscriptTurnContextView } from "./TranscriptTurnContextView";
-import { TranscriptToolRun } from "./TranscriptToolRun";
+import {
+  isCollapsibleActivityEntry,
+  TranscriptActivityGroup,
+} from "./TranscriptActivityGroup";
 import { TranscriptToolView } from "./TranscriptToolView";
 import { TranscriptReasoningView } from "./TranscriptReasoningView";
 import { TranscriptStructuredEventView } from "./TranscriptStructuredEventView";
@@ -56,8 +58,7 @@ import { shouldCopyRawTranscript } from "./transcriptCopy";
 import {
   groupTranscriptMessages,
   messageRawText,
-  type RenderedReasoningEntry,
-  type RenderedToolEntry,
+  type RenderedTranscriptEntry,
   type TranscriptViewMode,
 } from "./transcriptRenderModel";
 import { transcriptEmptyClass } from "./transcriptStyles";
@@ -66,7 +67,6 @@ import {
   HighlightText,
   useTranscriptSearch,
 } from "./transcriptSearch";
-import { ActiveIndicator } from "../components/ActiveIndicator";
 
 type TranscriptEntry = ReturnType<typeof groupTranscriptMessages>[number];
 type TranscriptContextEntry = Extract<TranscriptEntry, { kind: "context" }>;
@@ -96,15 +96,10 @@ export function ConversationTranscriptView(props: {
   responding?: boolean;
   view: TranscriptViewMode;
 }) {
-  const status = visualStatusForSummary(props.conversation);
   const messages = conversationTranscriptMessages(props.conversation);
 
   return (
-    <section className="grid min-w-0 grid-cols-[0.875rem_minmax(0,1fr)] gap-3 py-3">
-      <div className="flex flex-col items-center pt-1.5" aria-hidden="true">
-        <TurnMarker status={status} />
-        <span className="mt-2 w-px flex-1 bg-cyan-300/15" />
-      </div>
+    <section className="min-w-0 py-1">
       <div className="min-w-0">
         <SegmentEvents
           onOpenSubagentTranscript={props.onOpenSubagentTranscript}
@@ -120,9 +115,9 @@ export function ConversationTranscriptView(props: {
 
 function TypingIndicator() {
   return (
-    <div aria-live="polite" className="mt-2 flex items-center" role="status">
+    <div aria-live="polite" className="mt-3 flex items-center" role="status">
       <span className="sr-only">{getDashboardAgentName()} is responding</span>
-      <span className="flex items-center gap-1 rounded-lg bg-cyan-300/[0.055] px-4 py-3 shadow-[0_12px_40px_rgba(0,0,0,0.12)]">
+      <span className="flex items-center gap-1 rounded-2xl bg-white/[0.03] px-3.5 py-2.5">
         {[0, 1, 2].map((dot) => (
           <span
             aria-hidden="true"
@@ -133,24 +128,6 @@ function TypingIndicator() {
         ))}
       </span>
     </div>
-  );
-}
-
-function TurnMarker(props: {
-  status: ReturnType<typeof visualStatusForSummary>;
-}) {
-  if (props.status === "active") {
-    return <ActiveIndicator className="size-2.5 border border-emerald-300" />;
-  }
-
-  return (
-    <span
-      className={cn(
-        "size-2.5 shrink-0 rounded-full border",
-        props.status === "failed" && "border-rose-300 bg-rose-300",
-        props.status === "idle" && "border-cyan-300/60 bg-cyan-300/40",
-      )}
-    />
   );
 }
 
@@ -165,12 +142,14 @@ function transcriptMessageClass(role: string): string {
   const kind = transcriptRoleKind(role);
 
   return cn(
-    "grid min-w-0 grid-cols-[minmax(0,1fr)] gap-2 rounded-lg px-3 py-2.5 shadow-[0_12px_40px_rgba(0,0,0,0.12)] md:px-4 md:py-3",
+    "grid min-w-0 grid-cols-[minmax(0,1fr)] gap-1 rounded-2xl px-3 py-2 md:gap-1.5 md:px-3.5 md:py-2.5",
     kind === "assistant" &&
-      "md:mr-6 bg-cyan-300/[0.055] text-dashboard-text",
-    kind === "user" && "md:ml-6 bg-white/[0.055] text-dashboard-text",
-    kind === "system" && "bg-amber-300/[0.045] text-dashboard-text",
-    kind === "tool" && "bg-black/15 text-dashboard-text-muted shadow-none",
+      "mr-6 bg-cyan-300/[0.04] text-dashboard-text md:mr-[18%]",
+    kind === "user" &&
+      "ml-6 bg-white/[0.055] text-dashboard-text md:ml-[22%]",
+    kind === "system" &&
+      "rounded-xl border border-amber-300/10 bg-amber-300/[0.04] text-dashboard-text",
+    kind === "tool" && "rounded-none px-0 text-dashboard-text-muted",
     kind === "other" && "bg-white/[0.03] text-dashboard-text",
   );
 }
@@ -179,12 +158,12 @@ function transcriptRoleClass(role: string): string {
   const kind = transcriptRoleKind(role);
 
   return cn(
-    "text-sm leading-snug",
-    kind === "assistant" && "text-cyan-100/75",
-    kind === "user" && "text-dashboard-text",
-    kind === "system" && "text-amber-200",
+    "text-xs leading-snug",
+    kind === "assistant" && "text-cyan-100/70",
+    kind === "user" && "text-dashboard-text-muted",
+    kind === "system" && "text-amber-200/80",
     kind === "tool" && "text-dashboard-text-muted",
-    kind === "other" && "text-dashboard-text",
+    kind === "other" && "text-dashboard-text-muted",
   );
 }
 
@@ -192,7 +171,7 @@ function transcriptRoleLabelClass(role: string): string {
   const kind = transcriptRoleKind(role);
 
   return cn(
-    "inline-block max-w-full truncate font-display text-base font-semibold leading-tight",
+    "inline-block max-w-full truncate font-display text-xs font-semibold leading-tight md:text-sm",
     kind === "assistant" && "text-cyan-100",
     kind === "user" && "text-dashboard-text",
     kind === "system" && "text-amber-200",
@@ -240,7 +219,7 @@ function TranscriptMessageHeader(props: {
       leftClassName={transcriptRoleClass(props.message.role)}
       right={
         metaText ? (
-          <TranscriptHeadingMeta className="block min-w-0 break-words text-xs leading-snug text-dashboard-text-muted md:leading-none">
+          <TranscriptHeadingMeta className="block min-w-0 break-words text-2xs leading-snug text-dashboard-text-muted/80 md:leading-none">
             {metaText}
           </TranscriptHeadingMeta>
         ) : undefined
@@ -259,7 +238,7 @@ function SegmentEvents(props: {
   view: TranscriptViewMode;
 }) {
   return (
-    <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-2 pt-3">
+    <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-3 pt-1">
       {props.conversation.eventHistory.status === "available" ? (
         <VisibleTranscriptEntries
           onOpenSubagentTranscript={props.onOpenSubagentTranscript}
@@ -381,43 +360,51 @@ function TranscriptEntryList(props: {
   renderTool: (entry: TranscriptToolEntry) => ReactNode;
 }) {
   const search = useTranscriptSearch();
-  const toolRunKeys = useRef(new Map<string, string>());
-  const claimedToolRunKeys = new Set<string>();
+  const activityKeys = useRef(new Map<string, string>());
+  const claimedActivityKeys = new Set<string>();
   const rows: ReactNode[] = [];
+
+  const renderEntry = (entry: TranscriptEntry): ReactNode => {
+    if (entry.kind === "subagent") return props.renderSubagent(entry);
+    if (entry.kind === "context") return props.renderContext(entry);
+    if (entry.kind === "structured_event") {
+      return props.renderStructuredEvent(entry);
+    }
+    if (entry.kind === "failure") return props.renderFailure(entry);
+    if (entry.kind === "reasoning") return props.renderReasoning(entry);
+    if (entry.kind === "tool") return props.renderTool(entry);
+    return props.renderMessage(entry);
+  };
 
   for (let index = 0; index < props.entries.length; ) {
     const entry = props.entries[index]!;
 
-    if (entry.kind === "tool" || entry.kind === "reasoning") {
-      const runEntries: Array<RenderedReasoningEntry | RenderedToolEntry> = [];
+    if (isCollapsibleActivityEntry(entry)) {
+      const activityEntries: RenderedTranscriptEntry[] = [];
       while (
-        props.entries[index]?.kind === "tool" ||
-        props.entries[index]?.kind === "reasoning"
+        index < props.entries.length &&
+        isCollapsibleActivityEntry(props.entries[index]!)
       ) {
-        runEntries.push(
-          props.entries[index] as RenderedReasoningEntry | RenderedToolEntry,
-        );
+        activityEntries.push(props.entries[index]!);
         index += 1;
       }
       const visibleEntries = search.active
-        ? runEntries.filter((e) =>
-            entryMatchesSearch(e, search.normalizedQuery),
+        ? activityEntries.filter((candidate) =>
+            entryMatchesSearch(candidate, search.normalizedQuery),
           )
-        : runEntries;
+        : activityEntries;
       if (visibleEntries.length > 0) {
-        const toolRunKey = stableToolRunKey({
-          claimedKeys: claimedToolRunKeys,
-          entries: runEntries,
+        const activityKey = stableActivityGroupKey({
+          claimedKeys: claimedActivityKeys,
+          entries: activityEntries,
           keyPrefix: props.keyPrefix,
-          knownKeys: toolRunKeys.current,
+          knownKeys: activityKeys.current,
         });
         rows.push(
-          <TranscriptToolRun
-            autoCollapse={index < props.entries.length}
+          <TranscriptActivityGroup
             entries={visibleEntries}
-            key={toolRunKey}
-            renderReasoning={props.renderReasoning}
-            renderTool={props.renderTool}
+            key={activityKey}
+            renderEntry={renderEntry}
           />,
         );
       }
@@ -427,15 +414,7 @@ function TranscriptEntryList(props: {
     if (!search.active || entryMatchesSearch(entry, search.normalizedQuery)) {
       rows.push(
         <Fragment key={`${props.keyPrefix}:${entry.key}`}>
-          {entry.kind === "subagent"
-            ? props.renderSubagent(entry)
-            : entry.kind === "context"
-              ? props.renderContext(entry)
-              : entry.kind === "structured_event"
-                ? props.renderStructuredEvent(entry)
-                : entry.kind === "failure"
-                  ? props.renderFailure(entry)
-                  : props.renderMessage(entry)}
+          {renderEntry(entry)}
         </Fragment>,
       );
     }
@@ -448,13 +427,13 @@ function TranscriptEntryList(props: {
     );
   }
 
-  return <>{rows}</>;
+  return <div className="grid min-w-0 gap-3">{rows}</div>;
 }
 
-/** Keep one tool run mounted while new or historical events extend either edge. */
-function stableToolRunKey(args: {
+/** Keep one activity group mounted while new or historical events extend either edge. */
+function stableActivityGroupKey(args: {
   claimedKeys: Set<string>;
-  entries: Array<RenderedReasoningEntry | RenderedToolEntry>;
+  entries: RenderedTranscriptEntry[];
   keyPrefix: string;
   knownKeys: Map<string, string>;
 }): string {
@@ -464,12 +443,12 @@ function stableToolRunKey(args: {
   const knownKey = entryKeys
     .map((entryKey) => args.knownKeys.get(entryKey))
     .find((key) => key !== undefined && !args.claimedKeys.has(key));
-  const runKey =
-    knownKey ?? `${args.keyPrefix}:tool-run:${args.entries[0]!.key}`;
+  const groupKey =
+    knownKey ?? `${args.keyPrefix}:activity:${args.entries[0]!.key}`;
 
-  args.claimedKeys.add(runKey);
-  entryKeys.forEach((entryKey) => args.knownKeys.set(entryKey, runKey));
-  return runKey;
+  args.claimedKeys.add(groupKey);
+  entryKeys.forEach((entryKey) => args.knownKeys.set(entryKey, groupKey));
+  return groupKey;
 }
 
 function TranscriptFailureView(props: {
@@ -516,7 +495,7 @@ type TranscriptRailEventKind =
   | "structured_event"
   | "subagent";
 
-/** Anchor noteworthy transcript events to the same visual rail as turn markers. */
+/** Mark noteworthy transcript events with an inline status icon. */
 function TranscriptRailEvent(props: {
   children: ReactNode;
   icon?: LucideIcon;
@@ -526,18 +505,20 @@ function TranscriptRailEvent(props: {
   const Icon = props.icon ?? marker.icon;
 
   return (
-    <div className="relative min-w-0" data-transcript-rail-event={props.kind}>
+    <div
+      className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-start gap-2.5"
+      data-transcript-rail-event={props.kind}
+    >
       <span
         aria-hidden="true"
         className={cn(
-          "absolute -left-[1.95rem] z-[1] grid size-6 place-items-center rounded border bg-[#071012] shadow-[0_0_0_3px_#050507,0_8px_20px_rgba(0,0,0,0.3)]",
-          props.kind === "resource_event" ? "top-2" : "top-1",
+          "mt-2 grid size-6 place-items-center rounded-md border bg-black/20",
           marker.className,
         )}
       >
         <Icon size={12} strokeWidth={2.2} />
       </span>
-      {props.children}
+      <div className="min-w-0">{props.children}</div>
     </div>
   );
 }

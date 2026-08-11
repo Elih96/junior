@@ -37,7 +37,7 @@ export function TranscriptToolView(props: {
     <ToolSignature
       name={props.part.name}
       preview={props.view === "raw" ? null : preview}
-      running={props.part.status === "running"}
+      status={props.part.status}
     />
   );
   const frame =
@@ -94,31 +94,43 @@ export function TranscriptToolView(props: {
       </ToolFrame>
     );
 
-  return (
-    <div className="relative min-w-0">
-      <ToolErrorMarker status={props.part.status} />
-      {frame}
-    </div>
-  );
+  return <div className="min-w-0">{frame}</div>;
 }
 
 function ToolSignature(props: {
   name: string;
   preview: string | null;
-  running: boolean;
+  status: TranscriptViewToolCallPart["status"];
 }) {
   const { active: searchActive } = useTranscriptSearch();
-  const shimmering = props.running && !searchActive;
+  const running = props.status === "running";
+  const failed = props.status === "error";
+  const shimmering = running && !searchActive;
+  const statusLabel = running
+    ? `${props.name} (running)`
+    : failed
+      ? `${props.name} (failed)`
+      : undefined;
 
   return (
     <>
+      {failed ? (
+        <TriangleAlert
+          aria-hidden="true"
+          className="shrink-0 !text-rose-300"
+          size={12}
+          strokeWidth={2.2}
+        />
+      ) : null}
       <ShimmerText
         active={shimmering}
-        aria-label={props.running ? `${props.name} (running)` : undefined}
+        aria-label={statusLabel}
         as="strong"
         className={cn(
           "shrink-0 font-bold",
-          !shimmering && "text-dashboard-text",
+          failed
+            ? "!text-rose-300"
+            : !shimmering && "text-dashboard-text",
         )}
       >
         <HighlightText text={props.name} />
@@ -129,21 +141,6 @@ function ToolSignature(props: {
         </code>
       ) : null}
     </>
-  );
-}
-
-function ToolErrorMarker(props: {
-  status: TranscriptViewToolCallPart["status"];
-}) {
-  if (props.status !== "error") return null;
-  return (
-    <span
-      aria-label="Tool failed"
-      className="absolute -left-[1.95rem] top-0.5 z-[1] grid size-6 place-items-center rounded border border-rose-300/40 bg-[#071012] text-rose-200 shadow-[0_0_0_3px_#050507,0_8px_20px_rgba(0,0,0,0.3)]"
-      role="img"
-    >
-      <TriangleAlert size={12} strokeWidth={2.2} />
-    </span>
   );
 }
 

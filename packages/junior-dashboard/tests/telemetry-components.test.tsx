@@ -254,7 +254,7 @@ describe("dashboard canonical-event components", () => {
     );
     expect(html).toContain("jr-rpc config get github.repo");
     expect(html).toContain("junior-qa");
-    expect(html).toContain('aria-label="Tool failed"');
+    expect(html).toContain('aria-label="bash (failed)"');
   });
 
   it("keeps a running tool name searchable and accessible", () => {
@@ -304,10 +304,19 @@ describe("dashboard canonical-event components", () => {
 
   it("exposes pressed state for transcript view controls", () => {
     const html = renderToStaticMarkup(
-      <TranscriptHeader redacted={false} value="raw" onChange={() => {}} />,
+      <TranscriptHeader
+        onChange={() => {}}
+        onSearchChange={() => {}}
+        redacted={false}
+        search=""
+        value="raw"
+      />,
     );
     expect(html.match(/aria-pressed="true"/g) ?? []).toHaveLength(1);
     expect(html.match(/aria-pressed="false"/g) ?? []).toHaveLength(1);
+    expect(html).toContain("Conversation");
+    expect(html).toContain("Event log");
+    expect(html).toContain('aria-label="Search transcript"');
   });
 
   it("shows responding state independently from live transcript following", () => {
@@ -378,6 +387,7 @@ describe("dashboard canonical-event components", () => {
     expect(completeHtml).toContain("1 turn");
     expect(completeHtml).toContain("1 tool call");
     // Transcript no longer mirrors those conversation totals in a segment row.
+    // Live tool runs stay expanded, so the collapse chip label is absent here.
     expect(partialTranscriptHtml).not.toContain("1 turn");
     expect(partialTranscriptHtml).not.toContain("1 tool call");
     expect(completeTranscriptHtml).not.toContain("1 turn");
