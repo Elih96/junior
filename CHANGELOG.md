@@ -1,4 +1,21 @@
 # Changelog
+## 0.150.0
+
+### New Features ✨
+
+#### Dashboard
+
+- Make transcript conversation-first by @sentry-junior in [#1412](https://github.com/getsentry/junior/pull/1412)
+- Add user profile settings by @sentry-junior in [#1411](https://github.com/getsentry/junior/pull/1411)
+
+### Bug Fixes 🐛
+
+- (dashboard) Remove conversation visibility helper text by @sentry-junior in [#1410](https://github.com/getsentry/junior/pull/1410)
+
+### Internal Changes 🔧
+
+- (agent) Flatten AgentRun public launch contract by @sentry-junior in [#1405](https://github.com/getsentry/junior/pull/1405)
+
 ## 0.149.0
 
 ### New Features ✨
