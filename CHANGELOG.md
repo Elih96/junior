@@ -1,4 +1,20 @@
 # Changelog
+## 0.149.0
+
+### New Features ✨
+
+#### Conversations
+
+- Show pending mailbox messages in transcript by @sentry-junior in [#1407](https://github.com/getsentry/junior/pull/1407)
+- Generate titles outside Slack by @sentry-junior in [#1404](https://github.com/getsentry/junior/pull/1404)
+- Create private dashboard roots by @sentry-junior in [#1406](https://github.com/getsentry/junior/pull/1406)
+- Add dashboard composer by @sentry-junior in [#1399](https://github.com/getsentry/junior/pull/1399)
+
+#### Dashboard
+
+- Expose token cache hit rate by @sentry-junior in [#1408](https://github.com/getsentry/junior/pull/1408)
+- Use icon for new conversation by @sentry-junior in [#1409](https://github.com/getsentry/junior/pull/1409)
+
 ## 0.148.0
 
 ### New Features ✨
