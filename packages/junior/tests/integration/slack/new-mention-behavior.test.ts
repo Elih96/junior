@@ -1,6 +1,5 @@
 import type { Message } from "chat";
 import { describe, expect, it } from "vitest";
-import { makeAssistantStatus } from "@/chat/slack/assistant-thread/status";
 import {
   FakeSlackAdapter,
   createTestDestination,
@@ -16,7 +15,6 @@ import { hydrateConversationMessages } from "@/chat/conversations/messages";
 import { coerceThreadConversationState } from "@/chat/state/conversation";
 import {
   deliverAssistantMessagesForTest,
-  flattenAgentRunRequestForTest,
 } from "../../fixtures/agent-runner";
 
 interface FakeReplyCall {
@@ -68,7 +66,7 @@ describe("Slack behavior: new mention", () => {
         replyExecutor: {
           agentRunner: {
             run: async (request) => {
-              const prompt = request.input.messageText;
+              const prompt = request.instruction.text;
 
               fakeReplyCalls.push({ prompt });
               return await completedReply(
@@ -114,10 +112,10 @@ describe("Slack behavior: new mention", () => {
         replyExecutor: {
           agentRunner: {
             run: async (request) => {
-              const prompt = request.input.messageText;
-              const context = flattenAgentRunRequestForTest(request);
+              const prompt = request.instruction.text;
+              const context = request;
 
-              fakeReplyCalls.push({ prompt, piMessages: context.piMessages });
+              fakeReplyCalls.push({ prompt, piMessages: context.history ? [...context.history] : undefined });
               return await completedReply(request, "Handled both updates.");
             },
           },
@@ -192,20 +190,18 @@ describe("Slack behavior: new mention", () => {
         replyExecutor: {
           agentRunner: {
             run: async (request) => {
-              const prompt = request.input.messageText;
-              const context = {
-                ...flattenAgentRunRequestForTest(request),
-              };
+              const prompt = request.instruction.text;
+              const context = request;
 
-              const attachments = context?.userAttachments ?? [];
+              const attachments = context?.instruction.attachments ?? [];
               fakeReplyCalls.push({
                 prompt,
-                inboundAttachmentCount: context?.inboundAttachmentCount,
+                inboundAttachmentCount: context?.instruction.inboundAttachmentCount,
                 filenames: attachments.map(
                   (attachment) => attachment.filename ?? "",
                 ),
                 attachmentText: attachments[0]?.data?.toString("utf8"),
-                piMessages: context?.piMessages,
+                piMessages: context?.history ? [...context.history] : undefined,
               });
               return await completedReply(
                 request,
@@ -274,12 +270,10 @@ describe("Slack behavior: new mention", () => {
         replyExecutor: {
           agentRunner: {
             run: async (request) => {
-              const _prompt = request.input.messageText;
-              const context = {
-                ...flattenAgentRunRequestForTest(request),
-              };
+              const _prompt = request.instruction.text;
+              const context = request;
 
-              await context?.onStatus?.(makeAssistantStatus("running", "bash"));
+              await context?.onEvent?.({ type: "status", text: "running bash" });
               return await completedReply(request, "Done.", ["bash"]);
             },
           },

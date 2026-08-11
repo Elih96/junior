@@ -15,7 +15,7 @@ import { resetSlackApiMockState } from "../../msw/handlers/slack-api";
 import { createSlackRuntime } from "@/chat/app/factory";
 import type { JuniorRuntimeServiceOverrides } from "@/chat/app/services";
 import type { AgentRunner } from "@/chat/runtime/agent-runner";
-import type { AgentRunSteeringMessage } from "@/chat/agent/request";
+import type { AgentSteeringMessage } from "@/chat/agent/types";
 import { createJuniorSlackAdapter } from "@/chat/slack/adapter";
 import { disconnectStateAdapter, getStateAdapter } from "@/chat/state/adapter";
 import { coerceThreadConversationState } from "@/chat/state/conversation";
@@ -36,7 +36,6 @@ import {
 } from "@/chat/resource-events/store";
 import {
   deliverAssistantMessagesForTest,
-  flattenAgentRunRequestForTest,
 } from "../../fixtures/agent-runner";
 
 const CHANNEL_ID = "CSTEER";
@@ -256,10 +255,10 @@ describe("Slack behavior: durable turn steering", () => {
       prompt: string;
       steeringTexts: string[];
     }> = [];
-    const steeringProvenance: AgentRunSteeringMessage["provenance"][] = [];
+    const steeringProvenance: AgentSteeringMessage["provenance"][] = [];
     const state = getStateAdapter();
     const executeAgentRun: AgentRunner["run"] = async (request) => {
-      const prompt = request.input.messageText;
+      const prompt = request.instruction.text;
       await request.durability?.onInputCommitted?.();
       if (!blockingCallReleased) {
         agentEntered.resolve();
@@ -267,7 +266,7 @@ describe("Slack behavior: durable turn steering", () => {
         blockingCallReleased = true;
       }
 
-      const steeringMessages: AgentRunSteeringMessage[] = [];
+      const steeringMessages: AgentSteeringMessage[] = [];
       const drained = await request.durability?.drainSteeringMessages?.(
         async (messages) => {
           steeringMessages.push(...messages);
@@ -282,7 +281,7 @@ describe("Slack behavior: durable turn steering", () => {
       );
       const steeringTexts = steeringMessages.map((message) => message.text);
       agentCalls.push({
-        context: request.input.conversationContext,
+        context: request.instruction.context,
         prompt,
         steeringTexts,
       });
@@ -444,7 +443,7 @@ describe("Slack behavior: durable turn steering", () => {
       actorId: string | undefined;
       context: string | undefined;
       prompt: string;
-      steering: AgentRunSteeringMessage[];
+      steering: AgentSteeringMessage[];
     }> = [];
     const state = getStateAdapter();
     let isFirstRun = true;
@@ -456,7 +455,7 @@ describe("Slack behavior: durable turn steering", () => {
         await releaseAgent.promise;
       }
 
-      const steering: AgentRunSteeringMessage[] = [];
+      const steering: AgentSteeringMessage[] = [];
       const drained = await request.durability?.drainSteeringMessages?.(
         async (messages) => {
           steering.push(...messages);
@@ -466,11 +465,11 @@ describe("Slack behavior: durable turn steering", () => {
         steering.push(...drained);
       }
       calls.push({
-        actorId: isUserActor(request.routing.actor)
-          ? request.routing.actor.userId
+        actorId: isUserActor(request.actor)
+          ? request.actor.userId
           : undefined,
-        context: request.input.conversationContext,
-        prompt: request.input.messageText,
+        context: request.instruction.context,
+        prompt: request.instruction.text,
         steering,
       });
       await deliverAssistantMessagesForTest(request, [{ text: "Done." }]);
@@ -596,7 +595,7 @@ describe("Slack behavior: durable turn steering", () => {
   it("supports configured cross-actor steering", async () => {
     const agentEntered = deferred();
     const releaseAgent = deferred();
-    const steering: AgentRunSteeringMessage[] = [];
+    const steering: AgentSteeringMessage[] = [];
     const state = getStateAdapter();
     const { runNextQueuedWork, services } = createTurnHarness({
       crossActorMidRunMode: "steer",
@@ -675,13 +674,13 @@ describe("Slack behavior: durable turn steering", () => {
         })),
         agentRunner: {
           run: async (request) => {
-            const prompt = request.input.messageText;
+            const prompt = request.instruction.text;
             const context = {
-              ...flattenAgentRunRequestForTest(request),
+              ...request,
             };
 
             replyCalls.push(prompt);
-            await context?.onInputCommitted?.();
+            await context?.durability?.onInputCommitted?.();
             return completedAgentRun({
               text: "Started.",
               diagnostics: makeDiagnostics(),

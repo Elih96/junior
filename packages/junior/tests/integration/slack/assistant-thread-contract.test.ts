@@ -8,14 +8,12 @@ import { slackApiOutbox } from "../../fixtures/slack-api-outbox";
 import { createSlackWebhookTestClient } from "../../fixtures/slack/webhook-client";
 import { createSlackRuntime } from "@/chat/app/factory";
 import { JuniorChat } from "@/chat/ingress/junior-chat";
-import { makeAssistantStatus } from "@/chat/slack/assistant-thread/status";
 import type { AgentRunner } from "@/chat/runtime/agent-runner";
 import { createJuniorSlackAdapter } from "@/chat/slack/adapter";
 import type { ConversationMemoryDeps } from "@/chat/services/conversation-memory";
 import { resetConversationTitleStateForTests } from "@/chat/services/conversation-title";
 import { handleChatSdkPlatformWebhook } from "@/handlers/webhooks";
 import { completedAgentRun } from "@/chat/runtime/agent-run-outcome";
-import { flattenAgentRunRequestForTest } from "../../fixtures/agent-runner";
 import { resetAssistantTitleProjectionForTests } from "@/chat/slack/assistant-thread/title";
 import * as piClient from "@/chat/pi/client";
 
@@ -168,12 +166,10 @@ describe("Slack contract: assistant-thread delivery", () => {
     const bot = await createDirectMessageBot({
       agentRunner: {
         run: async (request) => {
-          const _prompt = request.input.messageText;
-          const context = {
-            ...flattenAgentRunRequestForTest(request),
-          };
+          const _prompt = request.instruction.text;
+          const context = request;
 
-          await context?.onStatus?.(makeAssistantStatus("running", "bash"));
+          await context?.onEvent?.({ type: "status", text: "running bash" });
           return makeCompletedReply("Done.");
         },
       },
@@ -197,12 +193,10 @@ describe("Slack contract: assistant-thread delivery", () => {
     const bot = await createDirectMessageBot({
       agentRunner: {
         run: async (request) => {
-          const _prompt = request.input.messageText;
-          const context = {
-            ...flattenAgentRunRequestForTest(request),
-          };
+          const _prompt = request.instruction.text;
+          const context = request;
 
-          await context?.onStatus?.(makeAssistantStatus("running", "bash"));
+          await context?.onEvent?.({ type: "status", text: "running bash" });
           return makeCompletedReply("Done.");
         },
       },
@@ -245,12 +239,10 @@ describe("Slack contract: assistant-thread delivery", () => {
     const bot = await createMentionBot({
       agentRunner: {
         run: async (request) => {
-          const _prompt = request.input.messageText;
-          const context = {
-            ...flattenAgentRunRequestForTest(request),
-          };
+          const _prompt = request.instruction.text;
+          const context = request;
 
-          await context?.onStatus?.(makeAssistantStatus("running", "bash"));
+          await context?.onEvent?.({ type: "status", text: "running bash" });
           return makeCompletedReply("Done.");
         },
       },

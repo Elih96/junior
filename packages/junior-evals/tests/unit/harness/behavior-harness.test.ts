@@ -22,8 +22,8 @@ const {
   return {
     executeAgentRunMock: vi.fn<
       (request: {
-        policy?: {
-          signal?: AbortSignal;
+        signal?: AbortSignal;
+        environment?: {
           toolOverrides?: {
             webFetch?: {
               execute?: (input: {
@@ -146,9 +146,9 @@ describe("behavior harness", () => {
         signal: controller.signal,
       },
     );
-    await runtimeState.agentRunner?.run({ policy: {} });
+    await runtimeState.agentRunner?.run({} as never);
 
-    const forwardedSignal = executeAgentRunMock.mock.calls[0]?.[0]?.policy
+    const forwardedSignal = executeAgentRunMock.mock.calls[0]?.[0]
       ?.signal as AbortSignal | undefined;
     expect(forwardedSignal).toBeDefined();
     expect(forwardedSignal).not.toBe(controller.signal);
@@ -158,7 +158,7 @@ describe("behavior harness", () => {
 
   it("aborts eval replies at the configured timeout", async () => {
     executeAgentRunMock.mockImplementationOnce(async (request) => {
-      const signal = request.policy?.signal;
+      const signal = request.signal;
       if (!signal) {
         throw new Error("missing eval agent signal");
       }
@@ -176,7 +176,7 @@ describe("behavior harness", () => {
     });
 
     await expect(
-      runtimeState.agentRunner?.run({ policy: {} }),
+      runtimeState.agentRunner?.run({} as never),
     ).rejects.toMatchObject({ name: "TimeoutError" });
   });
 
@@ -186,7 +186,7 @@ describe("behavior harness", () => {
     let shortResult: unknown;
     let longResult: unknown;
     executeAgentRunMock.mockImplementationOnce(async (request) => {
-      const execute = request.policy?.toolOverrides?.webFetch?.execute;
+      const execute = request.environment?.toolOverrides?.webFetch?.execute;
       if (!execute) throw new Error("missing eval webFetch override");
       const url = "https://docs.slack.dev/reference/methods/chat.startStream/";
       shortResult = await execute({ url, max_chars: 1_000 });
@@ -196,7 +196,7 @@ describe("behavior harness", () => {
 
     try {
       await runEvalScenario({ initialEvents: [] });
-      await runtimeState.agentRunner?.run({ policy: {} });
+      await runtimeState.agentRunner?.run({} as never);
     } finally {
       if (previousReplayMode === undefined) {
         delete process.env.VITEST_EVALS_REPLAY_MODE;

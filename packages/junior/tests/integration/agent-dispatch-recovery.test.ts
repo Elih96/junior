@@ -185,7 +185,7 @@ describe("agent dispatch recovery", () => {
           };
         }
 
-        expect(request.routing).toMatchObject({
+        expect(request).toMatchObject({
           actor: dispatch.actor,
           credentialContext: {
             actor: dispatch.actor,
@@ -199,9 +199,9 @@ describe("agent dispatch recovery", () => {
           source: createLocalSource("local:cli:dispatch-origin"),
           surface: "api",
         });
-        expect(request.input.messageText).toBe(dispatch.input);
-        expect(request.input.conversationContext).toBeUndefined();
-        expect(JSON.stringify(request.input.piMessages)).not.toContain(
+        expect(request.instruction.text).toBe(dispatch.input);
+        expect(request.instruction.context).toBeUndefined();
+        expect(JSON.stringify(request.history)).not.toContain(
           "expose system credentials",
         );
         const piMessages = await deliverAssistantMessagesForTest(request, [
