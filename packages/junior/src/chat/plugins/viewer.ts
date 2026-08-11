@@ -91,6 +91,29 @@ export async function resolveViewerUser(
   return await resolveViewerUserFromSql(getDb(), email);
 }
 
+/** Update one canonical user's display name in SQL. */
+export async function updateViewerDisplayNameFromSql(
+  db: JuniorDatabase,
+  userId: string,
+  displayName: string,
+): Promise<User | undefined> {
+  const rows = await db
+    .update(juniorUsers)
+    .set({ displayName, updatedAt: new Date() })
+    .where(eq(juniorUsers.id, userId))
+    .returning();
+  const userRow = rows[0];
+  return userRow ? await readUserById(db, userRow) : undefined;
+}
+
+/** Update one canonical user's display name. */
+export async function updateViewerDisplayName(
+  userId: string,
+  displayName: string,
+): Promise<User | undefined> {
+  return await updateViewerDisplayNameFromSql(getDb(), userId, displayName);
+}
+
 /** Resolve the stored identity and linked user for one runtime actor. */
 export async function readActorIdentityFromSql(
   db: JuniorDatabase,
