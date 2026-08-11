@@ -97,6 +97,7 @@ export function ConversationTranscriptView(props: {
   view: TranscriptViewMode;
 }) {
   const status = visualStatusForSummary(props.conversation);
+  const messages = conversationTranscriptMessages(props.conversation);
 
   return (
     <section className="grid min-w-0 grid-cols-[0.875rem_minmax(0,1fr)] gap-3 py-3">
@@ -108,6 +109,7 @@ export function ConversationTranscriptView(props: {
         <SegmentEvents
           onOpenSubagentTranscript={props.onOpenSubagentTranscript}
           conversation={props.conversation}
+          messages={messages}
           view={props.view}
         />
         {props.responding ? <TypingIndicator /> : null}
@@ -120,7 +122,7 @@ function TypingIndicator() {
   return (
     <div aria-live="polite" className="mt-2 flex items-center" role="status">
       <span className="sr-only">{getDashboardAgentName()} is responding</span>
-      <span className="flex items-center gap-1 rounded-lg border border-cyan-300/15 bg-cyan-300/[0.055] px-4 py-3 shadow-[0_12px_40px_rgba(0,0,0,0.12)]">
+      <span className="flex items-center gap-1 rounded-lg bg-cyan-300/[0.055] px-4 py-3 shadow-[0_12px_40px_rgba(0,0,0,0.12)]">
         {[0, 1, 2].map((dot) => (
           <span
             aria-hidden="true"
@@ -163,17 +165,13 @@ function transcriptMessageClass(role: string): string {
   const kind = transcriptRoleKind(role);
 
   return cn(
-    "grid min-w-0 grid-cols-[minmax(0,1fr)] gap-2 rounded-lg border px-3 py-2.5 shadow-[0_12px_40px_rgba(0,0,0,0.12)] md:px-4 md:py-3",
+    "grid min-w-0 grid-cols-[minmax(0,1fr)] gap-2 rounded-lg px-3 py-2.5 shadow-[0_12px_40px_rgba(0,0,0,0.12)] md:px-4 md:py-3",
     kind === "assistant" &&
-      "md:mr-6 border-cyan-300/15 bg-cyan-300/[0.055] text-dashboard-text",
-    kind === "user" &&
-      "md:ml-6 border-white/[0.09] bg-white/[0.055] text-dashboard-text",
-    kind === "system" &&
-      "border-amber-300/15 bg-amber-300/[0.045] text-dashboard-text",
-    kind === "tool" &&
-      "border-white/[0.06] bg-black/15 text-dashboard-text-muted shadow-none",
-    kind === "other" &&
-      "border-white/[0.08] bg-white/[0.03] text-dashboard-text",
+      "md:mr-6 bg-cyan-300/[0.055] text-dashboard-text",
+    kind === "user" && "md:ml-6 bg-white/[0.055] text-dashboard-text",
+    kind === "system" && "bg-amber-300/[0.045] text-dashboard-text",
+    kind === "tool" && "bg-black/15 text-dashboard-text-muted shadow-none",
+    kind === "other" && "bg-white/[0.03] text-dashboard-text",
   );
 }
 
@@ -230,12 +228,13 @@ function TranscriptMessageHeader(props: {
     source === "slack" ? "Slack" : source === "web" ? "Dashboard" : undefined;
   const metaParts = [sourceLabel, ...(props.meta ?? [])].filter(isString);
   const metaText = metaParts.join(" · ");
+  const roleLabel = transcriptRoleLabel(props.message, props.conversation);
 
   return (
     <TranscriptHeadingRow
       left={
         <span className={transcriptRoleLabelClass(props.message.role)}>
-          {transcriptRoleLabel(props.message, props.conversation)}
+          {roleLabel}
         </span>
       }
       leftClassName={transcriptRoleClass(props.message.role)}
@@ -256,29 +255,29 @@ function SegmentEvents(props: {
     conversation: ConversationTranscript;
   }) => void;
   conversation: ConversationTranscript;
+  messages: TranscriptViewMessage[];
   view: TranscriptViewMode;
 }) {
-  const messages = conversationTranscriptMessages(props.conversation);
-
   return (
     <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-2 pt-3">
       {props.conversation.eventHistory.status === "available" ? (
         <VisibleTranscriptEntries
           onOpenSubagentTranscript={props.onOpenSubagentTranscript}
-          transcript={messages}
+          transcript={props.messages}
           conversation={props.conversation}
           view={props.view}
         />
       ) : props.conversation.eventHistory.status === "redacted" &&
-        messages.length > 0 ? (
+        props.messages.length > 0 ? (
         <RedactedTranscriptView
           onOpenSubagentTranscript={props.onOpenSubagentTranscript}
           conversation={props.conversation}
+          messages={props.messages}
         />
-      ) : messages.length > 0 ? (
+      ) : props.messages.length > 0 ? (
         <VisibleTranscriptEntries
           onOpenSubagentTranscript={props.onOpenSubagentTranscript}
-          transcript={messages}
+          transcript={props.messages}
           conversation={props.conversation}
           view={props.view}
         />
@@ -605,12 +604,11 @@ function RedactedTranscriptView(props: {
     conversation: ConversationTranscript;
   }) => void;
   conversation: ConversationTranscript;
+  messages: TranscriptViewMessage[];
 }) {
   return (
     <TranscriptEntryList
-      entries={groupTranscriptMessages(
-        conversationTranscriptMessages(props.conversation),
-      )}
+      entries={groupTranscriptMessages(props.messages)}
       keyPrefix={`${props.conversation.conversationId}:redacted`}
       renderContext={(entry) => (
         <TranscriptRailEvent
