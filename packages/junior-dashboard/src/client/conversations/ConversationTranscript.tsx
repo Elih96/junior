@@ -10,12 +10,14 @@ import {
   Brain,
   Calendar,
   Check,
+  ChevronRight,
   CircleAlert,
   Database,
   Diff,
   Info,
   KeyRound,
   Link,
+  MessageSquareText,
   Minimize2,
   Send,
   Sparkles,
@@ -308,6 +310,13 @@ function VisibleTranscriptEntries(props: {
           <TranscriptRailEvent kind="resource_event">
             <TranscriptResourceEventView message={entry.message} />
           </TranscriptRailEvent>
+        ) : entry.message.context ? (
+          <TranscriptRailEvent kind="message_context">
+            <TranscriptMessageContextView
+              message={entry.message}
+              conversation={props.conversation}
+            />
+          </TranscriptRailEvent>
         ) : (
           <TranscriptMessageView
             message={entry.message}
@@ -500,6 +509,7 @@ function TranscriptFailureView(props: {
 type TranscriptRailEventKind =
   | "compaction"
   | "handoff"
+  | "message_context"
   | "resource_event"
   | "structured_event"
   | "subagent";
@@ -536,6 +546,12 @@ function transcriptRailMarker(kind: TranscriptRailEventKind): {
   className: string;
   icon: LucideIcon;
 } {
+  if (kind === "message_context") {
+    return {
+      className: "border-white/20 text-dashboard-text-muted",
+      icon: MessageSquareText,
+    };
+  }
   if (kind === "resource_event") {
     return {
       className: "border-violet-300/35 text-violet-200",
@@ -621,6 +637,14 @@ function RedactedTranscriptView(props: {
           <TranscriptRailEvent kind="resource_event">
             <TranscriptResourceEventView message={entry.message} />
           </TranscriptRailEvent>
+        ) : entry.message.context ? (
+          <TranscriptRailEvent kind="message_context">
+            <TranscriptMessageContextView
+              message={entry.message}
+              conversation={props.conversation}
+              redacted
+            />
+          </TranscriptRailEvent>
         ) : (
           <RedactedMessageView
             message={entry.message}
@@ -703,6 +727,76 @@ function RedactedMarker() {
     <code className="inline-flex w-fit font-mono text-sm leading-tight text-dashboard-text-muted">
       {"<redacted>"}
     </code>
+  );
+}
+
+function TranscriptMessageContextView(props: {
+  conversation: ConversationTranscript;
+  message: TranscriptMessageEntry["message"];
+  redacted?: boolean;
+}) {
+  const actor = transcriptRoleLabel(props.message, props.conversation);
+  const timestamp = formatMessageTimestamp(props.message.timestamp);
+  const text = messageRawText(props.message);
+
+  const content = props.redacted ? (
+    <RedactedMarker />
+  ) : (
+    <HighlightText text={text} />
+  );
+
+  return (
+    <>
+      <details
+        className="group/message-context min-w-0 rounded-lg bg-white/[0.025] px-3 py-2.5 md:hidden"
+        data-transcript-message-context
+      >
+        <summary className="flex cursor-pointer list-none items-center justify-between gap-2 font-display text-xs font-semibold text-dashboard-text-muted [&::-webkit-details-marker]:hidden">
+          <span className="min-w-0 truncate">Context from {actor}</span>
+          <ChevronRight
+            aria-hidden="true"
+            className="shrink-0 transition-transform group-open/message-context:rotate-90"
+            size={14}
+          />
+        </summary>
+        <div className="mt-2 whitespace-pre-wrap pt-2 text-sm leading-relaxed text-dashboard-text/75">
+          {content}
+        </div>
+        {!props.redacted && props.message.contexts?.length ? (
+          <div className="mt-2">
+            <TranscriptTurnContextView contexts={props.message.contexts} />
+          </div>
+        ) : null}
+      </details>
+      <article
+        className="hidden min-w-0 rounded-lg bg-white/[0.025] px-3 py-2.5 md:block"
+        data-transcript-message-context
+      >
+        <TranscriptHeadingRow
+          left={
+            <span className="font-display text-xs font-semibold text-dashboard-text-muted">
+              Context from {actor}
+            </span>
+          }
+          leftClassName="min-w-0"
+          right={
+            timestamp ? (
+              <TranscriptHeadingMeta className="font-mono text-2xs text-dashboard-text-muted/70">
+                {timestamp}
+              </TranscriptHeadingMeta>
+            ) : undefined
+          }
+        />
+        <div className="mt-1 whitespace-pre-wrap text-sm leading-relaxed text-dashboard-text/75">
+          {content}
+        </div>
+        {!props.redacted && props.message.contexts?.length ? (
+          <div className="mt-2">
+            <TranscriptTurnContextView contexts={props.message.contexts} />
+          </div>
+        ) : null}
+      </article>
+    </>
   );
 }
 
