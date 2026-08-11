@@ -224,18 +224,67 @@ function activeConversation(nowMs: number): ConversationDetailReport {
           },
         ],
       }),
+      reportEvent(5, iso(Date.parse(startedAt), 14_000), {
+        type: "tool_calls",
+        calls: [
+          {
+            toolCallId: "active-search",
+            name: "webSearch",
+            status: "completed",
+            startedSeq: 4,
+            startedAt: iso(Date.parse(startedAt), 10_000),
+            input: { query: "checkout latency last deployment" },
+            output: {
+              results: [
+                {
+                  title: "payments-v42 deploy notes",
+                  url: "https://docs.sentry.io",
+                },
+              ],
+            },
+          },
+        ],
+      }),
+      // Mixed markdown keeps font/legibility QA honest for long assistant replies.
+      reportEvent(6, iso(Date.parse(startedAt), 22_000), {
+        type: "message",
+        messageId: "active-assistant",
+        role: "assistant",
+        text: [
+          "Checkout p95 jumped after **payments-v42** landed.",
+          "",
+          "What I checked:",
+          "- deploy marker `payments-v42` correlates with the spike",
+          "- canary hosts show the same `checkout.latency` shape",
+          "- error volume is flat, so this looks like slow path not hard fail",
+          "",
+          "Useful query:",
+          "```sql",
+          "SELECT percentile(duration, 0.95) AS p95",
+          "FROM transactions",
+          "WHERE transaction = 'checkout.complete'",
+          "  AND timestamp > now() - interval '2 hours'",
+          "GROUP BY 1",
+          "ORDER BY p95 DESC;",
+          "```",
+          "",
+          "Next step: compare the pre/post deploy spans, then decide whether to",
+          "roll back or patch the slow serializer path.",
+        ].join("\n"),
+      }),
     ],
   });
 }
 
 function dashboardQaConversation(nowMs: number): ConversationDetailReport {
-  const startedAt = iso(nowMs, -11 * 60_000);
+  // Keep outside the 3h Priority window so the personal sidebar shows Today too.
+  const startedAt = iso(nowMs, -5 * 60 * 60_000);
   return detail(nowMs, {
     conversationId: DASHBOARD_QA_CONVERSATION_ID,
     displayTitle: "Dashboard QA edge cases",
     startedAt,
-    lastSeenAt: iso(nowMs, -8 * 60_000),
-    lastProgressAt: iso(nowMs, -8 * 60_000),
+    lastSeenAt: iso(nowMs, -4 * 60 * 60_000),
+    lastProgressAt: iso(nowMs, -4 * 60 * 60_000),
     actorIdentity: actor("dev@example.com", "Morgan Lee", "morgan"),
     annotations: [
       {
@@ -849,12 +898,13 @@ function simpleConversation(
     sourceTask?: ConversationDetailReport["sourceTask"];
   },
 ): ConversationDetailReport {
-  const startedAt = iso(nowMs, -2 * 60 * 60_000);
+  // Keep these outside the 3h Priority window so the sidebar still shows Today.
+  const startedAt = iso(nowMs, -5 * 60 * 60_000);
   return detail(nowMs, {
     ...options,
     startedAt,
-    lastSeenAt: iso(nowMs, -110 * 60_000),
-    lastProgressAt: iso(nowMs, -110 * 60_000),
+    lastSeenAt: iso(nowMs, -4 * 60 * 60_000),
+    lastProgressAt: iso(nowMs, -4 * 60 * 60_000),
     actorIdentity: actor("ops@sentry.io", "Ops Bot", "ops"),
     cumulativeDurationMs: 12_000,
     events: [
