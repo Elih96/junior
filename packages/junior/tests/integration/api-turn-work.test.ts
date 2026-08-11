@@ -163,6 +163,15 @@ describe("api turn conversation work", () => {
     );
     expect(observedActorPlatform).toBe("web");
 
+    // Title generation is automatic on human transcript persist and may finish
+    // just after the worker returns completed.
+    await vi.waitFor(async () => {
+      const stored = await conversationStore.get({
+        conversationId: accepted.conversationId,
+      });
+      expect(stored?.title?.trim().length).toBeGreaterThan(0);
+    });
+
     const messages = (
       await getConversationEventStore().loadMessageHistory(
         accepted.conversationId,
