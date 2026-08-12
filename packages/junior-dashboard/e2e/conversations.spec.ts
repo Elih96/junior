@@ -346,6 +346,45 @@ test("opens and closes a conversation in the mobile workspace", async ({
   await composer.focus();
   await expect(composer).toBeFocused();
 
+  const shell = page.locator("main").first();
+  await page.evaluate(() => {
+    Object.defineProperties(window.visualViewport, {
+      height: { configurable: true, value: 520 },
+      offsetTop: { configurable: true, value: 140 },
+    });
+    window.visualViewport?.dispatchEvent(new Event("resize"));
+  });
+  await expect
+    .poll(() =>
+      shell.evaluate((element) =>
+        element.style.getPropertyValue("--dashboard-viewport-height"),
+      ),
+    )
+    .toBe("520px");
+  await expect
+    .poll(() =>
+      shell.evaluate((element) =>
+        element.style.getPropertyValue("--dashboard-viewport-offset-top"),
+      ),
+    )
+    .toBe("140px");
+
+  // Offset can change from a visualViewport scroll without a resize.
+  await page.evaluate(() => {
+    Object.defineProperties(window.visualViewport, {
+      height: { configurable: true, value: 520 },
+      offsetTop: { configurable: true, value: 180 },
+    });
+    window.visualViewport?.dispatchEvent(new Event("scroll"));
+  });
+  await expect
+    .poll(() =>
+      shell.evaluate((element) =>
+        element.style.getPropertyValue("--dashboard-viewport-offset-top"),
+      ),
+    )
+    .toBe("180px");
+
   await page.getByRole("button", { name: "Show transcript tools" }).click();
   await expect(page.getByPlaceholder("Search transcript…")).toBeVisible();
   await expect(
