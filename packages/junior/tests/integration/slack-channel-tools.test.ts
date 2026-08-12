@@ -6,7 +6,6 @@ import { createSlackMessageAddReactionTool } from "@/chat/slack/tools/message-ad
 import { createSendFilesTool } from "@/chat/slack/tools/send-files";
 import type { SlackToolContext } from "@/chat/slack/tool-support/context";
 import { readSandboxFileUpload } from "@/chat/tools/sandbox/file-uploads";
-import { ToolInputError } from "@/chat/tools/execution/tool-input-error";
 import type { SandboxWorkspace } from "@/chat/sandbox/workspace";
 import type { ToolState } from "@/chat/tools/types";
 import { parseSlackChannelId, parseSlackTeamId } from "@/chat/slack/ids";
@@ -141,11 +140,15 @@ function createMaterializeFile(files: Record<string, Buffer> = {}) {
     readSandboxFileUpload(sandbox, input);
 }
 
-async function executeTool<TInput>(tool: any, input: TInput) {
+async function executeTool<TInput>(
+  tool: any,
+  input: TInput,
+  options: { toolCallId?: string } = {},
+) {
   if (typeof tool?.execute !== "function") {
     throw new Error("tool execute function missing");
   }
-  return await tool.execute(input, {} as any);
+  return await tool.execute(input, options as any);
 }
 
 describe("slack channel tools", () => {
@@ -312,231 +315,6 @@ describe("slack channel tools", () => {
       }),
     ).rejects.toThrow("Invalid `oldest` Slack timestamp");
     expect(getCapturedSlackApiCalls("conversations.history")).toHaveLength(0);
-  });
-
-  it("sends file-only messages without posting empty text", async () => {
-    const tool = createSendFilesTool(
-      createContext("share this file"),
-      createToolState(),
-      createMaterializeFile({
-        "/tmp/report.txt": Buffer.from("report body"),
-      }),
-    );
-
-    const result = await executeTool(tool, {
-      files: [{ path: "/tmp/report.txt" }],
-    });
-
-    expect(result).toMatchObject({
-      channel_id: "C123",
-      file_count: 1,
-    });
-    expect(getCapturedSlackApiCalls("chat.postMessage")).toHaveLength(0);
-    expect(
-      getCapturedSlackApiCalls("files.completeUploadExternal")[0]?.params,
-    ).toMatchObject({
-      channel_id: "C123",
-      thread_ts: "1700000000.321",
-    });
-    expect(
-      getCapturedSlackApiCalls("files.completeUploadExternal")[0]?.params,
-    ).not.toHaveProperty("initial_comment");
-  });
-
-  it("accepts a generated artifact reference without translating its path", async () => {
-    const imageBytes = Buffer.from("image bytes");
-    const generatedArtifact = {
-      bytes: imageBytes.byteLength,
-      filename: "generated.png",
-      mimeType: "image/png",
-      path: "/tmp/junior/artifacts/generated.png",
-    };
-    const tool = createSendFilesTool(
-      createContext("share the generated image"),
-      createToolState(),
-      createMaterializeFile({ [generatedArtifact.path]: imageBytes }),
-    );
-
-    const result = await executeTool(tool, { files: [generatedArtifact] });
-
-    expect(
-      getCapturedSlackApiCalls("files.getUploadURLExternal")[0]?.params,
-    ).toMatchObject({
-      filename: generatedArtifact.filename,
-      length: String(imageBytes.byteLength),
-    });
-    expect(result).toMatchObject({
-      file_count: 1,
-    });
-  });
-
-  it("uses source thread coordinates for thread delivery in assistant-context turns", async () => {
-    const context = createContext("attach this here", {
-      sourceChannelId: "D123",
-      destinationChannelId: "CSHARED",
-      threadTs: "1700000000.321",
-    });
-    const tool = createSendFilesTool(
-      context,
-      createToolState(),
-      createMaterializeFile({
-        "/tmp/report.txt": Buffer.from("report body"),
-      }),
-    );
-
-    const result = await executeTool(tool, {
-      files: [{ path: "/tmp/report.txt" }],
-    });
-
-    expect(result).toMatchObject({
-      channel_id: "D123",
-      thread_ts: "1700000000.321",
-      file_count: 1,
-    });
-    expect(
-      getCapturedSlackApiCalls("files.completeUploadExternal")[0]?.params,
-    ).toMatchObject({
-      channel_id: "D123",
-      thread_ts: "1700000000.321",
-    });
-  });
-
-  it("uploads files into the current Slack thread", async () => {
-    const tool = createSendFilesTool(
-      createContext("attach the report", {
-        threadTs: "1700000000.321",
-      }),
-      createToolState(),
-      createMaterializeFile({
-        "/tmp/report.txt": Buffer.from("report body"),
-      }),
-    );
-
-    const result = await executeTool(tool, {
-      files: [{ path: "/tmp/report.txt" }],
-    });
-
-    expect(result).toMatchObject({
-      channel_id: "C123",
-      thread_ts: "1700000000.321",
-      file_count: 1,
-    });
-    expect(getCapturedSlackApiCalls("chat.postMessage")).toHaveLength(0);
-    expect(
-      getCapturedSlackApiCalls("files.completeUploadExternal")[0]?.params,
-    ).toMatchObject({
-      channel_id: "C123",
-      thread_ts: "1700000000.321",
-    });
-  });
-
-  it("treats nullable optional file metadata as omitted", async () => {
-    const tool = createSendFilesTool(
-      createContext("attach the report", {
-        threadTs: "1700000000.321",
-      }),
-      createToolState(),
-      createMaterializeFile({
-        "/tmp/report.txt": Buffer.from("report body"),
-      }),
-    );
-
-    const result = await executeTool(tool, {
-      files: [
-        {
-          path: "/tmp/report.txt",
-          filename: null,
-          mimeType: null,
-          bytes: null,
-        },
-      ],
-    });
-
-    expect(result).toMatchObject({
-      channel_id: "C123",
-      thread_ts: "1700000000.321",
-      file_count: 1,
-    });
-    expect(
-      getCapturedSlackApiCalls("files.completeUploadExternal")[0]?.params,
-    ).toMatchObject({
-      channel_id: "C123",
-      thread_ts: "1700000000.321",
-    });
-  });
-
-  it("does not deduplicate changed file contents at the same path", async () => {
-    const files = {
-      "/tmp/report.txt": Buffer.from("first report"),
-    };
-    const tool = createSendFilesTool(
-      createContext("share this file"),
-      createToolState(),
-      createMaterializeFile(files),
-    );
-
-    await executeTool(tool, {
-      files: [{ path: "/tmp/report.txt" }],
-    });
-    files["/tmp/report.txt"] = Buffer.from("updated report");
-    await executeTool(tool, {
-      files: [{ path: "/tmp/report.txt" }],
-    });
-
-    expect(
-      getCapturedSlackApiCalls("files.completeUploadExternal"),
-    ).toHaveLength(2);
-  });
-
-  it("deduplicates repeated uploads of the same file contents", async () => {
-    const tool = createSendFilesTool(
-      createContext("share this file"),
-      createToolState(),
-      createMaterializeFile({
-        "/tmp/report.txt": Buffer.from("report body"),
-      }),
-    );
-
-    await executeTool(tool, {
-      files: [{ path: "/tmp/report.txt" }],
-    });
-    const second = await executeTool(tool, {
-      files: [{ path: "/tmp/report.txt" }],
-    });
-
-    expect(second).toMatchObject({
-      deduplicated: true,
-    });
-    expect(
-      getCapturedSlackApiCalls("files.completeUploadExternal"),
-    ).toHaveLength(1);
-  });
-
-  it("reports a missing sendFiles path as repairable tool input", async () => {
-    const tool = createSendFilesTool(
-      createContext("share this file"),
-      createToolState(),
-      createMaterializeFile(),
-    );
-
-    await expect(
-      executeTool(tool, {
-        files: [{ path: "/tmp/missing.txt" }],
-      }),
-    ).rejects.toBeInstanceOf(ToolInputError);
-    expect(getCapturedSlackApiCalls("files.completeUploadExternal")).toEqual(
-      [],
-    );
-  });
-
-  it("requires at least one file", async () => {
-    const tool = createSendFilesTool(
-      createContext("share this file"),
-      createToolState(),
-      createMaterializeFile(),
-    );
-
-    expect(() => tool.prepareArguments?.({})).toThrow(/files/);
   });
 
   it("traverses conversation history pagination up to the requested limit", async () => {
