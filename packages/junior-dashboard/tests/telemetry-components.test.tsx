@@ -431,30 +431,38 @@ describe("dashboard canonical-event components", () => {
     expect(html).not.toContain("Morgan Lee");
   });
 
-  it("shows a Slack icon for Slack user messages and Slack-outbound assistants", () => {
+  it("shows a Slack icon for Slack-origin messages only", () => {
     const slackHtml = renderTranscript(
       conversation(
         [
           event(0, {
-            messageId: "slack-user",
+            messageId: "unknown-user-source",
             role: "user",
-            text: "From Slack.",
+            text: "Unknown source.",
             type: "message",
           }),
           event(1, {
-            messageId: "slack-assistant",
-            role: "assistant",
-            text: "Posted to Slack.",
+            messageId: "slack-user",
+            role: "user",
+            source: "slack",
+            text: "From Slack.",
             type: "message",
           }),
           event(2, {
+            messageId: "slack-assistant",
+            role: "assistant",
+            source: "slack",
+            text: "Posted to Slack.",
+            type: "message",
+          }),
+          event(3, {
             messageId: "dashboard-user",
             role: "user",
             source: "web",
             text: "Continued from the dashboard.",
             type: "message",
           }),
-          event(3, {
+          event(4, {
             messageId: "dashboard-assistant",
             role: "assistant",
             source: "web",
@@ -479,7 +487,8 @@ describe("dashboard canonical-event components", () => {
 
     expect(slackHtml).toContain('aria-label="Slack"');
     expect(slackHtml).not.toContain(">Slack<");
-    expect(slackHtml.match(/aria-label="Slack"/g)).toHaveLength(3);
+    // Known Slack user + assistant only. Null/web stay unmarked.
+    expect(slackHtml.match(/aria-label="Slack"/g)).toHaveLength(2);
     expect(dashboardRootHtml).not.toContain("Dashboard");
     expect(dashboardRootHtml).not.toContain('aria-label="Slack"');
   });
