@@ -1,4 +1,53 @@
 # Changelog
+## 0.155.0
+
+### New Features ✨
+
+#### Dashboard
+
+- Show Slack source icon in transcripts by @sentry-junior in [#1476](https://github.com/getsentry/junior/pull/1476)
+- Prioritize recent unfinished work by @sentry-junior in [#1439](https://github.com/getsentry/junior/pull/1439)
+- Add installable shell manifest and icons by @sentry-junior in [#1462](https://github.com/getsentry/junior/pull/1462)
+- Show connection loss and protect drafts by @sentry-junior in [#1457](https://github.com/getsentry/junior/pull/1457)
+
+#### Other
+
+- (notion) Expose limited write tools by @sentry-junior in [#1480](https://github.com/getsentry/junior/pull/1480)
+- (sentry) Instrument Nitro app scaffolds by @dcramer in [#1463](https://github.com/getsentry/junior/pull/1463)
+
+### Bug Fixes 🐛
+
+#### Dashboard
+
+- Respect mobile safe-area insets by @sentry-junior in [#1474](https://github.com/getsentry/junior/pull/1474)
+- Pin secondary navigation to shell chrome by @sentry-junior in [#1469](https://github.com/getsentry/junior/pull/1469)
+- Materialize conversation participants for feed membership by @sentry-junior in [#1449](https://github.com/getsentry/junior/pull/1449)
+
+#### Other
+
+- (chat) Serialize conversation writes by @dcramer in [#1471](https://github.com/getsentry/junior/pull/1471)
+- (github) Resolve requester names via identity storage by @sentry-junior in [#1470](https://github.com/getsentry/junior/pull/1470)
+
+### Documentation 📚
+
+- (pi) Refresh agent integration skill by @dcramer in [#1467](https://github.com/getsentry/junior/pull/1467)
+
+### Internal Changes 🔧
+
+#### Dashboard
+
+- Cap e2e job at 15 minutes by @sentry-junior in [#1464](https://github.com/getsentry/junior/pull/1464)
+- Keep E2E focused on behavior by @sentry-junior in [#1458](https://github.com/getsentry/junior/pull/1458)
+
+#### Other
+
+- (deps) Bump pi packages to 0.84.1 by @sentry-junior in [#1473](https://github.com/getsentry/junior/pull/1473)
+- Run MCP tools through real agent loop by @dcramer in [#1475](https://github.com/getsentry/junior/pull/1475)
+- Harden agent integration boundaries by @dcramer in [#1472](https://github.com/getsentry/junior/pull/1472)
+- Run OAuth Slack resume through real agent by @dcramer in [#1466](https://github.com/getsentry/junior/pull/1466)
+- Remove simulated Slack file resume coverage by @dcramer in [#1459](https://github.com/getsentry/junior/pull/1459)
+- Run Slack continuation through real agent by @dcramer in [#1452](https://github.com/getsentry/junior/pull/1452)
+
 ## 0.154.0
 
 ### New Features ✨
