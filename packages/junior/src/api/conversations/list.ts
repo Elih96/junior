@@ -1,5 +1,5 @@
 import type { User } from "@sentry/junior-plugin-api";
-import { and, asc, desc, eq, isNull } from "drizzle-orm";
+import { and, asc, desc, eq, isNull, type SQL } from "drizzle-orm";
 import { getDb } from "@/chat/db";
 import type { Conversation } from "@/chat/conversations/store";
 import { locationFromRow } from "@/chat/conversations/sql/location";
@@ -14,6 +14,11 @@ import {
 import { resolveSlackTeamDomains } from "@/chat/slack/team-domain";
 import { conversationSummaryFromStoredConversation } from "./projection";
 import { readConversationAccessFromSql } from "./access";
+import {
+  conversationHasParticipantEmail,
+  conversationHasParticipantUser,
+  viewerConversationMembership,
+} from "./membership";
 import { conversationFeedSchema } from "../schema/conversation";
 import type { ConversationFeed } from "../schema/conversation";
 import { readRootConversationMetricsFromSql } from "./usage";
@@ -21,12 +26,30 @@ import { readConversationAuxiliaryCostsFromSql } from "./auxiliary-costs";
 
 const CONVERSATION_FEED_LIMIT = 50;
 
+type ConversationFeedMembership =
+  | { kind: "viewer"; userId: string }
+  | { kind: "actorEmail"; email: string };
+
+function conversationFeedMembershipFilter(
+  filter?: ConversationFeedMembership,
+): SQL | undefined {
+  if (!filter) return undefined;
+  if (filter.kind === "viewer") {
+    return viewerConversationMembership({
+      actorMatch: eq(juniorIdentities.userId, filter.userId),
+      participantMatch: conversationHasParticipantUser(filter.userId),
+    });
+  }
+  return viewerConversationMembership({
+    actorMatch: eq(juniorUsers.primaryEmailNormalized, filter.email),
+    participantMatch: conversationHasParticipantEmail(filter.email),
+  });
+}
+
 async function conversationRows(
   db: JuniorDatabase,
   limit: number,
-  filter?:
-    | { kind: "viewer"; userId: string }
-    | { kind: "actorEmail"; email: string },
+  filter?: ConversationFeedMembership,
 ) {
   return db
     .select({
@@ -54,11 +77,7 @@ async function conversationRows(
       and(
         isNull(juniorConversations.parentConversationId),
         isNull(juniorConversations.archivedAt),
-        filter?.kind === "viewer"
-          ? eq(juniorIdentities.userId, filter.userId)
-          : filter?.kind === "actorEmail"
-            ? eq(juniorUsers.primaryEmailNormalized, filter.email)
-            : undefined,
+        conversationFeedMembershipFilter(filter),
       ),
     )
     .orderBy(
@@ -175,26 +194,30 @@ export async function readConversationRecordFromSql(
     : undefined;
 }
 
-/** Prefer the authenticated viewer user id; fall back to actor email. */
+/** Prefer the authenticated viewer; fall back to actor email membership. */
 function conversationFeedFilter(options: {
   actorEmail?: string;
   viewer?: User;
-}):
-  | { kind: "viewer"; userId: string }
-  | { kind: "actorEmail"; email: string }
-  | undefined {
+}): ConversationFeedMembership | undefined {
   if (options.viewer) {
-    return { kind: "viewer", userId: options.viewer.id };
+    return {
+      kind: "viewer",
+      userId: options.viewer.id,
+    };
   }
   if (options.actorEmail) {
-    return { kind: "actorEmail", email: options.actorEmail };
+    return {
+      kind: "actorEmail",
+      email: options.actorEmail,
+    };
   }
   return undefined;
 }
 
 /**
  * Build a bounded dashboard feed. Prefer the viewer user when present; otherwise
- * keep only roots linked to actorEmail before applying the limit.
+ * keep only roots linked to actorEmail before applying the limit. Membership is
+ * root-actor ownership or a materialized participant row for that person.
  */
 export async function readConversationFeedFromSql(
   options: {
