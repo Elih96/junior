@@ -1,4 +1,28 @@
 # Changelog
+## 0.152.0
+
+### Bug Fixes 🐛
+
+#### Dashboard
+
+- Scroll conversations to the end by @sentry-junior in [#1424](https://github.com/getsentry/junior/pull/1424)
+- Densify conversation chrome and improve type by @sentry-junior in [#1433](https://github.com/getsentry/junior/pull/1433)
+
+#### Other
+
+- (github) Sync pull request annotation state by @sentry-junior in [#1435](https://github.com/getsentry/junior/pull/1435)
+- (otel) Use canonical HTTP resend count attribute by @sentry-junior in [#1442](https://github.com/getsentry/junior/pull/1442)
+- (web) Enable interactive provider authorization by @sentry-junior in [#1440](https://github.com/getsentry/junior/pull/1440)
+
+### Internal Changes 🔧
+
+- (warden) Enable built-in code review by @sentry-junior in [#1437](https://github.com/getsentry/junior/pull/1437)
+- Run child concurrency through real agents by @dcramer in [#1443](https://github.com/getsentry/junior/pull/1443)
+- Run child agent resume through real loop by @dcramer in [#1441](https://github.com/getsentry/junior/pull/1441)
+- Run child agent invocation through real loop by @dcramer in [#1438](https://github.com/getsentry/junior/pull/1438)
+- Run agent dispatch through real loop by @dcramer in [#1436](https://github.com/getsentry/junior/pull/1436)
+- Enforce integration test boundaries by @dcramer in [#1434](https://github.com/getsentry/junior/pull/1434)
+
 ## 0.151.0
 
 ### New Features ✨
