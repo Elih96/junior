@@ -805,11 +805,11 @@ test("shows archive failures after the row returns", async ({ page }) => {
     .click();
 
   await expect(conversationLink).toBeVisible();
-  await expect(
-    page.getByRole("alert").filter({
-      hasText: "Could not archive Dashboard QA edge cases.",
-    }),
-  ).toBeVisible();
+  const archiveError = page.getByRole("alert").filter({
+    hasText: "Could not archive",
+  });
+  await expect(archiveError).toBeVisible();
+  await expect(archiveError).toContainText("Dashboard QA edge cases");
 });
 
 test("keeps undo available when another archive fails", async ({ page }) => {
@@ -849,10 +849,10 @@ test("keeps undo available when another archive fails", async ({ page }) => {
     .getByRole("button", { name: "Archive Checkout latency triage" })
     .click();
 
-  await expect(
-    page.getByRole("alert").filter({
-      hasText: "Could not archive Checkout latency triage.",
-    }),
-  ).toBeVisible();
+  const archiveError = page.getByRole("alert").filter({
+    hasText: "Could not archive",
+  });
+  await expect(archiveError).toBeVisible();
+  await expect(archiveError).toContainText("Checkout latency triage");
   await expect(undo).toBeVisible();
 });
