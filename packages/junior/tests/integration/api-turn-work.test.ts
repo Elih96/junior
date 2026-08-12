@@ -11,6 +11,7 @@ import {
   routeApiTurnWork,
 } from "@/chat/api-turns/work";
 import { getConversationEventStore } from "@/chat/db";
+import { getWebAuthorization } from "@/chat/api-turns/authorization";
 import { processConversationQueueMessage } from "@/chat/task-execution/vercel-callback";
 import {
   getTurnRecord,
@@ -198,6 +199,83 @@ describe("api turn conversation work", () => {
     ).resolves.toMatchObject({
       publishExternally: false,
       state: "completed",
+      surface: "api",
+    });
+  });
+
+  it("parks web turns for participant-only authorization", async () => {
+    const { actor, conversationStore, queue, state } =
+      await createApiTurnWorkFixture();
+    const accepted = await createAndEnqueueApiConversation(
+      {
+        actor,
+        idempotencyKey: "web-auth-1",
+        message: "Use Hex.",
+      },
+      { conversationStore, queue, state },
+    );
+    const worker = createApiTurnWorker({
+      agentRunner: {
+        run: async (request) => {
+          expect(request.disabledFeatures).toBeUndefined();
+          expect(request.authorization).toBeDefined();
+          await request.authorization!.deliver({
+            authorizationUrl: "https://example.com/authorize",
+            completionText: "Junior will continue automatically.",
+            label: "Connect Hex",
+          });
+          await saveTurnCheckpoint({
+            mode: "paused",
+            conversationId: request.conversationId,
+            turnId: request.turnId,
+            sliceId: 1,
+            reason: "auth",
+            messages: [
+              {
+                role: "user",
+                content: [{ type: "text", text: "Use Hex." }],
+                timestamp: Date.now(),
+              },
+            ],
+            destination: request.destination,
+            publishExternally: false,
+            source: request.source,
+            actor: request.actor,
+            surface: "api",
+          });
+          return {
+            status: "awaiting_auth",
+            providerDisplayName: "Hex",
+          };
+        },
+      },
+    });
+
+    await expect(
+      processConversationQueueMessage(queue.takeMessage(), {
+        conversationStore,
+        queue,
+        run: worker,
+        state,
+      }),
+    ).resolves.toMatchObject({ status: "completed" });
+    await expect(
+      getWebAuthorization({
+        actorId: actor.userId,
+        conversationId: accepted.conversationId,
+      }),
+    ).resolves.toMatchObject({
+      authorizationUrl: "https://example.com/authorize",
+      label: "Connect Hex",
+    });
+    await expect(
+      getTurnRecord(
+        accepted.conversationId,
+        apiTurnIdForMessage(accepted.messageId),
+      ),
+    ).resolves.toMatchObject({
+      resumeReason: "auth",
+      state: "paused",
       surface: "api",
     });
   });

@@ -44,10 +44,12 @@ import {
 import {
   getConversationTurnBoundaryError,
   isTurnInputCommitLostError,
+  markTurnClosed,
   markTurnFailed,
   startActiveTurn,
   TurnInputCommitLostError,
 } from "@/chat/runtime/turn";
+import { completeAuthPauseTurn } from "@/chat/runtime/auth-pause-state";
 import { getTurnUserMessage } from "@/chat/runtime/turn-user-message";
 import { getAssistantReplyText } from "@/chat/services/assistant-reply";
 import {
@@ -67,6 +69,7 @@ import {
 } from "@/chat/task-execution/store";
 import type { ConversationWorkQueue } from "@/chat/task-execution/queue";
 import {
+  abandonTurnRecord,
   getTurnRecord,
   listTurnSummaries,
   saveTurnCheckpoint,
@@ -82,6 +85,10 @@ import {
 import type { SandboxRef } from "@/chat/sandbox/ref";
 import type { AgentRunResult } from "@/chat/services/turn-result";
 import type { StoredSlackActor } from "@/chat/actor";
+import {
+  createWebAuthorization,
+  deleteWebAuthorization,
+} from "@/chat/api-turns/authorization";
 
 const apiTurnMailboxMetadataSchema = z
   .object({
@@ -630,6 +637,42 @@ export function createApiTurnWorker(options: {
           startedAtMs = userMessage.createdAtMs;
           inputMessageIds = [userMessageId];
         } else {
+          // Match Slack: a newer user message supersedes an auth-parked turn
+          // instead of leaving two active API turns or letting a late OAuth
+          // wake resume stale work.
+          const authParked = (
+            await listTurnSummaries(context.conversationId)
+          ).filter(
+            (summary) =>
+              summary.surface === "api" &&
+              !summary.dispatchId &&
+              summary.state === "paused" &&
+              summary.resumeReason === "auth",
+          );
+          for (const parked of authParked) {
+            await abandonTurnRecord({
+              conversationId: context.conversationId,
+              turnId: parked.turnId,
+              errorMessage:
+                "Auth-parked session superseded by a new user message",
+            });
+            // Keep pendingAuth: MCP OAuth still needs it to accept an in-flight
+            // connect and store credentials. The abandoned turn record makes a
+            // late callback a resume no-op, matching Slack supersede behavior.
+            markTurnClosed({
+              conversation,
+              nowMs: Date.now(),
+              sessionId: parked.turnId,
+            });
+          }
+          if (authParked.length > 0) {
+            // Drop the dashboard connect prompt so a superseded OAuth flow
+            // cannot leave a stale banner after the user moves on.
+            await deleteWebAuthorization({
+              actorId: actor.userId,
+              conversationId: context.conversationId,
+            });
+          }
           upsertConversationMessage(conversation, {
             id: userMessageId,
             role: "user",
@@ -737,7 +780,10 @@ export function createApiTurnWorker(options: {
             publishExternally: false,
             source,
             surface: "api",
-            disabledFeatures: ["interactive-auth"] as const,
+            authorization: createWebAuthorization({
+              actorId: actor.userId,
+              conversationId: context.conversationId,
+            }),
             state: {
               pendingAuth: conversation.processing.pendingAuth,
               sandboxRef,
@@ -753,16 +799,34 @@ export function createApiTurnWorker(options: {
                   sandboxRef,
                 });
               },
+              recordPendingAuth: async (pendingAuth) => {
+                conversation.processing.pendingAuth = pendingAuth;
+                await persistThreadStateById(context.conversationId, {
+                  conversation,
+                  sandboxRef,
+                });
+              },
             },
           });
 
           if (outcome.status === "suspended") {
             return { status: "yielded" };
           }
-          if (outcome.status !== "completed") {
-            throw new Error(`API agent run ended with ${outcome.status}`);
+          if (outcome.status === "awaiting_auth") {
+            // Close the live turn the same way Slack does after private-link
+            // delivery. The turn record stays paused for OAuth resume; only
+            // the conversation active pointer is cleared.
+            completeAuthPauseTurn({
+              conversation,
+              sessionId: turnId,
+            });
+            await persistThreadStateById(context.conversationId, {
+              conversation,
+              sandboxRef,
+            });
+            await acknowledge();
+            return { status: "completed" };
           }
-
           reply = outcome.result;
           modelFailureCaptureAttempted =
             reply.diagnostics.outcome !== "success";

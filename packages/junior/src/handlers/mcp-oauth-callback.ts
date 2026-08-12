@@ -55,8 +55,10 @@ import {
   recordAuthenticationLinked,
   recordAuthorizationCompleted,
 } from "@/chat/conversations/projection";
+import { botConfig } from "@/chat/config";
 import { formatProviderLabel } from "@/chat/oauth-flow";
 import { markTurnFailed } from "@/chat/runtime/turn";
+import type { ConversationWorkQueue } from "@/chat/task-execution/queue";
 import { wakePausedTurn } from "@/chat/task-execution/turn-wake";
 import {
   resolveTurnSessionRouting,
@@ -67,45 +69,47 @@ import type { WaitUntilFn } from "@/handlers/types";
 import { createSlackResumeActor, type Actor } from "@/chat/actor";
 import { requireSlackDestination } from "@/chat/destination";
 import { relayLocalOAuthCallback } from "@/chat/local/oauth-relay";
+import { deleteWebAuthorization } from "@/chat/api-turns/authorization";
 
-const CALLBACK_PAGES = {
-  missing_state: {
-    title: "Authorization failed",
-    message: "Missing state parameter.",
-    status: 400,
-  },
-  provider_error: {
-    title: "Authorization failed",
-    message: "The provider returned an authorization error.",
-    status: 400,
-  },
-  missing_code: {
-    title: "Authorization failed",
-    message: "Missing code parameter.",
-    status: 400,
-  },
-  expired: {
-    title: "Authorization expired",
-    message:
-      "This authorization link is no longer active. Return to Junior and retry the original request.",
-    status: 400,
-  },
-  success: {
-    title: "Authorization complete",
-    message:
-      "Your MCP access is connected. Junior will continue the paused request in Slack.",
-    status: 200,
-  },
-  failure: {
-    title: "Authorization failed",
-    message:
-      "Junior could not finish the authorization callback. Return to Junior and retry the original request.",
-    status: 500,
-  },
-} as const;
+function callbackPages(botName: string) {
+  return {
+    missing_state: {
+      title: "Authorization failed",
+      message: "Missing state parameter.",
+      status: 400,
+    },
+    provider_error: {
+      title: "Authorization failed",
+      message: "The provider returned an authorization error.",
+      status: 400,
+    },
+    missing_code: {
+      title: "Authorization failed",
+      message: "Missing code parameter.",
+      status: 400,
+    },
+    expired: {
+      title: "Authorization expired",
+      message: `This authorization link is no longer active. Return to ${botName} and retry the original request.`,
+      status: 400,
+    },
+    success: {
+      title: "Authorization complete",
+      message: `Your MCP access is connected. ${botName} will continue the paused request.`,
+      status: 200,
+    },
+    failure: {
+      title: "Authorization failed",
+      message: `${botName} could not finish the authorization callback. Return to ${botName} and retry the original request.`,
+      status: 500,
+    },
+  } as const;
+}
 
 interface McpOAuthCallbackOptions {
   agentRunner: AgentRunner;
+  /** Queue used to wake parked web turns after authorization completes. */
+  conversationWorkQueue?: ConversationWorkQueue;
 }
 
 class McpOAuthAttemptExpiredError extends Error {
@@ -123,20 +127,21 @@ function mcpAuthorizationId(args: {
 }
 
 function htmlResponse(
-  kind: keyof typeof CALLBACK_PAGES,
+  kind: keyof ReturnType<typeof callbackPages>,
   options?: { local?: boolean },
 ): Response {
+  const botName = botConfig.userName;
+  const pages = callbackPages(botName);
   const page =
     kind === "success" && options?.local
       ? {
-          ...CALLBACK_PAGES.success,
-          message:
-            "Your MCP access is connected. Junior will continue the paused request in the local client.",
+          ...pages.success,
+          message: `Your MCP access is connected. ${botName} will continue the paused request in the local client.`,
         }
-      : CALLBACK_PAGES[kind];
+      : pages[kind];
   const footerMessage =
     kind === "success" && !options?.local
-      ? "You can close this tab and return to Slack."
+      ? `You can close this tab and return to ${botName}.`
       : undefined;
   return htmlCallbackResponse(page.title, page.message, page.status, {
     footerMessage,
@@ -503,7 +508,10 @@ async function isCurrentMcpAuthorizationAttempt(
 function mcpConversationId(
   authSession: McpAuthSessionState,
 ): string | undefined {
-  if (authSession.destination?.platform === "local") {
+  if (
+    authSession.destination?.platform === "local" ||
+    authSession.source?.platform === "web"
+  ) {
     return authSession.conversationId;
   }
   if (authSession.channelId && authSession.threadTs) {
@@ -621,7 +629,44 @@ export async function GET(
       });
     }
 
-    if (authSession.destination?.platform !== "local") {
+    if (authSession.source?.platform === "web" && authSession.destination) {
+      waitUntil(async () => {
+        const turn = await getTurnRecord(
+          authSession.conversationId,
+          authSession.sessionId,
+        );
+        // Always clear the dashboard prompt. A superseded/abandoned turn must
+        // not leave a stale connect banner after OAuth completes late.
+        await deleteWebAuthorization({
+          actorId: authSession.userId,
+          conversationId: authSession.conversationId,
+        });
+        if (!turn || turn.state !== "paused" || turn.resumeReason !== "auth") {
+          return;
+        }
+        await recordAuthorizationCompleted({
+          conversationId: authSession.conversationId,
+          kind: "mcp",
+          provider,
+          actorId: authSession.userId,
+          authorizationId: mcpAuthorizationId({
+            provider,
+            sessionId: authSession.sessionId,
+          }),
+        });
+        await wakePausedTurn(
+          {
+            conversationId: authSession.conversationId,
+            destination: authSession.destination!,
+            turnId: authSession.sessionId,
+            expectedVersion: turn.version,
+          },
+          options.conversationWorkQueue
+            ? { queue: options.conversationWorkQueue }
+            : undefined,
+        );
+      });
+    } else if (authSession.destination?.platform !== "local") {
       waitUntil(() =>
         resumeAuthorizedMcpTurn({
           authSession,
@@ -632,7 +677,11 @@ export async function GET(
     }
 
     return htmlResponse("success", {
-      local: authSession.destination?.platform === "local",
+      // Web roots keep a local destination for conversation-only delivery.
+      // Only the CLI path should get the local-client success copy.
+      local:
+        authSession.destination?.platform === "local" &&
+        authSession.source?.platform !== "web",
     });
   } catch (callbackError) {
     if (callbackError instanceof McpOAuthAttemptExpiredError) {
