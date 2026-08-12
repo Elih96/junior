@@ -1,4 +1,10 @@
 # Changelog
+## 0.153.0
+
+### Bug Fixes 🐛
+
+- (api) Prefer viewer for personal conversation feed by @sentry-junior in [#1445](https://github.com/getsentry/junior/pull/1445)
+
 ## 0.152.0
 
 ### Bug Fixes 🐛
