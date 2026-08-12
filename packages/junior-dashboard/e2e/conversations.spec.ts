@@ -485,7 +485,8 @@ test("scrolls long conversation and transcript panes independently", async ({
   );
   expect(
     await transcript.evaluate(
-      (element) => element.scrollTop + element.clientHeight >= element.scrollHeight - 1,
+      (element) =>
+        element.scrollTop + element.clientHeight >= element.scrollHeight - 1,
     ),
   ).toBe(true);
   expect(await page.evaluate(() => window.scrollY)).toBe(0);
@@ -596,7 +597,6 @@ test("inspects and copies an advisor transcript", async ({ context, page }) => {
 test("archives and restores a conversation from the sidebar", async ({
   page,
 }) => {
-  const initialTime = Date.now();
   await page.setViewportSize({ height: 900, width: 1600 });
   let archived = false;
   await page.route(/\/api\/conversations(?:\?.*)?$/, async (route) => {
@@ -641,36 +641,26 @@ test("archives and restores a conversation from the sidebar", async ({
   await conversationLink.hover();
 
   const currentUrl = page.url();
+  const emptyView = page.getByText("No conversations match this view.");
   const archiveRequestPromise = page.waitForRequest(
     (request) =>
       request.method() === "PATCH" && request.url().endsWith("/archive"),
   );
   await archiveButton.click();
-  const emptyView = page.getByText("No conversations match this view.");
+  // Optimistic pending keeps the row while the 1s archive mock is in flight.
   await expect(emptyView).toHaveCount(0);
-  const archiveFocusRefetch = page.waitForResponse(
-    (response) =>
-      response.request().method() === "GET" &&
-      /\/api\/conversations(?:\?.*)?$/.test(response.url()),
-  );
-  await page.clock.setFixedTime(new Date(initialTime + 31_000));
-  await page.evaluate(() => {
-    window.dispatchEvent(new Event("focus"));
-    window.dispatchEvent(new Event("visibilitychange"));
-  });
-  await archiveFocusRefetch;
-  await expect(conversationLink).toHaveCount(0);
-  await expect(emptyView).toBeVisible();
   const archiveRequest = await archiveRequestPromise;
-
   expect(archiveRequest.postDataJSON()).toMatchObject({ archived: true });
   expect(page.url()).toBe(currentUrl);
-  await expect(
-    page.getByRole("status").filter({
-      hasText: "Dashboard QA edge cases archived",
-    }),
-  ).toBeVisible();
 
+  const undoNotice = page.getByRole("status").filter({
+    hasText: "Conversation archived",
+  });
+  await expect(undoNotice).toBeVisible();
+  await expect(undoNotice).toContainText("Dashboard QA edge cases");
+
+  // Undo immediately so the 6s expiry cannot race this path. Dedicated clock
+  // tests cover expiry; keep this test on archive/restore behavior only.
   const restoreRequestPromise = page.waitForRequest(
     (request) =>
       request.method() === "PATCH" && request.url().endsWith("/archive"),
@@ -681,32 +671,79 @@ test("archives and restores a conversation from the sidebar", async ({
     })
     .click();
   await expect(conversationLink).toBeVisible();
-  const restoreFocusRefetch = page.waitForResponse(
-    (response) =>
-      response.request().method() === "GET" &&
-      /\/api\/conversations(?:\?.*)?$/.test(response.url()),
-  );
-  await page.clock.setFixedTime(new Date(initialTime + 62_000));
-  await page.evaluate(() => {
-    window.dispatchEvent(new Event("focus"));
-    window.dispatchEvent(new Event("visibilitychange"));
-  });
-  await restoreFocusRefetch;
-  await expect(conversationLink).toBeVisible();
   await expect(
     page.getByRole("button", {
       name: "Undo archive for Dashboard QA edge cases",
     }),
   ).toHaveText("Restoring…");
   const restoreRequest = await restoreRequestPromise;
-
   expect(restoreRequest.postDataJSON()).toMatchObject({ archived: false });
-  await expect(
-    page.getByRole("status").filter({
-      hasText: "Dashboard QA edge cases archived",
-    }),
-  ).toHaveCount(0);
+  await expect(undoNotice).toHaveCount(0);
+  await expect(conversationLink).toBeVisible();
   expect(page.url()).toBe(currentUrl);
+});
+
+test("expires the archive undo notice", async ({ page }) => {
+  await page.clock.install();
+  await page.route("**/api/conversations/*/archive", async (route) => {
+    await route.fulfill({ json: { archived: true } });
+  });
+  await page.goto(server.baseURL);
+
+  const conversationLink = page.getByRole("link", {
+    name: /Dashboard QA edge cases/,
+  });
+  await conversationLink.hover();
+  await page
+    .getByRole("button", { name: "Archive Dashboard QA edge cases" })
+    .click();
+
+  const undo = page.getByRole("button", {
+    name: "Undo archive for Dashboard QA edge cases",
+  });
+  await expect(undo).toBeVisible();
+  await page.clock.fastForward(5_000);
+  await expect(undo).toBeVisible();
+  await page.clock.fastForward(1_000);
+  await expect(undo).toHaveCount(0);
+});
+
+test("resets the archive undo timer when archiving another conversation", async ({
+  page,
+}) => {
+  await page.clock.install();
+  await page.route("**/api/conversations/*/archive", async (route) => {
+    await route.fulfill({ json: { archived: true } });
+  });
+  await page.goto(server.baseURL);
+
+  await page.getByRole("link", { name: /Dashboard QA edge cases/ }).hover();
+  await page
+    .getByRole("button", { name: "Archive Dashboard QA edge cases" })
+    .click();
+  const firstUndo = page.getByRole("button", {
+    name: "Undo archive for Dashboard QA edge cases",
+  });
+  await expect(firstUndo).toBeVisible();
+
+  // Burn most of the first notice's timer, then archive a second conversation.
+  await page.clock.fastForward(5_000);
+  await page.getByRole("link", { name: /Checkout latency triage/ }).hover();
+  await page
+    .getByRole("button", { name: "Archive Checkout latency triage" })
+    .click();
+
+  const secondUndo = page.getByRole("button", {
+    name: "Undo archive for Checkout latency triage",
+  });
+  await expect(secondUndo).toBeVisible();
+  await expect(firstUndo).toHaveCount(0);
+
+  // A reused first-notice timer would dismiss here; a reset timer must remain.
+  await page.clock.fastForward(2_000);
+  await expect(secondUndo).toBeVisible();
+  await page.clock.fastForward(4_000);
+  await expect(secondUndo).toHaveCount(0);
 });
 
 test("shows archive failures after the row returns", async ({ page }) => {
