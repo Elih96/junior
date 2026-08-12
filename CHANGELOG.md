@@ -1,4 +1,37 @@
 # Changelog
+## 0.156.0
+
+### New Features ✨
+
+#### Dashboard
+
+- Tighten conversation visual hierarchy by @sentry-junior in [#1486](https://github.com/getsentry/junior/pull/1486)
+- Use a full-screen mobile navigation sheet by @sentry-junior in [#1482](https://github.com/getsentry/junior/pull/1482)
+
+#### Other
+
+- (attachments) Add conversation attachment storage by @sentry-junior in [#1465](https://github.com/getsentry/junior/pull/1465)
+
+### Bug Fixes 🐛
+
+#### Dashboard
+
+- Rank priority by assigned work and recency by @sentry-junior in [#1489](https://github.com/getsentry/junior/pull/1489)
+- Require known Slack message source by @sentry-junior in [#1488](https://github.com/getsentry/junior/pull/1488)
+- Keep mobile composer above keyboard by @sentry-junior in [#1483](https://github.com/getsentry/junior/pull/1483)
+- Expire archive undo notices by @sentry-junior in [#1481](https://github.com/getsentry/junior/pull/1481)
+
+#### Other
+
+- (memory) Admit recall by prompt budget instead of fixed N by @sentry-junior in [#1477](https://github.com/getsentry/junior/pull/1477)
+- (slack) Ignore bot mentions inside code blocks by @sentry-junior in [#1484](https://github.com/getsentry/junior/pull/1484)
+
+### Internal Changes 🔧
+
+- (dashboard) Add common notice component by @sentry-junior in [#1485](https://github.com/getsentry/junior/pull/1485)
+- (oauth) Exercise callback resumes through real agent by @dcramer in [#1487](https://github.com/getsentry/junior/pull/1487)
+- Run MCP OAuth callback through real agent by @dcramer in [#1479](https://github.com/getsentry/junior/pull/1479)
+
 ## 0.155.0
 
 ### New Features ✨
