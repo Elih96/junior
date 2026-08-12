@@ -73,7 +73,7 @@ export function ConversationSidebar(props: {
           value={props.query}
         />
       </div>
-      <div className="min-h-0 overflow-y-auto overscroll-contain px-2 pb-2">
+      <div className="min-h-0 overflow-y-auto overscroll-contain px-2 pb-[max(0.5rem,env(safe-area-inset-bottom))]">
         {props.error ? (
           <div className="p-3">
             <EmptyTelemetry>{props.error}</EmptyTelemetry>
@@ -117,7 +117,7 @@ export function ConversationSidebar(props: {
         )}
       </div>
       {archivedConversation || archiveError ? (
-        <div className="absolute bottom-3 left-3 right-3 z-20 grid gap-2">
+        <div className="absolute bottom-[max(0.75rem,env(safe-area-inset-bottom))] left-3 right-3 z-20 grid gap-2">
           {archiveError ? (
             <ArchiveConversationErrorNotice
               conversation={archiveError}
