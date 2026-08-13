@@ -190,7 +190,23 @@ export function createGitHubWebhookRoute(args: {
         }
       }
       if (issueOutcome) {
-        await recordGitHubIssueOutcome(args.db, issueOutcome);
+        const recordedOutcome = await recordGitHubIssueOutcome(
+          args.db,
+          issueOutcome,
+        );
+        if (recordedOutcome.applied && issueOutcome.state === "closed") {
+          await Promise.all(
+            recordedOutcome.conversationIds.map((conversationId) =>
+              args.annotations.forConversation(conversationId).upsert({
+                kind: "resource_link",
+                key: `${issueOutcome.repositoryFullName.toLowerCase()}#${issueOutcome.number}`,
+                label: `${issueOutcome.repositoryFullName}#${issueOutcome.number}`,
+                url: `https://github.com/${issueOutcome.repositoryFullName}/issues/${issueOutcome.number}`,
+                status: "closed",
+              }),
+            ),
+          );
+        }
       }
       const recordedIssueConversations = issueConversations
         ? await recordGitHubIssueConversations(args.db, issueConversations)

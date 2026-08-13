@@ -1009,6 +1009,70 @@ describe("GitHub-owned issue outcomes", () => {
       await fixture.close();
     }
   });
+
+  it("marks associated conversation resource annotations closed", async () => {
+    const fixture = await createGitHubFixture();
+    try {
+      const annotations: Array<{
+        annotation: ConversationAnnotationInput;
+        conversationId: string;
+      }> = [];
+      const route = webhookRoute(
+        fixture,
+        [],
+        undefined,
+        undefined,
+        undefined,
+        annotations,
+      );
+      expect(
+        (
+          await route.handler(
+            signedRequest(
+              issueLifecyclePayload({
+                createdAt: "2026-07-01T12:00:00.000Z",
+                id: 3020,
+                number: 990,
+              }),
+              "issues",
+            ),
+          )
+        ).status,
+      ).toBe(202);
+      expect(
+        (
+          await route.handler(
+            signedRequest(
+              issueLifecyclePayload({
+                action: "closed",
+                closedAt: "2026-07-03T12:00:00.000Z",
+                createdAt: "2026-07-01T12:00:00.000Z",
+                id: 3020,
+                number: 990,
+                updatedAt: "2026-07-03T12:00:00.000Z",
+              }),
+              "issues",
+            ),
+          )
+        ).status,
+      ).toBe(202);
+
+      expect(annotations).toEqual([
+        {
+          annotation: {
+            kind: "resource_link",
+            key: "getsentry/junior#990",
+            label: "getsentry/junior#990",
+            status: "closed",
+            url: "https://github.com/getsentry/junior/issues/990",
+          },
+          conversationId: "slack:C123:1712345.0001",
+        },
+      ]);
+    } finally {
+      await fixture.close();
+    }
+  });
 });
 
 describe("GitHub-owned pull request outcomes", () => {
