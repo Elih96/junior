@@ -30,6 +30,7 @@ vi.mock("@/chat/plugins/viewer", () => ({
   resolveViewerUser: resolveViewerUserMock,
 }));
 import {
+  applyPluginFormatMarkdown,
   createPluginHookRunner,
   getPluginApiRoutes,
   getPluginSystemPromptContributions,
@@ -210,6 +211,44 @@ describe("agent plugin hooks", () => {
         visibility: "private",
       }).visibility,
     ).toBe("private");
+  });
+
+  it("applies formatMarkdown transforms and fails open on plugin errors", () => {
+    const previous = setPlugins([
+      defineJuniorPlugin({
+        manifest: {
+          name: "a-demo",
+          displayName: "A Demo",
+          description: "A demo",
+        },
+        hooks: {
+          formatMarkdown({ text }) {
+            return text.replaceAll("alpha", "beta");
+          },
+        },
+      }),
+      defineJuniorPlugin({
+        manifest: {
+          name: "z-demo",
+          displayName: "Z Demo",
+          description: "Z demo",
+        },
+        hooks: {
+          formatMarkdown() {
+            throw new Error("boom");
+          },
+        },
+      }),
+    ]);
+    try {
+      expect(applyPluginFormatMarkdown("alpha one")).toBe("beta one");
+      expect(logWarnMock).toHaveBeenCalledWith(
+        "plugin.format_markdown.hook.failed",
+        expect.objectContaining({ "app.plugin.name": "z-demo" }),
+      );
+    } finally {
+      setPlugins(previous);
+    }
   });
 
   it("collects system prompt contributions from configured plugins", async () => {

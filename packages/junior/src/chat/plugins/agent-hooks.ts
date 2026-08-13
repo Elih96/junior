@@ -390,6 +390,30 @@ export function getPlugins(): PluginRegistration[] {
   return [...registeredPlugins];
 }
 
+/** Apply plugin Markdown rewrites before destination delivery formatting. */
+export function applyPluginFormatMarkdown(text: string): string {
+  let transformed = text;
+  for (const plugin of getPlugins()) {
+    const hook = plugin.hooks?.formatMarkdown;
+    if (!hook) {
+      continue;
+    }
+    try {
+      const next = hook({ text: transformed });
+      if (typeof next === "string") {
+        transformed = next;
+      }
+    } catch (error) {
+      // Fail open: reply delivery must not depend on optional provider formatting.
+      logWarn("plugin.format_markdown.hook.failed", {
+        "app.plugin.name": plugin.manifest.name,
+        "exception.message": safeErrorMessage(error),
+      });
+    }
+  }
+  return transformed;
+}
+
 /** Collect stable plugin prompt contributions for the static system prompt. */
 export async function getPluginSystemPromptContributions(
   source: ToolRuntimeContext["source"],

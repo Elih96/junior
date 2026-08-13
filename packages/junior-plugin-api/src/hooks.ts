@@ -35,6 +35,11 @@ import type {
   UserPromptContribution,
 } from "./prompt";
 
+/** Input for a pure Markdown rewrite before destination delivery formatting. */
+export interface FormatMarkdownHookContext {
+  text: string;
+}
+
 export interface PluginHooks {
   systemPrompt?(
     ctx: SystemPromptContext,
@@ -85,6 +90,8 @@ export interface PluginHooks {
   slackConversationLink?(
     ctx: SlackConversationLinkHookContext,
   ): SlackConversationLink | undefined;
+  /** Pure Markdown rewrite. Emit ordinary Markdown only. */
+  formatMarkdown?(ctx: FormatMarkdownHookContext): string;
   tools?(
     ctx: ToolRegistrationHookContext,
   ): Record<string, PluginToolDefinition>;

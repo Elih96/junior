@@ -50,6 +50,7 @@ import {
   configureGit,
   prepareCommitMsgHook,
 } from "./git-config.js";
+import { linkifyGitHubReferences } from "./reply-markdown.js";
 import {
   CREATE_TOOL_ROUTING_GUIDANCE,
   GITHUB_APP_ID_ENV,
@@ -735,6 +736,9 @@ export function githubPlugin(
       ],
     },
     hooks: {
+      formatMarkdown({ text }) {
+        return linkifyGitHubReferences(text);
+      },
       async unfinishedWork(ctx) {
         const db = ctx.db as GitHubDb;
         const [
