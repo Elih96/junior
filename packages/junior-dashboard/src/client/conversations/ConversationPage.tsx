@@ -54,6 +54,7 @@ export function ConversationPage(props: {
     useState<SubagentTranscriptTarget>();
   const [view, setView] = useState<TranscriptViewMode>("rich");
   const [search, setSearch] = useState("");
+  const [pinRequestVersion, setPinRequestVersion] = useState(0);
   const conversationId = props.conversationId;
   const summaries = props.data?.conversations.conversations ?? [];
   const conversations = buildConversations(summaries);
@@ -199,6 +200,7 @@ export function ConversationPage(props: {
                 live={conversationIsLive(visualStatus, detail.data)}
                 loadingPreviousPage={detail.isLoadingPreviousPage}
                 onLoadPreviousPage={detail.loadPreviousPage}
+                pinRequestVersion={pinRequestVersion}
                 responding={
                   !detail.error && conversationIsLive(visualStatus, detail.data)
                 }
@@ -237,18 +239,23 @@ export function ConversationPage(props: {
               <PendingMailboxStack
                 conversation={detail.data}
                 messages={detail.pendingMessages}
+                onRetry={(message) => {
+                  if (!message.idempotencyKey || !message.text) return;
+                  void appendMessage.mutateAsync({
+                    idempotencyKey: message.idempotencyKey,
+                    message: message.text,
+                  });
+                }}
               />
             ) : null}
             <ConversationComposer
               draftId={conversationId}
-              error={
-                appendMessage.error
-                  ? "Could not send the message. Try again."
-                  : undefined
-              }
               label="Continue this conversation"
-              pending={appendMessage.isPending}
               submitLabel="Send"
+              onFocus={() => setPinRequestVersion((version) => version + 1)}
+              onSubmitStart={() =>
+                setPinRequestVersion((version) => version + 1)
+              }
               onSubmit={async (message, idempotencyKey) => {
                 await appendMessage.mutateAsync({
                   idempotencyKey,
