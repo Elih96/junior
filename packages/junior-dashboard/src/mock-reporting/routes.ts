@@ -23,6 +23,7 @@ import {
   taskParamsSchema,
   taskRunListSchema,
 } from "@sentry/junior/api/schema";
+import { mockChartPng } from "./chart-png";
 import {
   readMockConversationDetail,
   readMockConversationEvents,
@@ -143,6 +144,39 @@ export function createMockReportingApi(): Hono<{
     return report
       ? jsonResponse(conversationDetailReportSchema, report)
       : errorResponse("Conversation not found.", 404);
+  });
+  // Fixed bodies so dashboard mock can exercise image/file attachment cards.
+  app.get("/conversations/:conversationId/attachments/:attachmentId", (c) => {
+    const conversationId = c.req.param("conversationId");
+    const attachmentId = c.req.param("attachmentId");
+    if (!conversationId || !attachmentId) {
+      return errorResponse("Invalid route parameters.", 400);
+    }
+    if (!readMockConversationDetail(conversationId)) {
+      return errorResponse("Conversation not found.", 404);
+    }
+    if (attachmentId === "qa-chart-png") {
+      return new Response(mockChartPng, {
+        headers: {
+          "cache-control": "private, no-store",
+          "content-disposition": 'inline; filename="chart.png"',
+          "content-type": "image/png",
+          "content-length": String(mockChartPng.byteLength),
+        },
+      });
+    }
+    if (attachmentId === "qa-notes-txt") {
+      const body = "mock attachment notes\n";
+      return new Response(body, {
+        headers: {
+          "cache-control": "private, no-store",
+          "content-disposition": 'attachment; filename="notes.txt"',
+          "content-type": "text/plain",
+          "content-length": String(Buffer.byteLength(body)),
+        },
+      });
+    }
+    return errorResponse("Attachment not found.", 404);
   });
   app.get("/tasks", () => jsonResponse(taskListSchema, readMockTaskList()));
   app.get("/tasks/runs", () => {

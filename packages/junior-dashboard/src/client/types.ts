@@ -78,7 +78,20 @@ export type TranscriptViewStructuredEventPart = {
   version: number;
 };
 
+export type TranscriptViewDeliveredAttachment = {
+  bytes: number;
+  contentType: string;
+  filename: string;
+  id: string;
+};
+
+export type TranscriptViewAttachmentsDeliveredPart = {
+  attachments: TranscriptViewDeliveredAttachment[];
+  type: "attachments_delivered";
+};
+
 export type TranscriptViewPart =
+  | TranscriptViewAttachmentsDeliveredPart
   | TranscriptViewContextEventPart
   | TranscriptViewStructuredEventPart
   | TranscriptViewReasoningPart

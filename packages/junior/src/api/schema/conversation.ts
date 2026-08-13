@@ -457,6 +457,23 @@ const conversationReportStructuredEventDataSchema = z
   })
   .strict();
 
+/** Public attachment metadata on conversation reports and transcript media. */
+const conversationReportDeliveredAttachmentSchema = z
+  .object({
+    id: z.string().min(1),
+    filename: z.string().min(1),
+    contentType: z.string().min(1),
+    bytes: z.number().int().nonnegative(),
+  })
+  .strict();
+
+const conversationReportAttachmentsDeliveredEventDataSchema = z
+  .object({
+    type: z.literal("attachments_delivered"),
+    attachments: z.array(conversationReportDeliveredAttachmentSchema).min(1),
+  })
+  .strict();
+
 const conversationReportCompactionEventDataSchema = z
   .object({
     type: z.literal("compaction"),
@@ -511,6 +528,7 @@ export const conversationReportEventDataSchema = z.discriminatedUnion("type", [
   conversationReportTurnLifecycleEventDataSchema,
   conversationReportTurnContextEventDataSchema,
   conversationReportStructuredEventDataSchema,
+  conversationReportAttachmentsDeliveredEventDataSchema,
   conversationReportTurnRoutedEventDataSchema,
   conversationReportGuardianActionReviewedEventDataSchema,
   conversationReportCompactionEventDataSchema,

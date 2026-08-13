@@ -1,8 +1,14 @@
 import { eq } from "drizzle-orm";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { createSlackSource } from "@sentry/junior-plugin-api";
 import type { AttachmentStorage } from "@/chat/attachments/storage";
 import { migrateSchema } from "@/chat/conversations/sql/migrations";
+import {
+  closeDb,
+  getConversationEventStore,
+  getConversationStore,
+  getSqlExecutor,
+} from "@/chat/db";
 import type { SandboxWorkspace } from "@/chat/sandbox/workspace";
 import { parseSlackChannelId, parseSlackTeamId } from "@/chat/slack/ids";
 import { createSendFilesTool } from "@/chat/slack/tools/send-files";
@@ -11,7 +17,7 @@ import { parseSlackMessageTs } from "@/chat/slack/timestamp";
 import { ToolInputError } from "@/chat/tools/execution/tool-input-error";
 import { readSandboxFileUpload } from "@/chat/tools/sandbox/file-uploads";
 import type { ToolState } from "@/chat/tools/types";
-import { juniorAttachments, juniorConversations } from "@/db/schema";
+import { juniorAttachments } from "@/db/schema";
 import { createLocalJuniorSqlFixture } from "../fixtures/sql";
 import { getCapturedSlackApiCalls } from "../msw/handlers/slack-api";
 
@@ -124,14 +130,20 @@ function createMaterializeFile(files: Record<string, Buffer> = {}) {
     readSandboxFileUpload(sandbox, input);
 }
 
-async function executeTool<TInput>(tool: any, input: TInput) {
+async function executeTool<
+  TInput,
+>(tool: any, input: TInput, options: { toolCallId?: string } = {}) {
   if (typeof tool?.execute !== "function") {
     throw new Error("tool execute function missing");
   }
-  return await tool.execute(input, {} as any);
+  return await tool.execute(input, options as any);
 }
 
 describe("Slack sendFiles", () => {
+  afterEach(async () => {
+    await closeDb();
+  });
+
   it("sends file-only messages without posting empty text", async () => {
     const tool = createSendFilesTool(
       createContext("share this file"),
@@ -276,160 +288,269 @@ describe("Slack sendFiles", () => {
     });
   });
 
-  it("stores files before Slack delivery", async () => {
-    const fixture = await createLocalJuniorSqlFixture();
-    try {
-      await migrateSchema(fixture.sql);
-      const now = new Date("2026-08-12T17:00:00.000Z");
-      await fixture.sql.db().insert(juniorConversations).values({
-        conversationId: "conversation-1",
-        createdAt: now,
-        lastActivityAt: now,
-        updatedAt: now,
-        executionStatus: "idle",
-      });
-      const puts: string[] = [];
-      const storage: AttachmentStorage = {
-        provider: "test",
-        get: async () => null,
-        put: async (input) => {
-          puts.push(input.key);
-        },
-        delete: async () => undefined,
-      };
-      const tool = createSendFilesTool(
-        createContext("attach the report"),
-        createToolState(),
-        createMaterializeFile({
-          "/tmp/report.txt": Buffer.from("report body"),
-        }),
-        {
-          conversationId: "conversation-1",
-          db: fixture.sql,
-          storage,
-        },
-      );
+  it("stores files and records delivered attachment transcript items", async () => {
+    const conversationId = "conversation-1";
+    await getConversationStore().recordActivity({
+      conversationId,
+      destination: {
+        channelId: "C123",
+        platform: "slack",
+        teamId: "T123",
+      },
+      nowMs: Date.parse("2026-08-12T17:00:00.000Z"),
+      source: "slack",
+      title: "Attachment delivery conversation",
+      visibility: "private",
+    });
+    const puts: string[] = [];
+    const storage: AttachmentStorage = {
+      provider: "test",
+      get: async () => null,
+      put: async (input) => {
+        puts.push(input.key);
+      },
+      delete: async () => undefined,
+    };
+    const tool = createSendFilesTool(
+      createContext("attach the report"),
+      createToolState(),
+      createMaterializeFile({
+        "/tmp/report.txt": Buffer.from("report body"),
+      }),
+      {
+        conversationId,
+        db: getSqlExecutor(),
+        storage,
+      },
+    );
 
-      const result = await executeTool(tool, {
+    const result = await executeTool(
+      tool,
+      {
         files: [{ path: "/tmp/report.txt" }],
-      });
-      // Clear in-process tool dedupe so a later call exercises durable reuse.
-      const retryTool = createSendFilesTool(
-        createContext("attach the report again"),
-        createToolState(),
-        createMaterializeFile({
-          "/tmp/report.txt": Buffer.from("report body"),
-        }),
-        {
-          conversationId: "conversation-1",
-          db: fixture.sql,
-          storage,
-        },
-      );
-      const retry = await executeTool(retryTool, {
+      },
+      { toolCallId: "call-send-1" },
+    );
+    // Clear in-process tool dedupe so a later call exercises durable reuse.
+    const retryTool = createSendFilesTool(
+      createContext("attach the report again"),
+      createToolState(),
+      createMaterializeFile({
+        "/tmp/report.txt": Buffer.from("report body"),
+      }),
+      {
+        conversationId,
+        db: getSqlExecutor(),
+        storage,
+      },
+    );
+    const retry = await executeTool(
+      retryTool,
+      {
         files: [{ path: "/tmp/report.txt" }],
-      });
+      },
+      { toolCallId: "call-send-2" },
+    );
 
-      const rows = await fixture.sql.db().select().from(juniorAttachments);
-      expect(result.attachment_refs).toEqual([
-        { id: rows[0]?.id, name: "report.txt" },
-      ]);
-      expect(retry.attachment_refs).toEqual([
-        { id: rows[0]?.id, name: "report.txt" },
-      ]);
-      expect(rows).toHaveLength(1);
-      expect(rows[0]).toMatchObject({
-        conversationId: "conversation-1",
-        filename: "report.txt",
-        provider: "test",
-      });
-      expect(puts).toEqual([rows[0]?.storageKey]);
-      expect(
-        getCapturedSlackApiCalls("files.completeUploadExternal"),
-      ).toHaveLength(2);
-    } finally {
-      await fixture.close();
-    }
+    const rows = await getSqlExecutor().db().select().from(juniorAttachments);
+    expect(result.attachment_refs).toEqual([
+      { id: rows[0]?.id, filename: "report.txt" },
+    ]);
+    expect(retry.attachment_refs).toEqual([
+      { id: rows[0]?.id, filename: "report.txt" },
+    ]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      conversationId,
+      filename: "report.txt",
+      provider: "test",
+    });
+    expect(puts).toEqual([rows[0]?.storageKey]);
+    expect(
+      getCapturedSlackApiCalls("files.completeUploadExternal"),
+    ).toHaveLength(2);
+
+    const history =
+      await getConversationEventStore().loadHistory(conversationId);
+    const delivered = history.filter(
+      (event) => event.data.type === "attachments_delivered",
+    );
+    // One durable delivery item per successful store/send, including reuse.
+    expect(delivered).toHaveLength(2);
+    expect(delivered[0]?.data).toMatchObject({
+      type: "attachments_delivered",
+      toolCallId: "call-send-1",
+      attachments: [
+        {
+          id: rows[0]?.id,
+          filename: "report.txt",
+          contentType: "text/plain",
+          bytes: Buffer.byteLength("report body"),
+        },
+      ],
+    });
+    expect(delivered[1]?.data).toMatchObject({
+      type: "attachments_delivered",
+      toolCallId: "call-send-2",
+    });
+  });
+
+  it("does not re-upload or mint a second delivery item on a cached retry", async () => {
+    const conversationId = "conversation-cached-send";
+    await getConversationStore().recordActivity({
+      conversationId,
+      destination: {
+        channelId: "C123",
+        platform: "slack",
+        teamId: "T123",
+      },
+      nowMs: Date.parse("2026-08-12T17:00:00.000Z"),
+      source: "slack",
+      title: "Cached attachment delivery",
+      visibility: "private",
+    });
+    const storage: AttachmentStorage = {
+      provider: "test",
+      get: async () => null,
+      put: async () => undefined,
+      delete: async () => undefined,
+    };
+    const state = createToolState();
+    const tool = createSendFilesTool(
+      createContext("attach the report"),
+      state,
+      createMaterializeFile({
+        "/tmp/report.txt": Buffer.from("report body"),
+      }),
+      {
+        conversationId,
+        db: getSqlExecutor(),
+        storage,
+      },
+    );
+
+    const first = await executeTool(
+      tool,
+      { files: [{ path: "/tmp/report.txt" }] },
+      { toolCallId: "call-send-cached" },
+    );
+    // A later tool call with the same bytes must reuse the original delivery
+    // identity, not create another transcript row under a new toolCallId.
+    const second = await executeTool(
+      tool,
+      { files: [{ path: "/tmp/report.txt" }] },
+      { toolCallId: "call-send-later" },
+    );
+
+    expect(first.attachment_refs).toEqual([
+      { id: expect.any(String), filename: "report.txt" },
+    ]);
+    expect(second).toMatchObject({
+      deduplicated: true,
+      attachment_refs: first.attachment_refs,
+    });
+    expect(
+      getCapturedSlackApiCalls("files.completeUploadExternal"),
+    ).toHaveLength(1);
+
+    const history =
+      await getConversationEventStore().loadHistory(conversationId);
+    const delivered = history.filter(
+      (event) => event.data.type === "attachments_delivered",
+    );
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]?.data).toMatchObject({
+      type: "attachments_delivered",
+      toolCallId: "call-send-cached",
+      attachments: [
+        {
+          id: first.attachment_refs[0]?.id,
+          filename: "report.txt",
+          contentType: "text/plain",
+          bytes: Buffer.byteLength("report body"),
+        },
+      ],
+    });
   });
 
   it("revives a purge-marked attachment on later store", async () => {
-    const fixture = await createLocalJuniorSqlFixture();
-    try {
-      await migrateSchema(fixture.sql);
-      const now = new Date("2026-08-12T17:00:00.000Z");
-      await fixture.sql.db().insert(juniorConversations).values({
-        conversationId: "conversation-1",
-        createdAt: now,
-        lastActivityAt: now,
-        updatedAt: now,
-        executionStatus: "idle",
-      });
-      const puts: string[] = [];
-      const storage: AttachmentStorage = {
-        provider: "test",
-        get: async () => null,
-        put: async (input) => {
-          puts.push(input.key);
-        },
-        delete: async () => undefined,
-      };
-      const firstTool = createSendFilesTool(
-        createContext("attach the report"),
-        createToolState(),
-        createMaterializeFile({
-          "/tmp/report.txt": Buffer.from("report body"),
-        }),
-        {
-          conversationId: "conversation-1",
-          db: fixture.sql,
-          storage,
-        },
-      );
-      const first = await executeTool(firstTool, {
-        files: [{ path: "/tmp/report.txt" }],
-      });
-      const attachmentId = first.attachment_refs[0]?.id;
-      expect(first.attachment_refs).toEqual([
-        { id: expect.any(String), name: "report.txt" },
-      ]);
+    const conversationId = "conversation-1";
+    const now = new Date("2026-08-12T17:00:00.000Z");
+    await getConversationStore().recordActivity({
+      conversationId,
+      destination: {
+        channelId: "C123",
+        platform: "slack",
+        teamId: "T123",
+      },
+      nowMs: now.getTime(),
+      source: "slack",
+      title: "Attachment revive conversation",
+      visibility: "private",
+    });
+    const puts: string[] = [];
+    const storage: AttachmentStorage = {
+      provider: "test",
+      get: async () => null,
+      put: async (input) => {
+        puts.push(input.key);
+      },
+      delete: async () => undefined,
+    };
+    const firstTool = createSendFilesTool(
+      createContext("attach the report"),
+      createToolState(),
+      createMaterializeFile({
+        "/tmp/report.txt": Buffer.from("report body"),
+      }),
+      {
+        conversationId,
+        db: getSqlExecutor(),
+        storage,
+      },
+    );
+    const first = await executeTool(firstTool, {
+      files: [{ path: "/tmp/report.txt" }],
+    });
+    const attachmentId = first.attachment_refs[0]?.id;
+    expect(first.attachment_refs).toEqual([
+      { id: expect.any(String), filename: "report.txt" },
+    ]);
 
-      await fixture.sql
-        .db()
-        .update(juniorAttachments)
-        .set({ deleteRequestedAt: now })
-        .where(eq(juniorAttachments.id, attachmentId!));
+    await getSqlExecutor()
+      .db()
+      .update(juniorAttachments)
+      .set({ deleteRequestedAt: now })
+      .where(eq(juniorAttachments.id, attachmentId!));
 
-      const retryTool = createSendFilesTool(
-        createContext("attach the report again"),
-        createToolState(),
-        createMaterializeFile({
-          "/tmp/report.txt": Buffer.from("report body"),
-        }),
-        {
-          conversationId: "conversation-1",
-          db: fixture.sql,
-          storage,
-        },
-      );
-      const retry = await executeTool(retryTool, {
-        files: [{ path: "/tmp/report.txt" }],
-      });
+    const retryTool = createSendFilesTool(
+      createContext("attach the report again"),
+      createToolState(),
+      createMaterializeFile({
+        "/tmp/report.txt": Buffer.from("report body"),
+      }),
+      {
+        conversationId,
+        db: getSqlExecutor(),
+        storage,
+      },
+    );
+    const retry = await executeTool(retryTool, {
+      files: [{ path: "/tmp/report.txt" }],
+    });
 
-      const rows = await fixture.sql.db().select().from(juniorAttachments);
-      expect(retry.attachment_refs).toEqual([
-        { id: attachmentId, name: "report.txt" },
-      ]);
-      expect(rows).toHaveLength(1);
-      expect(rows[0]).toMatchObject({
-        id: attachmentId,
-        deleteRequestedAt: null,
-        storageKey: puts[1],
-      });
-      expect(puts).toHaveLength(2);
-      expect(puts[0]).not.toBe(puts[1]);
-    } finally {
-      await fixture.close();
-    }
+    const rows = await getSqlExecutor().db().select().from(juniorAttachments);
+    expect(retry.attachment_refs).toEqual([
+      { id: attachmentId, filename: "report.txt" },
+    ]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      id: attachmentId,
+      deleteRequestedAt: null,
+      storageKey: puts[1],
+    });
+    expect(puts).toHaveLength(2);
+    expect(puts[0]).not.toBe(puts[1]);
   });
 
   it("deletes the blob when SQL insert fails after put", async () => {

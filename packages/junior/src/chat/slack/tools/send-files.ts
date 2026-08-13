@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { storeAttachments } from "@/chat/attachments/store";
 import type { AttachmentStorage } from "@/chat/attachments/storage";
+import { recordAttachmentsDelivered } from "@/chat/conversations/projection";
 import type { JuniorSqlDatabase } from "@/db/db";
 import { uploadFilesToConversation } from "@/chat/slack/outbound";
 import type { SlackToolContext } from "@/chat/slack/tool-support/context";
@@ -27,12 +28,28 @@ const sendFilesResultSchema = juniorToolOutputSchema.extend({
   attachment_refs: z.array(
     z.object({
       id: z.string().min(1),
-      name: z.string().min(1),
+      // Same noun as storage, delivery events, and the report API.
+      filename: z.string().min(1),
     }),
   ),
 });
 
 type SendFilesResult = z.output<typeof sendFilesResultSchema>;
+
+type DeliveredAttachment = {
+  bytes: number;
+  contentType: string;
+  filename: string;
+  id: string;
+};
+
+/** Operation cache keeps delivery metadata so retries can re-record safely. */
+type CachedSendFiles = {
+  delivered: DeliveredAttachment[];
+  result: SendFilesResult;
+  /** Identity used for the first delivery event; retries must reuse it. */
+  toolCallId?: string;
+};
 
 function normalizeFiles(
   files: SandboxFileReferenceInput[],
@@ -88,7 +105,7 @@ export function createSendFilesTool(
         ),
     }),
     outputSchema: sendFilesResultSchema,
-    execute: async ({ files }) => {
+    execute: async ({ files }, options) => {
       const filesToSend = normalizeFiles(files);
       const activeChannelId = context.sourceChannelId;
       if (!activeChannelId) {
@@ -108,10 +125,20 @@ export function createSendFilesTool(
         thread_ts: threadTs,
         files: fileOperationInput(materializedFiles),
       });
-      const cached = state.getOperationResult<SendFilesResult>(operationKey);
+      const cached = state.getOperationResult<CachedSendFiles>(operationKey);
       if (cached) {
+        // A prior attempt may have uploaded to Slack and cached before the
+        // transcript event landed. Re-record with the original delivery identity
+        // so a later toolCallId cannot mint a second transcript row.
+        if (attachments && cached.delivered.length > 0) {
+          await recordAttachmentsDelivered({
+            attachments: cached.delivered,
+            conversationId: attachments.conversationId,
+            ...(cached.toolCallId ? { toolCallId: cached.toolCallId } : {}),
+          });
+        }
         return sendFilesResultSchema.parse({
-          ...cached,
+          ...cached.result,
           deduplicated: true,
         });
       }
@@ -133,13 +160,38 @@ export function createSendFilesTool(
         files: uploads,
         threadTs,
       });
+      const delivered: DeliveredAttachment[] = stored.map(
+        (attachment, index) => {
+          const file = materializedFiles[index]!;
+          return {
+            id: attachment.id,
+            filename: file.filename,
+            contentType: file.mimeType,
+            bytes: file.bytes,
+          };
+        },
+      );
       const response: SendFilesResult = {
-        attachment_refs: stored.map((attachment, index) => ({
+        // Tool result stays minimal; transcript/report carries full metadata.
+        attachment_refs: delivered.map((attachment) => ({
           id: attachment.id,
-          name: materializedFiles[index]!.filename,
+          filename: attachment.filename,
         })),
       };
-      state.setOperationResult(operationKey, response);
+      // Cache before host bookkeeping so a later event-write failure cannot
+      // cause another Slack upload on retry.
+      state.setOperationResult(operationKey, {
+        delivered,
+        result: response,
+        ...(options.toolCallId ? { toolCallId: options.toolCallId } : {}),
+      } satisfies CachedSendFiles);
+      if (attachments && delivered.length > 0) {
+        await recordAttachmentsDelivered({
+          attachments: delivered,
+          conversationId: attachments.conversationId,
+          ...(options.toolCallId ? { toolCallId: options.toolCallId } : {}),
+        });
+      }
       return response;
     },
   });
