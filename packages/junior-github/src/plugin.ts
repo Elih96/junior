@@ -16,6 +16,7 @@ import {
   normalizePermissions,
   readGrantPermissions,
 } from "./permissions.js";
+import { assertGitHubPullRequestApprovalDenied } from "./pull-request-review-policy.js";
 import { createGitHubTools } from "./tools.js";
 import { createGitHubWebhookRoute } from "./webhooks/handler.js";
 import {
@@ -489,6 +490,11 @@ function assertGitHubWriteAllowed(input: {
   operation?: string;
   upstreamUrl: URL;
 }): void {
+  assertGitHubPullRequestApprovalDenied({
+    ...(input.bodyText !== undefined ? { bodyText: input.bodyText } : {}),
+    method: input.method,
+    upstreamUrl: input.upstreamUrl,
+  });
   if (input.operation === "github.issue.create") return;
   if (input.operation === "github.issue.update") return;
   if (input.operation === "github.pull.create") return;

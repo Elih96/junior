@@ -1924,6 +1924,19 @@ Conversation: \`local:test:old-conversation\`
     });
     await expect(
       grantForEgress({
+        bodyText: JSON.stringify({ event: "REQUEST_CHANGES", body: "nits" }),
+        method: "POST",
+        url: "https://api.github.com/repos/getsentry/junior/pulls/780/reviews",
+      }),
+    ).resolves.toMatchObject({
+      name: "installation-write",
+      access: "write",
+      leaseScope: "repository:getsentry/junior",
+      reason: "github.installation-write",
+    });
+    await expect(
+      grantForEgress({
+        bodyText: JSON.stringify({ event: "COMMENT", body: "looks fine" }),
         method: "POST",
         url: "https://api.github.com/repos/getsentry/junior/pulls/780/reviews/99/events",
       }),
@@ -1995,6 +2008,47 @@ Conversation: \`local:test:old-conversation\`
       }),
     ).rejects.toThrow(
       "GitHub write request is not an explicitly allowed Junior operation.",
+    );
+  });
+
+  it("denies GitHub pull request approvals while allowing non-approve reviews", async () => {
+    await expect(
+      grantForEgress({
+        bodyText: JSON.stringify({ event: "APPROVE", body: "lgtm" }),
+        method: "POST",
+        url: "https://api.github.com/repos/getsentry/junior/pulls/780/reviews",
+      }),
+    ).rejects.toThrow("Junior cannot approve GitHub pull requests");
+    await expect(
+      grantForEgress({
+        bodyText: JSON.stringify({ event: "approve" }),
+        method: "POST",
+        url: "https://api.github.com/repos/getsentry/junior/pulls/780/reviews/99/events",
+      }),
+    ).rejects.toThrow("Junior cannot approve GitHub pull requests");
+    await expect(
+      grantForEgress({
+        method: "POST",
+        url: "https://api.github.com/repos/getsentry/junior/pulls/780/reviews/99/events",
+      }),
+    ).rejects.toThrow(
+      "review submissions must include a parseable non-APPROVE event",
+    );
+    await expect(
+      grantForEgress({
+        bodyText: "event=APPROVE",
+        method: "POST",
+        url: "https://api.github.com/repos/getsentry/junior/pulls/780/reviews",
+      }),
+    ).rejects.toThrow("must use JSON bodies");
+    await expect(
+      grantForEgress({
+        bodyText: JSON.stringify({ event: 1 }),
+        method: "POST",
+        url: "https://api.github.com/repos/getsentry/junior/pulls/780/reviews",
+      }),
+    ).rejects.toThrow(
+      "review submissions must include a parseable non-APPROVE event",
     );
   });
 
