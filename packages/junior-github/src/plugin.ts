@@ -452,47 +452,32 @@ function isGitHubPullCreateRestRequest(
   );
 }
 
-function isGitHubIssueCreateGraphqlMutation(
+function isGitHubResourceUpdateRestRequest(
   method: string,
   upstreamUrl: URL,
-  bodyText: string | undefined,
+  resource: "issues" | "pulls",
 ): boolean {
-  if (method !== "POST" || !isGitHubGraphqlUrl(upstreamUrl)) {
-    return false;
-  }
-  const parsed = parseGitHubGraphqlRequest(bodyText);
-  if (!parsed) {
-    return false;
-  }
-  if (!/\bcreateIssue\b/.test(parsed.normalized)) {
-    return false;
-  }
-  if (!parsed.operationName) {
-    return /\bmutation\b/.test(parsed.normalized);
-  }
-  return new RegExp(
-    `\\bmutation\\s+${escapeRegExp(parsed.operationName)}\\b`,
-  ).test(parsed.normalized);
+  return (
+    method === "PATCH" &&
+    isGitHubApiUrl(upstreamUrl) &&
+    new RegExp(`^/repos/[^/]+/[^/]+/${resource}/[^/]+$`).test(
+      upstreamUrl.pathname.toLowerCase(),
+    )
+  );
 }
 
-function isGitHubPullCreateGraphqlMutation(
+function isGitHubGraphqlMutation(
   method: string,
   upstreamUrl: URL,
   bodyText: string | undefined,
+  field: "createIssue" | "createPullRequest" | "updateIssue" | "updatePullRequest",
 ): boolean {
-  if (method !== "POST" || !isGitHubGraphqlUrl(upstreamUrl)) {
-    return false;
-  }
+  if (method !== "POST" || !isGitHubGraphqlUrl(upstreamUrl)) return false;
   const parsed = parseGitHubGraphqlRequest(bodyText);
-  if (!parsed) {
+  if (!parsed || !new RegExp(`\\b${field}\\b`).test(parsed.normalized)) {
     return false;
   }
-  if (!/\bcreatePullRequest\b/.test(parsed.normalized)) {
-    return false;
-  }
-  if (!parsed.operationName) {
-    return /\bmutation\b/.test(parsed.normalized);
-  }
+  if (!parsed.operationName) return /\bmutation\b/.test(parsed.normalized);
   return new RegExp(
     `\\bmutation\\s+${escapeRegExp(parsed.operationName)}\\b`,
   ).test(parsed.normalized);
@@ -504,18 +489,17 @@ function assertGitHubWriteAllowed(input: {
   operation?: string;
   upstreamUrl: URL;
 }): void {
-  if (input.operation === "github.issue.create") {
-    return;
-  }
-  if (input.operation === "github.pull.create") {
-    return;
-  }
+  if (input.operation === "github.issue.create") return;
+  if (input.operation === "github.issue.update") return;
+  if (input.operation === "github.pull.create") return;
+  if (input.operation === "github.pull.update") return;
   if (
     isGitHubIssueCreateRestRequest(input.method, input.upstreamUrl) ||
-    isGitHubIssueCreateGraphqlMutation(
+    isGitHubGraphqlMutation(
       input.method,
       input.upstreamUrl,
       input.bodyText,
+      "createIssue",
     )
   ) {
     throw new EgressPolicyDenied(
@@ -524,14 +508,49 @@ function assertGitHubWriteAllowed(input: {
   }
   if (
     isGitHubPullCreateRestRequest(input.method, input.upstreamUrl) ||
-    isGitHubPullCreateGraphqlMutation(
+    isGitHubGraphqlMutation(
       input.method,
       input.upstreamUrl,
       input.bodyText,
+      "createPullRequest",
     )
   ) {
     throw new EgressPolicyDenied(
       `GitHub pull request creation must use the github_createPullRequest tool so Junior can own idempotency and the conversation footer. ${CREATE_TOOL_ROUTING_GUIDANCE}`,
+    );
+  }
+  if (
+    isGitHubResourceUpdateRestRequest(
+      input.method,
+      input.upstreamUrl,
+      "issues",
+    ) ||
+    isGitHubGraphqlMutation(
+      input.method,
+      input.upstreamUrl,
+      input.bodyText,
+      "updateIssue",
+    )
+  ) {
+    throw new EgressPolicyDenied(
+      `GitHub issue updates must use the github_updateIssue tool so Junior can own requester attribution and the conversation footer. ${CREATE_TOOL_ROUTING_GUIDANCE}`,
+    );
+  }
+  if (
+    isGitHubResourceUpdateRestRequest(
+      input.method,
+      input.upstreamUrl,
+      "pulls",
+    ) ||
+    isGitHubGraphqlMutation(
+      input.method,
+      input.upstreamUrl,
+      input.bodyText,
+      "updatePullRequest",
+    )
+  ) {
+    throw new EgressPolicyDenied(
+      `GitHub pull request updates must use the github_updatePullRequest tool so Junior can own requester attribution and the conversation footer. ${CREATE_TOOL_ROUTING_GUIDANCE}`,
     );
   }
 }
