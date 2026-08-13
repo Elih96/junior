@@ -14,11 +14,15 @@ import { buildConversationMarkdown } from "../markdownExport";
 import { CopyMarkdownButton } from "./CopyMarkdownButton";
 import { ConversationComposer } from "./ConversationComposer";
 import { ConversationHeader } from "./ConversationHeader";
+import { ConversationHeaderMeta } from "./ConversationHeaderMeta";
 import {
   ConversationAnnotations,
   ConversationIdentity,
   ConversationPrivacyChip,
   ConversationStats,
+  hasConversationAnnotations,
+  hasConversationIdentity,
+  hasConversationStats,
   PendingAuthorization,
 } from "./ConversationMeta";
 import { PendingMailboxStack } from "./PendingMailboxStack";
@@ -31,6 +35,7 @@ import {
 import { Card } from "../components/layout/Card";
 import { Transcript } from "./TranscriptView";
 import { TranscriptLoading } from "./TranscriptLoading";
+import type { TranscriptViewMode } from "./transcriptRenderModel";
 import {
   SubagentTranscriptDrawer,
   type SubagentTranscriptTarget,
@@ -47,6 +52,8 @@ export function ConversationPage(props: {
 }) {
   const [subagentTarget, setSubagentTarget] =
     useState<SubagentTranscriptTarget>();
+  const [view, setView] = useState<TranscriptViewMode>("rich");
+  const [search, setSearch] = useState("");
   const conversationId = props.conversationId;
   const summaries = props.data?.conversations.conversations ?? [];
   const conversations = buildConversations(summaries);
@@ -74,7 +81,26 @@ export function ConversationPage(props: {
       >
         <section className="min-w-0">
           <ConversationHeader
-            annotations={<ConversationAnnotations detail={detail.data} />}
+            conversationId={conversationId}
+            copyAction={
+              <CopyMarkdownButton
+                key={conversationDetail?.conversationId ?? "loading"}
+                getMarkdown={
+                  conversationDetail
+                    ? async () =>
+                        buildConversationMarkdown(
+                          await detail.loadCompleteTranscript(),
+                          conversation,
+                        )
+                    : undefined
+                }
+              />
+            }
+            annotations={
+              hasConversationAnnotations(detail.data) ? (
+                <ConversationAnnotations detail={detail.data} />
+              ) : null
+            }
             archive={{
               archived: Boolean(conversation?.archivedAt),
               disabled: !conversation || archive.isPending,
@@ -87,23 +113,70 @@ export function ConversationPage(props: {
               pending: archive.isPending,
             }}
             identity={
-              <ConversationIdentity
-                conversation={conversation}
-                conversationId={conversationId}
-                detail={detail.data}
-              />
+              hasConversationIdentity({
+                conversation,
+                conversationId,
+                detail: detail.data,
+              }) ? (
+                <ConversationIdentity
+                  conversation={conversation}
+                  conversationId={conversationId}
+                  detail={detail.data}
+                />
+              ) : null
             }
             live={conversationIsLive(visualStatus, detail.data)}
+            meta={
+              <ConversationHeaderMeta
+                identity={
+                  hasConversationIdentity({
+                    conversation,
+                    conversationId,
+                    detail: detail.data,
+                    variant: "compact",
+                  }) ? (
+                    <ConversationIdentity
+                      conversation={conversation}
+                      conversationId={conversationId}
+                      detail={detail.data}
+                      variant="compact"
+                    />
+                  ) : null
+                }
+                stats={
+                  hasConversationStats({
+                    conversation,
+                    detail: detail.data,
+                    variant: "compact",
+                  }) ? (
+                    <ConversationStats
+                      conversation={conversation}
+                      detail={detail.data}
+                      variant="compact"
+                    />
+                  ) : null
+                }
+              />
+            }
+            onSearchChange={setSearch}
+            onViewChange={setView}
             privacy={
               <ConversationPrivacyChip visibility={conversation?.visibility} />
             }
+            search={search}
             stats={
-              <ConversationStats
-                conversation={conversation}
-                detail={detail.data}
-              />
+              hasConversationStats({
+                conversation,
+                detail: detail.data,
+              }) ? (
+                <ConversationStats
+                  conversation={conversation}
+                  detail={detail.data}
+                />
+              ) : null
             }
             title={conversationDisplayTitle(conversation)}
+            view={view}
           />
 
           {detail.isPending ? (
@@ -120,20 +193,6 @@ export function ConversationPage(props: {
                 </div>
               ) : null}
               <Transcript
-                actions={
-                  <CopyMarkdownButton
-                    key={conversationDetail?.conversationId ?? "loading"}
-                    getMarkdown={
-                      conversationDetail
-                        ? async () =>
-                            buildConversationMarkdown(
-                              await detail.loadCompleteTranscript(),
-                              conversation,
-                            )
-                        : undefined
-                    }
-                  />
-                }
                 hasPreviousPage={detail.hasPreviousPage}
                 historyError={detail.historyError}
                 historyVersion={detail.historyVersion}
@@ -149,7 +208,9 @@ export function ConversationPage(props: {
                     part,
                   });
                 }}
+                search={search}
                 transcript={detail.data}
+                view={view}
               />
             </>
           )}

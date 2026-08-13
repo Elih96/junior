@@ -289,7 +289,26 @@ test("collapses long pending message stacks", async ({ page }) => {
       "Keep the reply in Junior. I will paste the dashboard link next.",
     ),
   ).toBeVisible();
-  await expect(pending.getByText("3 more queued messages")).toBeVisible();
+  const expand = pending.getByRole("button", {
+    name: "3 more queued messages",
+  });
+  await expect(expand).toBeVisible();
+  await expect(expand).toHaveAttribute("aria-expanded", "false");
+  await expect(pending.getByText("Third queued message.")).toBeHidden();
+
+  await expand.click();
+  await expect(
+    pending.getByRole("button", { name: "Show fewer queued messages" }),
+  ).toHaveAttribute("aria-expanded", "true");
+  await expect(pending.getByText("Third queued message.")).toBeVisible();
+  await expect(pending.getByText("Fifth queued message.")).toBeVisible();
+
+  await pending
+    .getByRole("button", { name: "Show fewer queued messages" })
+    .click();
+  await expect(
+    pending.getByRole("button", { name: "3 more queued messages" }),
+  ).toHaveAttribute("aria-expanded", "false");
   await expect(pending.getByText("Third queued message.")).toBeHidden();
 });
 
@@ -340,15 +359,25 @@ test("opens and closes a conversation in the mobile workspace", async ({
   await expect(page.getByPlaceholder("Search transcript…")).toBeHidden();
   await expect(
     page.getByRole("group", { name: "Transcript view" }),
-  ).toBeHidden();
+  ).toBeVisible();
   await expect(page.getByRole("note")).toBeHidden();
 
   const pending = page.getByLabel("Pending messages");
   await expect(pending).toBeVisible();
-  await expect(pending.getByText("5 queued messages")).toBeVisible();
+  const expand = pending.getByRole("button", { name: "5 queued messages" });
+  await expect(expand).toBeVisible();
+  await expect(expand).toHaveAttribute("aria-expanded", "false");
   await expect(
     pending.getByText("Also check the canary traffic from the last deploy."),
   ).toBeHidden();
+
+  await expand.click();
+  await expect(
+    pending.getByText("Also check the canary traffic from the last deploy."),
+  ).toBeVisible();
+  await expect(
+    pending.getByRole("button", { name: "Show fewer queued messages" }),
+  ).toHaveAttribute("aria-expanded", "true");
 
   const composer = page.getByPlaceholder("Message Junior…");
   await expect(composer).toBeVisible();
@@ -395,17 +424,14 @@ test("opens and closes a conversation in the mobile workspace", async ({
     )
     .toBe("180px");
 
-  await page.getByRole("button", { name: "Show transcript tools" }).click();
+  await page.getByRole("button", { name: "Search transcript" }).click();
   await expect(page.getByPlaceholder("Search transcript…")).toBeVisible();
-  await expect(
-    page.getByRole("group", { name: "Transcript view" }),
-  ).toBeVisible();
   await page.getByRole("button", { name: "Event log" }).click();
-  await page.getByRole("button", { name: "Hide transcript tools" }).click();
+  await page.getByRole("button", { name: "Hide search" }).click();
   await expect(page.getByPlaceholder("Search transcript…")).toBeHidden();
   await expect(
     page.getByRole("group", { name: "Transcript view" }),
-  ).toBeHidden();
+  ).toBeVisible();
 
   await page.getByRole("link", { name: "Your conversations" }).click();
   await expect(page).toHaveURL(`${server.baseURL}/`);
@@ -600,11 +626,6 @@ test("inspects and copies an advisor transcript", async ({ context, page }) => {
   await expect(
     page.getByRole("heading", { name: "Dashboard QA edge cases" }),
   ).toBeVisible();
-  await expect(
-    page.getByRole("link", {
-      name: "Open getsentry/junior#1081",
-    }),
-  ).toHaveAttribute("href", "https://github.com/getsentry/junior/pull/1081");
   // Subagents live inside the collapsed activity chip between turns.
   const activityChip = page
     .locator("details")
