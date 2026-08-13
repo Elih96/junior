@@ -1,4 +1,14 @@
 # Changelog
+## 0.158.0
+
+### Bug Fixes 🐛
+
+- (dashboard) Prioritize user messages after work finishes by @sentry-junior in [#1509](https://github.com/getsentry/junior/pull/1509)
+
+### Internal Changes 🔧
+
+- (local) Run delivery rollback through real agent by @dcramer in [#1507](https://github.com/getsentry/junior/pull/1507)
+
 ## 0.157.0
 
 ### New Features ✨
