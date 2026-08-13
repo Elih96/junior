@@ -7,6 +7,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 
+import { Button } from "../components/Button";
 import { Tooltip } from "../components/Tooltip";
 import { transcriptMessageActorLabel } from "../format";
 import type { ConversationTranscript, TranscriptViewMessage } from "../types";
@@ -185,8 +186,11 @@ function ExpandQueuedMessagesButton(props: {
 
 /** Render accepted mailbox rows as a compact stack attached above the composer. */
 export function PendingMailboxStack(props: {
+  cancelError?: boolean;
+  cancelPending?: boolean;
   conversation: ConversationTranscript;
   messages: readonly ConversationMailboxMessage[];
+  onCancelQueue?: () => void;
   onRetry?(message: ConversationMailboxMessage): void;
 }): ReactNode {
   const [expanded, setExpanded] = useState(false);
@@ -208,12 +212,42 @@ export function PendingMailboxStack(props: {
   const visibleRows = showCollapsed ? previewRows : rows;
   const hiddenCount = Math.max(0, rows.length - COLLAPSED_PENDING_ROW_COUNT);
   const toggleExpanded = () => setExpanded((value) => !value);
+  const cancellableCount = rows.filter(
+    (message) => message.clientStatus === undefined,
+  ).length;
+  const hasSendingRow = rows.some(
+    (message) => message.clientStatus === "sending",
+  );
+  const showCancel =
+    cancellableCount > 0 && !hasSendingRow && Boolean(props.onCancelQueue);
+  const countLabel =
+    rows.length === 1 ? "1 queued message" : `${rows.length} queued messages`;
 
   return (
     <div
       aria-label="Pending messages"
       className="mx-2 overflow-hidden rounded-t-lg bg-amber-300/[0.055] md:mx-3"
     >
+      {showCancel ? (
+        <div className="flex items-center justify-between gap-2 px-3 py-2 md:px-3.5">
+          <div className="min-w-0 font-sans text-xs font-medium text-amber-100/80">
+            {countLabel}
+          </div>
+          <Button
+            aria-label="Cancel queued messages"
+            className="h-7 shrink-0 border-white/10 bg-transparent px-2 text-xs font-medium text-amber-100/85 hover:border-white/25 hover:bg-white/[0.06] hover:text-amber-50"
+            disabled={props.cancelPending}
+            onClick={props.onCancelQueue}
+          >
+            {props.cancelPending ? "Cancelling…" : "Cancel queue"}
+          </Button>
+        </div>
+      ) : null}
+      {showCancel && props.cancelError ? (
+        <div className="border-t border-amber-300/15 px-3 py-1.5 font-sans text-xs text-amber-100/75 md:px-3.5">
+          Could not cancel queued messages. Try again.
+        </div>
+      ) : null}
       {showCollapsed ? (
         // Desktop keeps a two-row preview; mobile collapses to the control only.
         <div className="hidden md:block">

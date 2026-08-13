@@ -8,6 +8,7 @@ import type {
 import {
   useAppendConversationMessage,
   useArchiveConversation,
+  useCancelConversationPendingMessages,
   useConversationData,
   type PendingArchiveConversationUpdate,
 } from "./queries";
@@ -230,6 +231,7 @@ export function ConversationPage(props: {
           live={live}
           onPinRequest={requestPin}
           pendingAuthorization={detail.pendingAuthorization}
+          pendingGeneratedAt={detail.pendingGeneratedAt}
           pendingMessages={detail.pendingMessages}
         />
       ) : null}
@@ -251,13 +253,19 @@ function ConversationReplyFooter(props: {
   live: boolean;
   onPinRequest: () => void;
   pendingAuthorization?: ConversationPendingMessagesReport["authorization"];
+  pendingGeneratedAt?: string;
   pendingMessages: ConversationMailboxMessage[];
 }) {
   const appendMessage = useAppendConversationMessage(props.conversationId);
+  const cancelPendingMessages = useCancelConversationPendingMessages(
+    props.conversationId,
+  );
   // Keep submit identity stable across mutation status flips so the memoized
   // composer does not re-render while the reader is still typing.
   const appendMessageRef = useRef(appendMessage);
   appendMessageRef.current = appendMessage;
+  const cancelPendingMessagesRef = useRef(cancelPendingMessages);
+  cancelPendingMessagesRef.current = cancelPendingMessages;
   const onPinRequestRef = useRef(props.onPinRequest);
   onPinRequestRef.current = props.onPinRequest;
   const onSubmit = useCallback(
@@ -280,8 +288,34 @@ function ConversationReplyFooter(props: {
     onPinRequestRef.current();
   }, []);
   const onSubmitStart = useCallback(() => {
+    cancelPendingMessagesRef.current.reset();
     onPinRequestRef.current();
   }, []);
+  const cancellableMessageIds = props.pendingMessages
+    .filter((message) => message.clientStatus === undefined)
+    .map((message) => message.inboundMessageId);
+  const cancellableMessageIdsRef = useRef(cancellableMessageIds);
+  cancellableMessageIdsRef.current = cancellableMessageIds;
+  const hasSendingOutboxMessage = props.pendingMessages.some(
+    (message) => message.clientStatus === "sending",
+  );
+  const pendingGeneratedAtRef = useRef(props.pendingGeneratedAt);
+  pendingGeneratedAtRef.current = props.pendingGeneratedAt;
+  const onCancelQueue = useCallback(() => {
+    const inboundMessageIds = cancellableMessageIdsRef.current;
+    const receivedBefore = pendingGeneratedAtRef.current;
+    if (!receivedBefore || inboundMessageIds.length === 0) return;
+    cancelPendingMessagesRef.current.mutate({
+      inboundMessageIds,
+      receivedBefore,
+    });
+  }, []);
+  const cancelError = Boolean(
+    cancelPendingMessages.error &&
+    cancelPendingMessages.variables?.inboundMessageIds.some((id) =>
+      cancellableMessageIds.includes(id),
+    ),
+  );
 
   return (
     <div className="px-2 py-1.5 pb-[max(0.375rem,env(safe-area-inset-bottom))] md:px-7 md:py-4 md:pb-4">
@@ -299,11 +333,15 @@ function ConversationReplyFooter(props: {
           <PendingAuthorization authorization={props.pendingAuthorization} />
         ) : null}
         <PendingMailboxStack
+          cancelError={cancelError}
+          cancelPending={cancelPendingMessages.isPending}
           conversation={props.conversation}
           messages={props.pendingMessages}
+          onCancelQueue={hasSendingOutboxMessage ? undefined : onCancelQueue}
           onRetry={onRetry}
         />
         <ConversationComposer
+          disabled={cancelPendingMessages.isPending}
           draftId={props.conversationId}
           label="Continue this conversation"
           submitLabel="Send"
