@@ -1,4 +1,35 @@
 # Changelog
+## 0.160.0
+
+### New Features ✨
+
+- (attachments) Emit and render delivered attachment transcript items by @sentry-junior in [#1506](https://github.com/getsentry/junior/pull/1506)
+- (dashboard) Show Junior version in mobile nav by @sentry-junior in [#1520](https://github.com/getsentry/junior/pull/1520)
+- (octolens) Add MCP plugin by @sentry-junior in [#1531](https://github.com/getsentry/junior/pull/1531)
+
+### Bug Fixes 🐛
+
+- (agent) Surface review limits as tool rejections by @sentry-junior in [#1529](https://github.com/getsentry/junior/pull/1529)
+- (dashboard) Stabilize live transcript viewport by @sentry-junior in [#1513](https://github.com/getsentry/junior/pull/1513)
+- (github) Close issue resource annotations on webhook by @sentry-junior in [#1534](https://github.com/getsentry/junior/pull/1534)
+
+### Documentation 📚
+
+- (architecture) Define plugin domain ownership by @sentry-junior in [#1522](https://github.com/getsentry/junior/pull/1522)
+
+### Internal Changes 🔧
+
+#### Slack
+
+- Run new mention paths through real agent by @dcramer in [#1528](https://github.com/getsentry/junior/pull/1528)
+- Run edited replies through real agent by @dcramer in [#1527](https://github.com/getsentry/junior/pull/1527)
+- Run image hydration through real agent by @dcramer in [#1524](https://github.com/getsentry/junior/pull/1524)
+- Run attachment ingress through real agent by @dcramer in [#1515](https://github.com/getsentry/junior/pull/1515)
+
+### Other
+
+- lint(tests): Ban static system prompt assertions by @sentry-junior in [#1521](https://github.com/getsentry/junior/pull/1521)
+
 ## 0.159.0
 
 ### New Features ✨
