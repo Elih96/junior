@@ -38,6 +38,8 @@ import { createSlackListUpdateItemTool } from "@/chat/slack/tools/list/update-it
 import { createSlackThreadReadTool } from "@/chat/slack/tools/thread-read";
 import { createUserLookupTool } from "@/chat/tools/user-lookup";
 import { createSystemTimeTool } from "@/chat/tools/system-time";
+import { createPublishImageTool } from "@/chat/tools/publish-image";
+import { createUnpublishImageTool } from "@/chat/tools/unpublish-image";
 import { createSearchConversationEventsTool } from "@/chat/tools/search-conversation-events";
 import { createHandoffTool } from "@/chat/tools/handoff/tool";
 import type { ToolRegistry } from "@/chat/tools/definition";
@@ -137,6 +139,18 @@ export function createTools(
       },
       hooks.toolOverrides?.imageGenerate,
     );
+  }
+  if (context.attachmentStorage && context.conversationId) {
+    tools.publishImage = createPublishImageTool({
+      conversationId: context.conversationId,
+      db: getSqlExecutor(),
+      storage: context.attachmentStorage,
+      workspace: context.workspace,
+    });
+    tools.unpublishImage = createUnpublishImageTool({
+      conversationId: context.conversationId,
+      db: getSqlExecutor(),
+    });
   }
 
   if (context.handoff) {
