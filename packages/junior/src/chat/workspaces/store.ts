@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { asc, eq } from "drizzle-orm";
+import { and, asc, eq, sql } from "drizzle-orm";
 import { getSqlExecutor } from "@/chat/db";
 import type { JuniorDatabase } from "@/db/db";
 import { juniorWorkspaceRepos, juniorWorkspaces } from "@/db/schema";
@@ -97,6 +97,31 @@ export async function listWorkspaces(db: JuniorDatabase): Promise<Workspace[]> {
       repos.filter((repo) => repo.workspaceId === workspace.id),
     ),
   );
+}
+
+/** Find Workspace names that include one provider repository. */
+export async function listWorkspaceNamesByRepository(
+  db: JuniorDatabase,
+  input: { provider: string; repo: string },
+): Promise<string[]> {
+  const provider = input.provider.trim().toLowerCase();
+  const repo = input.repo.trim();
+  const rows = await db
+    .select({ name: juniorWorkspaces.name })
+    .from(juniorWorkspaceRepos)
+    .innerJoin(
+      juniorWorkspaces,
+      eq(juniorWorkspaces.id, juniorWorkspaceRepos.workspaceId),
+    )
+    .where(
+      and(
+        eq(juniorWorkspaceRepos.provider, provider),
+        // Recipes store the provided repo casing; identity is case-insensitive.
+        sql`lower(${juniorWorkspaceRepos.repo}) = lower(${repo})`,
+      ),
+    )
+    .orderBy(asc(juniorWorkspaces.name));
+  return rows.map((row) => row.name);
 }
 
 /** Resolve one Workspace recipe by name. */

@@ -2,7 +2,10 @@ import type { ToolRegistrationHookContext } from "@sentry/junior-plugin-api";
 import { describe, expect, it, vi } from "vitest";
 import { createGitHubCloneRepositoryTool } from "../src/tools/clone-repository.js";
 
-function context(run: ReturnType<typeof vi.fn>): ToolRegistrationHookContext {
+function context(
+  run: ReturnType<typeof vi.fn>,
+  findByRepository = vi.fn().mockResolvedValue([]),
+): ToolRegistrationHookContext {
   return {
     log: { error: vi.fn(), info: vi.fn(), warn: vi.fn() },
     sandbox: {
@@ -12,6 +15,7 @@ function context(run: ReturnType<typeof vi.fn>): ToolRegistrationHookContext {
       readFile: vi.fn(),
       writeFile: vi.fn(),
     },
+    workspaces: { findByRepository },
   } as unknown as ToolRegistrationHookContext;
 }
 
@@ -71,6 +75,31 @@ describe("cloneRepository", () => {
     expect(result).toMatchObject({
       path: "/vercel/sandbox/repos/junior",
       repo: "getsentry/junior",
+    });
+  });
+
+  it("returns Workspace hints", async () => {
+    const run = vi
+      .fn()
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" })
+      .mockResolvedValueOnce({ exitCode: 1, stdout: "", stderr: "" })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" });
+    const findByRepository = vi.fn().mockResolvedValue(["junior", "sentry"]);
+    const tool = createGitHubCloneRepositoryTool(
+      context(run, findByRepository),
+    );
+
+    const result = await tool.execute!(
+      { repo: "getsentry/junior" },
+      {} as never,
+    );
+
+    expect(findByRepository).toHaveBeenCalledWith({
+      provider: "github",
+      repo: "getsentry/junior",
+    });
+    expect(result).toMatchObject({
+      workspaces: ["junior", "sentry"],
     });
   });
 
@@ -147,5 +176,36 @@ describe("cloneRepository", () => {
       cwd: "/vercel/sandbox",
       signal: expect.any(AbortSignal),
     });
+  });
+
+  it("keeps the clone when Workspace lookup fails", async () => {
+    const lookup = new Error("workspace lookup failed");
+    const run = vi
+      .fn()
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" })
+      .mockResolvedValueOnce({ exitCode: 1, stdout: "", stderr: "" })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" });
+    const findByRepository = vi.fn().mockRejectedValue(lookup);
+    const ctx = context(run, findByRepository);
+    const tool = createGitHubCloneRepositoryTool(ctx);
+
+    const result = await tool.execute!(
+      { repo: "getsentry/junior" },
+      {} as never,
+    );
+
+    expect(result).toMatchObject({
+      path: "/vercel/sandbox/repos/junior",
+      repo: "getsentry/junior",
+      workspaces: [],
+    });
+    expect(ctx.log.error).toHaveBeenCalledWith(
+      "github.clone.workspaces_lookup.failed",
+      {
+        repo: "getsentry/junior",
+        error: "workspace lookup failed",
+      },
+    );
+    expect(run).toHaveBeenCalledTimes(3);
   });
 });

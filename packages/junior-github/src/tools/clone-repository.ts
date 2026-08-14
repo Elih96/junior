@@ -18,7 +18,8 @@ const inputSchema = z
         (value) =>
           !value.split("/").some((part) => part === "." || part === ".."),
         {
-          message: "Directory must be a relative path without . or .. segments.",
+          message:
+            "Directory must be a relative path without . or .. segments.",
         },
       )
       .describe(
@@ -30,6 +31,7 @@ const inputSchema = z
 const cloneSchema = z.object({
   path: z.string(),
   repo: z.string(),
+  workspaces: z.array(z.string()),
 });
 type Clone = z.output<typeof cloneSchema>;
 interface Result extends PluginToolOutput, Clone {
@@ -179,7 +181,22 @@ export function createGitHubCloneRepositoryTool(
           `GitHub repository clone failed: ${clone.stderr.trim() || `exit ${clone.exitCode}`}`,
         );
       }
-      const data = { repo: `${repo.owner}/${repo.name}`, path };
+      const repoId = `${repo.owner}/${repo.name}`;
+      let workspaces: string[] = [];
+      try {
+        workspaces = await ctx.workspaces.findByRepository({
+          provider: "github",
+          repo: repoId,
+        });
+      } catch (error) {
+        // Clone already succeeded; keep the checkout and surface the lookup as a
+        // host diagnostic rather than failing the tool.
+        ctx.log.error("github.clone.workspaces_lookup.failed", {
+          repo: repoId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+      const data = { repo: repoId, path, workspaces };
       return { target: "cloneRepository", ...data };
     },
   });

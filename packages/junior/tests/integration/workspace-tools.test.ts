@@ -9,6 +9,7 @@ import {
 import { juniorWorkspaceRepos, juniorWorkspaces } from "@/db/schema";
 import { createModelAgentRunner } from "../fixtures/agent-runner";
 import { createModelStream } from "../fixtures/model-stream";
+import { listWorkspaceNamesByRepository } from "@/chat/workspaces/store";
 
 describe("Workspace tools", () => {
   it("runs Workspace tools through the real agent tool path", async () => {
@@ -37,6 +38,18 @@ describe("Workspace tools", () => {
       workspaceId: workspace.id,
       ...workspace.repos[0]!,
     });
+    await expect(
+      listWorkspaceNamesByRepository(db, {
+        provider: "github",
+        repo: "getsentry/sentry",
+      }),
+    ).resolves.toEqual(["sentry"]);
+    await expect(
+      listWorkspaceNamesByRepository(db, {
+        provider: "GitHub",
+        repo: "GetSentry/Sentry",
+      }),
+    ).resolves.toEqual(["sentry"]);
     const conversationId = normalizeLocalConversationId({
       alias: "workspace-tools",
       cwd: "/tmp/local-agent-workspace-tools",
