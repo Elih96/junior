@@ -288,28 +288,27 @@ function ConversationReplyFooter(props: {
     onPinRequestRef.current();
   }, []);
   const onSubmitStart = useCallback(() => {
-    cancelPendingMessagesRef.current.reset();
+    // Keep an in-flight remove intact so optimistic cache rollback stays coherent.
+    if (!cancelPendingMessagesRef.current.isPending) {
+      cancelPendingMessagesRef.current.reset();
+    }
     onPinRequestRef.current();
   }, []);
   const cancellableMessageIds = props.pendingMessages
     .filter((message) => message.clientStatus === undefined)
     .map((message) => message.inboundMessageId);
-  const cancellableMessageIdsRef = useRef(cancellableMessageIds);
-  cancellableMessageIdsRef.current = cancellableMessageIds;
-  const hasSendingOutboxMessage = props.pendingMessages.some(
-    (message) => message.clientStatus === "sending",
-  );
   const pendingGeneratedAtRef = useRef(props.pendingGeneratedAt);
   pendingGeneratedAtRef.current = props.pendingGeneratedAt;
-  const onCancelQueue = useCallback(() => {
-    const inboundMessageIds = cancellableMessageIdsRef.current;
+  const onCancelMessage = useCallback((message: ConversationMailboxMessage) => {
     const receivedBefore = pendingGeneratedAtRef.current;
-    if (!receivedBefore || inboundMessageIds.length === 0) return;
+    if (!receivedBefore) return;
     cancelPendingMessagesRef.current.mutate({
-      inboundMessageIds,
+      inboundMessageIds: [message.inboundMessageId],
       receivedBefore,
     });
   }, []);
+  const cancelTargetInboundMessageId =
+    cancelPendingMessages.variables?.inboundMessageIds[0];
   const cancelError = Boolean(
     cancelPendingMessages.error &&
     cancelPendingMessages.variables?.inboundMessageIds.some((id) =>
@@ -336,15 +335,15 @@ function ConversationReplyFooter(props: {
         <PendingMailboxStack
           cancelError={cancelError}
           cancelPending={cancelPendingMessages.isPending}
+          cancelTargetInboundMessageId={cancelTargetInboundMessageId}
           conversation={props.conversation}
           messages={props.pendingMessages}
-          onCancelQueue={hasSendingOutboxMessage ? undefined : onCancelQueue}
+          onCancelMessage={onCancelMessage}
           onRetry={onRetry}
         />
       </div>
       <div className="min-w-0 shrink-0">
         <ConversationComposer
-          disabled={cancelPendingMessages.isPending}
           draftId={props.conversationId}
           label="Continue this conversation"
           submitLabel="Send"
