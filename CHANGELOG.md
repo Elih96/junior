@@ -1,4 +1,30 @@
 # Changelog
+## 0.162.0
+
+### New Features ✨
+
+- (conversations) Search sessions by annotation by @sentry-junior in [#1530](https://github.com/getsentry/junior/pull/1530)
+- (dashboard) Stack sidebar annotations by @sentry-junior in [#1552](https://github.com/getsentry/junior/pull/1552)
+
+### Bug Fixes 🐛
+
+#### Dashboard
+
+- Remove queued messages individually by @sentry-junior in [#1554](https://github.com/getsentry/junior/pull/1554)
+- Keep mobile composer fully visible by @sentry-junior in [#1550](https://github.com/getsentry/junior/pull/1550)
+- Use git-pull-request icon for open PRs by @sentry-junior in [#1551](https://github.com/getsentry/junior/pull/1551)
+
+### Internal Changes 🔧
+
+#### Slack
+
+- Run steering through real agent by @dcramer in [#1553](https://github.com/getsentry/junior/pull/1553)
+- Run subscribed messages through real agent by @dcramer in [#1548](https://github.com/getsentry/junior/pull/1548)
+
+#### Other
+
+- (guardian) Publish score check on PR checklist by @sentry-junior in [#1542](https://github.com/getsentry/junior/pull/1542)
+
 ## 0.161.0
 
 ### New Features ✨
