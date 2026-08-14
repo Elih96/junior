@@ -35,6 +35,7 @@ import { createPluginEmbedder, createPluginModel } from "@/chat/plugins/model";
 import type { PluginPromptContributionContext } from "@/chat/plugins/prompt";
 import { createPluginState } from "@/chat/plugins/state";
 import { SANDBOX_WORKSPACE_ROOT } from "@/chat/sandbox/paths";
+import { runNonInteractiveCommand } from "@/chat/sandbox/noninteractive-command";
 import type { AnyToolDefinition } from "@/chat/tools/definition";
 import { getDashboardConversationLink } from "@/chat/slack/dashboard-link";
 import { canRouteResourceEvents } from "@/chat/resource-events/workspace";
@@ -49,6 +50,7 @@ import { createSlackDirectCredentialSubject } from "@/chat/credentials/subject";
 import { resolveChannelCapabilities } from "@/chat/slack/tool-support/channel-capabilities";
 import type { Actor } from "@/chat/actor";
 import { z } from "zod";
+import { workspaceRepoCheckoutPath } from "@/chat/workspaces/checkout-path";
 
 /** Signal that a plugin intentionally denied a tool execution. */
 export class PluginHookDeniedError extends Error {
@@ -91,6 +93,14 @@ export interface PluginHookRunner {
   afterMcpTool(input: AfterMcpToolHookInput): Promise<void>;
   beforeToolExecute(input: ToolHookInput): Promise<ToolHookResult>;
   prepareSandbox(workspace: SandboxWorkspace): Promise<void>;
+  prepareWorkspace(
+    workspace: SandboxWorkspace,
+    repos: Array<{
+      provider: string;
+      repo: string;
+    }>,
+    signal?: AbortSignal,
+  ): Promise<void>;
 }
 
 let registeredPlugins: PluginRegistration[] = [];
@@ -627,7 +637,9 @@ export function getPluginTools(
     switch (context.source.platform) {
       case "slack":
         if (context.destination.platform !== "slack") {
-          throw new TypeError("Slack plugin context requires Slack destination");
+          throw new TypeError(
+            "Slack plugin context requires Slack destination",
+          );
         }
         pluginContext = {
           ...common,
@@ -640,7 +652,9 @@ export function getPluginTools(
         break;
       case "local":
         if (context.destination.platform !== "local") {
-          throw new TypeError("Local plugin context requires local destination");
+          throw new TypeError(
+            "Local plugin context requires local destination",
+          );
         }
         pluginContext = {
           ...common,
@@ -1296,7 +1310,19 @@ function normalizeEnv(value: unknown): Record<string, string> {
   return env;
 }
 
-function createSandboxCapability(workspace: SandboxWorkspace): PluginSandbox {
+function preparationSignal(
+  inputSignal?: AbortSignal,
+  ownerSignal?: AbortSignal,
+): AbortSignal | undefined {
+  if (!inputSignal) return ownerSignal;
+  if (!ownerSignal) return inputSignal;
+  return AbortSignal.any([inputSignal, ownerSignal]);
+}
+
+function createSandboxCapability(
+  workspace: SandboxWorkspace,
+  ownerSignal?: AbortSignal,
+): PluginSandbox {
   return {
     root: SANDBOX_WORKSPACE_ROOT,
     juniorRoot: `${SANDBOX_WORKSPACE_ROOT}/.junior`,
@@ -1304,7 +1330,11 @@ function createSandboxCapability(workspace: SandboxWorkspace): PluginSandbox {
       return (await workspace.readFileToBuffer({ path: filePath })) ?? null;
     },
     async run(input: SandboxCommandInput) {
-      const result = await workspace.runCommand(input);
+      const signal = preparationSignal(input.signal, ownerSignal);
+      const result = await runNonInteractiveCommand(workspace, {
+        ...input,
+        ...(signal ? { signal } : {}),
+      });
       return {
         exitCode: result.exitCode,
         stdout: result.stdout,
@@ -1374,6 +1404,57 @@ export function createPluginHookRunner(
               error instanceof Error ? error.message : String(error),
           });
         }
+      }
+    },
+    async prepareWorkspace(sandbox, repos, signal) {
+      const preparers = new Set(
+        loaded
+          .filter((plugin) => plugin.hooks?.workspacePrepare)
+          .map((plugin) => plugin.manifest.name),
+      );
+      const unhandledProviders = [
+        ...new Set(
+          repos
+            .map((repo) => repo.provider)
+            .filter((provider) => !preparers.has(provider)),
+        ),
+      ].sort();
+      if (unhandledProviders.length > 0) {
+        throw new Error(
+          `Workspace repository providers have no preparation hook: ${unhandledProviders.join(", ")}`,
+        );
+      }
+
+      const selectedRepos = repos.map((repo) => ({
+        provider: repo.provider,
+        repo: repo.repo,
+        path: workspaceRepoCheckoutPath(repo.repo),
+      }));
+      const paths = new Set<string>();
+      for (const entry of selectedRepos) {
+        const key = entry.path.toLowerCase();
+        if (paths.has(key)) {
+          throw new Error(`Workspace checkout path collision: ${entry.path}`);
+        }
+        paths.add(key);
+      }
+
+      const sandboxCapability = createSandboxCapability(sandbox, signal);
+      for (const plugin of loaded) {
+        const hook = plugin.hooks?.workspacePrepare;
+        if (!hook) continue;
+        const selected = selectedRepos
+          .filter((repo) => repo.provider === plugin.manifest.name)
+          .map((repo) => ({
+            path: repo.path,
+            repo: repo.repo,
+          }));
+        if (selected.length === 0) continue;
+        await hook({
+          ...basePluginContext(plugin),
+          repos: selected,
+          sandbox: sandboxCapability,
+        });
       }
     },
     async prepareSandbox(sandbox) {

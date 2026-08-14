@@ -5,6 +5,7 @@ import {
   type PluginStoredTokens,
   type SandboxPrepareHookContext,
   type ToolRegistrationHookContext,
+  type WorkspacePrepareHookContext,
 } from "@sentry/junior-plugin-api";
 import { http, HttpResponse } from "msw";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -2824,6 +2825,130 @@ Conversation: \`local:test:old-conversation\`
       "credential.helper",
       "http.emptyAuth",
     ]);
+  });
+
+  it("preloads workspace repositories through sandbox egress", async () => {
+    const runs: Array<{ args?: string[]; env?: Record<string, string> }> = [];
+    const ctx = {
+      db,
+      log: pluginLog,
+      plugin: { name: "github" },
+      repos: [
+        { repo: "getsentry/sentry", path: "repos/sentry" },
+        { repo: "getsentry/junior", path: "repos/junior" },
+      ],
+      sandbox: {
+        juniorRoot: "/vercel/sandbox/.junior",
+        root: "/vercel/sandbox",
+        async readFile() {
+          return null;
+        },
+        async run(input: { args?: string[]; env?: Record<string, string> }) {
+          runs.push(input);
+          return { exitCode: 0, stderr: "", stdout: "" };
+        },
+        async writeFile() {},
+      },
+    } as WorkspacePrepareHookContext;
+
+    await githubPlugin().hooks?.workspacePrepare?.(ctx);
+
+    expect(runs.map((run) => run.args)).toEqual([
+      ["-p", "--", "repos"],
+      [
+        "clone",
+        "--quiet",
+        "--depth=1",
+        "--",
+        "https://github.com/getsentry/sentry.git",
+        "repos/sentry",
+      ],
+      ["-p", "--", "repos"],
+      [
+        "clone",
+        "--quiet",
+        "--depth=1",
+        "--",
+        "https://github.com/getsentry/junior.git",
+        "repos/junior",
+      ],
+    ]);
+    expect(runs.every((run) => run.env === undefined)).toBe(true);
+  });
+
+  it("rejects reserved workspace checkout paths", async () => {
+    const ctx = {
+      db,
+      log: pluginLog,
+      plugin: { name: "github" },
+      repos: [{ repo: "getsentry/skills", path: "skills" }],
+      sandbox: {
+        juniorRoot: "/vercel/sandbox/.junior",
+        root: "/vercel/sandbox",
+        async readFile() {
+          return null;
+        },
+        async run() {
+          throw new Error("workspace clone should not start");
+        },
+        async writeFile() {},
+      },
+    } as WorkspacePrepareHookContext;
+
+    await expect(githubPlugin().hooks?.workspacePrepare?.(ctx)).rejects.toThrow(
+      "Invalid workspace checkout path: skills",
+    );
+  });
+
+  it("rejects reserved workspace checkout paths case-insensitively", async () => {
+    const ctx = {
+      db,
+      log: pluginLog,
+      plugin: { name: "github" },
+      repos: [{ repo: "getsentry/skills", path: "Skills" }],
+      sandbox: {
+        juniorRoot: "/vercel/sandbox/.junior",
+        root: "/vercel/sandbox",
+        async readFile() {
+          return null;
+        },
+        async run() {
+          throw new Error("workspace clone should not start");
+        },
+        async writeFile() {},
+      },
+    } as WorkspacePrepareHookContext;
+
+    await expect(githubPlugin().hooks?.workspacePrepare?.(ctx)).rejects.toThrow(
+      "Invalid workspace checkout path: Skills",
+    );
+  });
+
+  it("rejects colliding workspace checkout paths case-insensitively", async () => {
+    const ctx = {
+      db,
+      log: pluginLog,
+      plugin: { name: "github" },
+      repos: [
+        { repo: "getsentry/sentry", path: "repos/sentry" },
+        { repo: "acme/sentry", path: "repos/Sentry" },
+      ],
+      sandbox: {
+        juniorRoot: "/vercel/sandbox/.junior",
+        root: "/vercel/sandbox",
+        async readFile() {
+          return null;
+        },
+        async run() {
+          throw new Error("workspace clone should not start");
+        },
+        async writeFile() {},
+      },
+    } as WorkspacePrepareHookContext;
+
+    await expect(githubPlugin().hooks?.workspacePrepare?.(ctx)).rejects.toThrow(
+      "Workspace checkout path collision: repos/Sentry",
+    );
   });
 
   it("injects Junior author and committer identity", () => {

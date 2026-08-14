@@ -5,7 +5,11 @@ import { getSandboxResources } from "@/chat/sandbox/resources";
 import * as install from "@/chat/sandbox/snapshot/install";
 import * as profile from "@/chat/sandbox/snapshot/profile";
 import { trace } from "@/chat/sandbox/snapshot/span";
-import { createSandboxSession } from "@/chat/sandbox/workspace";
+import {
+  createSandboxSession,
+  type SandboxSession,
+} from "@/chat/sandbox/workspace";
+import type { Workspace } from "@/chat/workspaces/types";
 import { sleep } from "@/chat/sleep";
 import { getStateAdapter } from "@/chat/state/adapter";
 
@@ -51,7 +55,6 @@ export interface Snapshot {
   resolveOutcome: ResolveOutcome;
   rebuildReason?: RebuildReason;
 }
-
 export type ProgressPhase =
   | "resolve_start"
   | "cache_hit"
@@ -111,6 +114,7 @@ async function build(
   runtime: string,
   timeoutMs: number,
   signal?: AbortSignal,
+  prepare?: (sandbox: SandboxSession) => Promise<void>,
 ): Promise<string> {
   return await trace(
     "sandbox.snapshot.build",
@@ -135,6 +139,7 @@ async function build(
       try {
         await install.dependencies(sandbox, value.dependencies, signal);
         await install.postinstall(sandbox, value.postinstall, signal);
+        await prepare?.(sandbox);
         return await trace(
           "sandbox.snapshot.capture",
           "sandbox.snapshot.capture",
@@ -275,6 +280,8 @@ export async function resolve(params: {
   staleSnapshotId?: string;
   onProgress?: (phase: ProgressPhase) => void | Promise<void>;
   signal?: AbortSignal;
+  workspace?: Workspace;
+  prepareWorkspace?: (sandbox: SandboxSession) => Promise<void>;
 }): Promise<Snapshot> {
   return await trace(
     "sandbox.snapshot.resolve",
@@ -286,7 +293,7 @@ export async function resolve(params: {
     async () => {
       params.signal?.throwIfAborted();
       await params.onProgress?.("resolve_start");
-      const currentProfile = profile.create(params.runtime);
+      const currentProfile = profile.create(params.runtime, params.workspace);
       if (!currentProfile) {
         return {
           dependencyCount: 0,
@@ -350,6 +357,7 @@ export async function resolve(params: {
             params.runtime,
             params.timeoutMs,
             params.signal,
+            params.prepareWorkspace,
           );
           await setCachedSnapshot({
             profileHash: currentProfile.hash,

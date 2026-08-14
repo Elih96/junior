@@ -53,6 +53,7 @@ import {
   prepareCommitMsgHook,
 } from "./git-config.js";
 import { linkifyGitHubReferences } from "./reply-markdown.js";
+import { prepareWorkspace } from "./workspace-prepare.js";
 import {
   CREATE_TOOL_ROUTING_GUIDANCE,
   GITHUB_APP_ID_ENV,
@@ -836,6 +837,7 @@ export function githubPlugin(
       tools(ctx) {
         return createGitHubTools(ctx);
       },
+      workspacePrepare: prepareWorkspace,
       async sandboxPrepare(ctx) {
         const hooksPath = `${ctx.sandbox.juniorRoot}/git-hooks`;
         await ctx.sandbox.writeFile({
