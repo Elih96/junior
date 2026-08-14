@@ -1,4 +1,36 @@
 # Changelog
+## 0.161.0
+
+### New Features ✨
+
+#### Dashboard
+
+- Show unfinished work scopes in the conversation sidebar by @sentry-junior in [#1541](https://github.com/getsentry/junior/pull/1541)
+- Post relevant visual screenshots on PRs by @sentry-junior in [#1526](https://github.com/getsentry/junior/pull/1526)
+
+#### Other
+
+- (artifacts) Publish public image URLs for GitHub embeds by @sentry-junior in [#1538](https://github.com/getsentry/junior/pull/1538)
+- (profile) Add person-scoped plugin reports by @sentry-junior in [#1539](https://github.com/getsentry/junior/pull/1539)
+
+### Bug Fixes 🐛
+
+- (dashboard) Disable tooltips on mobile by @sentry-junior in [#1535](https://github.com/getsentry/junior/pull/1535)
+- (github) Move link parsing into plugin by @sentry-junior in [#1523](https://github.com/getsentry/junior/pull/1523)
+- (vercel) Accept opaque project IDs by @sentry-junior in [#1543](https://github.com/getsentry/junior/pull/1543)
+
+### Internal Changes 🔧
+
+#### Slack
+
+- Run message content through real agent by @dcramer in [#1544](https://github.com/getsentry/junior/pull/1544)
+- Run processing reactions through real agent by @dcramer in [#1540](https://github.com/getsentry/junior/pull/1540)
+- Run assistant-thread contracts through real agent by @dcramer in [#1537](https://github.com/getsentry/junior/pull/1537)
+
+#### Other
+
+- (dashboard) Keep E2E assertions behavior-focused by @sentry-junior in [#1536](https://github.com/getsentry/junior/pull/1536)
+
 ## 0.160.0
 
 ### New Features ✨
