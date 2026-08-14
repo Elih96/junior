@@ -1,4 +1,35 @@
 # Changelog
+## 0.164.0
+
+### New Features ✨
+
+#### Workspaces
+
+- Hint associated Workspaces after clone by @sentry-junior in [#1572](https://github.com/getsentry/junior/pull/1572)
+- Add admin API and dashboard UI by @sentry-junior in [#1562](https://github.com/getsentry/junior/pull/1562)
+
+#### Other
+
+- (github) Resolve feedback on Junior-authored PRs by @sentry-junior in [#1573](https://github.com/getsentry/junior/pull/1573)
+- (linear) Add issue event tasks by @sentry-junior in [#1560](https://github.com/getsentry/junior/pull/1560)
+
+### Bug Fixes 🐛
+
+- (dashboard) Prefer unfinished grouped work by @sentry-junior in [#1568](https://github.com/getsentry/junior/pull/1568)
+- (junior-github) Validate bot identity env vars in beforeToolExecute by @snowyukitty in [#1566](https://github.com/getsentry/junior/pull/1566)
+
+### Internal Changes 🔧
+
+#### Slack
+
+- Keep failure coverage at owning boundaries by @dcramer in [#1574](https://github.com/getsentry/junior/pull/1574)
+- Assert durable turn lifecycle outcomes by @dcramer in [#1565](https://github.com/getsentry/junior/pull/1565)
+
+#### Other
+
+- (local) Use real runtime boundaries by @dcramer in [#1569](https://github.com/getsentry/junior/pull/1569)
+- (queue) Run durable scenarios through real agent by @dcramer in [#1571](https://github.com/getsentry/junior/pull/1571)
+
 ## 0.163.0
 
 ### New Features ✨
