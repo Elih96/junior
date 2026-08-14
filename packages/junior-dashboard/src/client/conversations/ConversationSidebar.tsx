@@ -26,6 +26,7 @@ import {
 } from "./conversationSections";
 import { EmptyTelemetry } from "../components/EmptyTelemetry";
 import { SearchInput } from "../components/SearchInput";
+import { ConversationSidebarAnnotations } from "./ConversationMeta";
 
 type ConversationSidebarEntry =
   | { first: boolean; key: string; kind: "section"; label: string }
@@ -189,6 +190,10 @@ function ConversationSidebarRow(props: {
     includeId: false,
   });
   const title = conversationDisplayTitle(props.conversation);
+  const hasMeta =
+    Boolean(location) ||
+    props.conversation.visibility === "private" ||
+    Boolean(props.conversation.sidebarAnnotations?.length);
   return (
     <div className="group relative min-w-0">
       <Link
@@ -216,8 +221,8 @@ function ConversationSidebarRow(props: {
             {title}
           </div>
         </div>
-        {location || props.conversation.visibility === "private" ? (
-          <div className="ml-3 mt-0.5 flex min-w-0 items-center gap-1 font-mono text-2xs leading-tight text-dashboard-text-muted">
+        {hasMeta ? (
+          <div className="ml-3 mt-0.5 flex min-w-0 items-center gap-1.5 font-mono text-2xs leading-tight text-dashboard-text-muted">
             {props.conversation.visibility === "private" ? (
               <LockKeyhole
                 aria-label="Private conversation"
@@ -225,6 +230,14 @@ function ConversationSidebarRow(props: {
               />
             ) : null}
             {location ? <span className="truncate">{location}</span> : null}
+            {location && props.conversation.sidebarAnnotations?.length ? (
+              <span aria-hidden="true" className="shrink-0 opacity-50">
+                ·
+              </span>
+            ) : null}
+            <ConversationSidebarAnnotations
+              annotations={props.conversation.sidebarAnnotations}
+            />
           </div>
         ) : null}
       </Link>

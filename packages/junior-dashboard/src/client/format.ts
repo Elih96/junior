@@ -844,6 +844,8 @@ export function buildConversations(
 ): Conversation[] {
   return summaries
     .map((summary) => ({
+      annotations: summary.annotations,
+      sidebarAnnotations: summary.sidebarAnnotations,
       archivedAt: summary.archivedAt,
       auxiliaryCosts: summary.auxiliaryCosts,
       channel: summary.channel,
@@ -864,6 +866,7 @@ export function buildConversations(
       surface: summary.surface,
       traceId: summary.traceId,
       isPriority: summary.isPriority,
+      unfinishedWork: summary.unfinishedWork,
       visibility: summary.visibility,
     }))
     .sort((a, b) => compareTimeDesc(a.lastSeenAt, b.lastSeenAt));

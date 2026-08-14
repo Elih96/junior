@@ -2,6 +2,7 @@ import { z } from "zod";
 import { usageCostSchema, usageSchema } from "@/usage-schema";
 import {
   conversationAnnotationInputSchema,
+  conversationSidebarAnnotationSchema,
   conversationEventPresentationSchema,
 } from "@sentry/junior-plugin-api";
 
@@ -206,6 +207,14 @@ export const conversationSourceTaskSchema = z
     }
   });
 
+const conversationAnnotationReportSchema = conversationAnnotationInputSchema.and(
+  z.object({
+    plugin: z.string().min(1),
+    createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime(),
+  }),
+);
+
 export const conversationSummaryReportSchema = z
   .object({
     displayTitle: z.string(),
@@ -229,6 +238,14 @@ export const conversationSummaryReportSchema = z
     sentryTraceUrl: z.string().optional(),
     sourceUrl: z.string().url().optional(),
     traceId: z.string().optional(),
+    /**
+     * Plugin-owned resource links for this conversation.
+     * Present on the conversation feed when the viewer can see private content.
+     * Clients must not fetch provider state while rendering these links.
+     */
+    annotations: z.array(conversationAnnotationReportSchema).optional(),
+    /** Plugin-selected annotations for the compact conversation row. */
+    sidebarAnnotations: z.array(conversationSidebarAnnotationSchema).optional(),
     assignedWork: z.boolean().optional(),
     finishedWorkAt: z.string().datetime().optional(),
     /**
@@ -673,17 +690,6 @@ function validateConversationEvents(
 
 export const conversationDetailReportSchema = conversationSummaryReportSchema
   .extend({
-    annotations: z
-      .array(
-        conversationAnnotationInputSchema.and(
-          z.object({
-            plugin: z.string().min(1),
-            createdAt: z.string().datetime(),
-            updatedAt: z.string().datetime(),
-          }),
-        ),
-      )
-      .optional(),
     modelUsage: z.array(conversationModelUsageSchema).optional(),
     events: z.array(conversationReportEventSchema),
     eventHistory: conversationEventHistorySchema,

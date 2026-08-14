@@ -23,6 +23,8 @@ import { conversationFeedSchema } from "../schema/conversation";
 import type { ConversationFeed } from "../schema/conversation";
 import { readRootConversationMetricsFromSql } from "./usage";
 import { readConversationAuxiliaryCostsFromSql } from "./auxiliary-costs";
+import { listConversationAnnotationsById } from "@/chat/plugins/annotations";
+import { listConversationSidebarAnnotations } from "@/chat/plugins/conversation-sidebar";
 import { listConversationWork } from "@/chat/plugins/unfinished-work";
 import { isConversationPriority } from "./priority";
 import { readLastUserMessageAtByConversation } from "./user-message-activity";
@@ -242,6 +244,7 @@ export async function readConversationFeedFromSql(
   );
   const [
     accessByConversation,
+    annotationsByConversation,
     auxiliaryCostsByRoot,
     metricsByRoot,
     teamDomainByTeamId,
@@ -249,6 +252,7 @@ export async function readConversationFeedFromSql(
     lastUserMessageAtByConversation,
   ] = await Promise.all([
     readConversationAccessFromSql(db, conversationIds, options.viewer),
+    listConversationAnnotationsById(db, conversationIds),
     readConversationAuxiliaryCostsFromSql(db, conversationIds, {
       includeDescendants: true,
     }),
@@ -263,15 +267,29 @@ export async function readConversationFeedFromSql(
     listConversationWork(conversationIds),
     readLastUserMessageAtByConversation(db, conversationIds),
   ]);
+  const visibleAnnotationsByConversation = new Map(
+    conversationIds.map((conversationId) => [
+      conversationId,
+      accessByConversation.get(conversationId)?.canViewPrivateContent
+        ? (annotationsByConversation.get(conversationId) ?? [])
+        : [],
+    ]),
+  );
+  const sidebarAnnotationsByConversation =
+    await listConversationSidebarAnnotations(
+      conversationIds,
+      visibleAnnotationsByConversation,
+    );
   const assignedWork = new Set(conversationWork.assignedIds);
   const unfinishedWork = new Set(conversationWork.unfinishedIds);
   return {
     conversations: conversations.map((conversation, index) => {
       const row = rows[index]!;
+      const access = accessByConversation.get(conversation.conversationId);
       const metrics = metricsByRoot.get(conversation.conversationId);
       const summary = conversationSummaryFromStoredConversation({
         conversation,
-        access: accessByConversation.get(conversation.conversationId),
+        access,
         auxiliaryCosts: auxiliaryCostsByRoot.get(conversation.conversationId),
         durationMs: metrics?.durationMs ?? row.conversation.durationMs,
         teamDomainByTeamId,
@@ -294,9 +312,19 @@ export async function readConversationFeedFromSql(
           ? { unfinishedWork: true as const }
           : {}),
       };
+      const annotations = access?.canViewPrivateContent
+        ? (annotationsByConversation.get(conversation.conversationId) ?? [])
+        : [];
       return {
         ...summary,
         ...work,
+        ...(annotations.length > 0 ? { annotations } : {}),
+        ...(sidebarAnnotationsByConversation[conversation.conversationId]
+          ? {
+              sidebarAnnotations:
+                sidebarAnnotationsByConversation[conversation.conversationId],
+            }
+          : {}),
         isPriority: isConversationPriority(
           {
             lastSeenAt: summary.lastSeenAt,

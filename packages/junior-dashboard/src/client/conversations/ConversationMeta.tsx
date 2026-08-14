@@ -82,14 +82,75 @@ export function ConversationPrivacyChip(props: {
   );
 }
 
+type ResourceLinkStatus = NonNullable<
+  NonNullable<ConversationDetailReport["annotations"]>[number]["status"]
+>;
+
 /** True when the conversation has at least one resource-link annotation. */
 export function hasConversationAnnotations(
-  detail: ConversationDetailReport | undefined,
+  annotations: ConversationDetailReport["annotations"] | undefined,
 ): boolean {
   return Boolean(
-    detail?.annotations?.some(
-      (annotation) => annotation.kind === "resource_link",
-    ),
+    annotations?.some((annotation) => annotation.kind === "resource_link"),
+  );
+}
+
+/** Render annotations selected by plugins for a conversation row. */
+export function ConversationSidebarAnnotations(props: {
+  annotations: ConversationDetailReport["sidebarAnnotations"] | undefined;
+}) {
+  if (!props.annotations?.length) return null;
+  return props.annotations.map((summary) => (
+    <span
+      className="inline-flex min-w-0 max-w-full items-center gap-1 truncate"
+      key={summary.key}
+      title={summary.label}
+    >
+      {summary.icon ? <SidebarAnnotationIcon icon={summary.icon} /> : null}
+      <span className="min-w-0 truncate whitespace-nowrap font-sans text-dashboard-text-muted">
+        {summary.label}
+      </span>
+    </span>
+  ));
+}
+
+type SidebarAnnotationIconName = NonNullable<
+  NonNullable<ConversationDetailReport["sidebarAnnotations"]>[number]["icon"]
+>;
+
+const SIDEBAR_ICON_PRESENTATION = {
+  "circle-dot": { className: "text-[#3fb950]", Icon: CircleDot, label: "Open" },
+  "circle-dashed": {
+    className: "text-[#8c959f]",
+    Icon: CircleDashed,
+    label: "Draft",
+  },
+  "circle-x": { className: "text-[#f85149]", Icon: CircleX, label: "Closed" },
+  "git-merge": { className: "text-[#a371f7]", Icon: GitMerge, label: "Merged" },
+  "triangle-alert": {
+    className: "text-[#d29922]",
+    Icon: TriangleAlert,
+    label: "Needs attention",
+  },
+} satisfies Record<
+  SidebarAnnotationIconName,
+  { className: string; Icon: typeof CircleDot; label: string }
+>;
+
+function SidebarAnnotationIcon(props: {
+  icon: SidebarAnnotationIconName;
+  size?: number;
+}) {
+  const presentation = SIDEBAR_ICON_PRESENTATION[props.icon];
+  return (
+    <span className={`shrink-0 ${presentation.className}`} title={presentation.label}>
+      <presentation.Icon
+        aria-hidden="true"
+        size={props.size ?? 11}
+        strokeWidth={2.25}
+      />
+      <span className="sr-only">{presentation.label}</span>
+    </span>
   );
 }
 
@@ -111,6 +172,7 @@ export function ConversationAnnotations(props: {
           key={`${link.plugin}:${link.key}`}
           rel="noreferrer"
           target="_blank"
+          title={resourceLinkTitle(link)}
         >
           {link.status ? <ResourceStatus status={link.status} /> : null}
           <span>{link.label}</span>
@@ -120,43 +182,36 @@ export function ConversationAnnotations(props: {
   );
 }
 
-function ResourceStatus(props: {
-  status: "open" | "draft" | "closed" | "merged" | "warning";
-}) {
-  const status = {
-    open: {
-      className: "text-[#3fb950]",
-      Icon: CircleDot,
-      label: "Open",
-    },
-    draft: {
-      className: "text-[#8c959f]",
-      Icon: CircleDashed,
-      label: "Draft",
-    },
-    closed: {
-      className: "text-[#f85149]",
-      Icon: CircleX,
-      label: "Closed",
-    },
-    merged: {
-      className: "text-[#a371f7]",
-      Icon: GitMerge,
-      label: "Merged",
-    },
-    warning: {
-      className: "text-[#d29922]",
-      Icon: TriangleAlert,
-      label: "Needs attention",
-    },
-  }[props.status];
+function resourceLinkTitle(link: {
+  description?: string;
+  label: string;
+  plugin: string;
+  status?: ResourceLinkStatus;
+}): string {
+  const statusLabel = link.status
+    ? {
+        open: "Open",
+        draft: "Draft",
+        closed: "Closed",
+        merged: "Merged",
+        warning: "Needs attention",
+      }[link.status]
+    : undefined;
+  return [link.label, link.plugin, statusLabel, link.description]
+    .filter(Boolean)
+    .join(" · ");
+}
 
-  return (
-    <span className={status.className} title={status.label}>
-      <status.Icon aria-hidden="true" size={12} strokeWidth={2.25} />
-      <span className="sr-only">{status.label}</span>
-    </span>
-  );
+const RESOURCE_STATUS_ICON = {
+  open: "circle-dot",
+  draft: "circle-dashed",
+  closed: "circle-x",
+  merged: "git-merge",
+  warning: "triangle-alert",
+} as const satisfies Record<ResourceLinkStatus, SidebarAnnotationIconName>;
+
+function ResourceStatus(props: { status: ResourceLinkStatus }) {
+  return <SidebarAnnotationIcon icon={RESOURCE_STATUS_ICON[props.status]} size={12} />;
 }
 
 /** True when identity has content for the requested presentation. */

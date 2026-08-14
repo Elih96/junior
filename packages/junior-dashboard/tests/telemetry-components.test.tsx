@@ -22,6 +22,7 @@ import { Transcript } from "../src/client/conversations/TranscriptView";
 import { ConversationHeader } from "../src/client/conversations/ConversationHeader";
 import {
   ConversationAnnotations,
+  ConversationSidebarAnnotations,
   ConversationStats,
 } from "../src/client/conversations/ConversationMeta";
 import { conversationFromDetail } from "../src/client/format";
@@ -559,6 +560,17 @@ describe("dashboard canonical-event components", () => {
     expect(html).not.toContain("Linked resources");
     expect(html).not.toContain("Pull requests");
     expect(html).not.toContain("Open pull request");
+  });
+
+  it("renders plugin-selected sidebar annotations", () => {
+    const html = renderToStaticMarkup(
+      <ConversationSidebarAnnotations
+        annotations={[{ icon: "git-merge", key: "github", label: "2 repos" }]}
+      />,
+    );
+    expect(html).toContain("2 repos");
+    expect(html).toContain("Merged");
+    expect(html).toContain("min-w-0 truncate whitespace-nowrap font-sans");
   });
 
   it("distinguishes initial detail failures from stale refresh failures", () => {

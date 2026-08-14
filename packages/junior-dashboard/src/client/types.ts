@@ -139,6 +139,8 @@ export type TranscriptViewMessage = {
 export type ConversationTranscript = ConversationDetailReport;
 
 export type Conversation = {
+  annotations?: ConversationSummaryReport["annotations"];
+  sidebarAnnotations?: ConversationSummaryReport["sidebarAnnotations"];
   archivedAt?: string;
   auxiliaryCosts?: ConversationSummaryReport["auxiliaryCosts"];
   channel?: string;
@@ -159,6 +161,7 @@ export type Conversation = {
   surface: ConversationSummaryReport["surface"];
   traceId?: string;
   isPriority?: boolean;
+  unfinishedWork?: boolean;
   visibility?: ConversationSummaryReport["visibility"];
 };
 
