@@ -20,6 +20,7 @@ import { executeAgentRun } from "@/chat/agent";
 import { normalizeSandboxEgressTracePropagationDomains } from "@/chat/sandbox/egress/tracing";
 import {
   getExperimentalFeatures,
+  isExperimentalFeatureEnabled,
   setExperimentalFeatures,
   type ExperimentalFeaturesConfig,
 } from "@/chat/experimental";
@@ -70,7 +71,6 @@ import { JUNIOR_PLUGIN_TASK_CALLBACK_ROUTE } from "@/deployment";
 import {
   createVercelConversationWorkCallback,
   registerVercelConversationWorkDevConsumer,
-  type VercelConversationWorkCallbackOptions,
 } from "@/chat/task-execution/vercel-callback";
 import { getVercelConversationWorkQueue } from "@/chat/task-execution/vercel-queue";
 import { bindSpawnAgent } from "@/chat/agent-invocations/spawn";
@@ -82,6 +82,7 @@ import {
   createProductionConversationWorkOptions,
   createProductionSlackWebhookServices,
 } from "@/chat/app/production";
+import type { ConversationWorkCallbackOptions } from "@/chat/app/conversation-work";
 import { createAgentRunner } from "@/chat/runtime/agent-runner";
 import { createVercelAttachmentStorage } from "@/chat/attachments/vercel";
 import { publicArtifactGET } from "@/handlers/artifacts";
@@ -90,6 +91,7 @@ import { ingestResourceEvent } from "@/chat/resource-events/ingest";
 import { createResourceEventTeamIdResolver } from "@/chat/resource-events/workspace";
 import { ingestEventTasks } from "@/chat/event-tasks/ingest";
 import { receiveLocalOAuthCredential } from "@/chat/local/credential-sync";
+import { createAcpHttpHandler } from "@/api/acp/route";
 
 export { defineJuniorPlugins } from "./plugins";
 export { JUNIOR_VERSION } from "./version";
@@ -118,7 +120,7 @@ export interface JuniorAppOptions {
   /** Install-wide provider defaults. Unregistered `provider.key` entries warn at startup. */
   configDefaults?: Record<string, unknown>;
   /** Queue consumer wiring for the durable conversation worker. */
-  conversationWork?: VercelConversationWorkCallbackOptions;
+  conversationWork?: ConversationWorkCallbackOptions;
   /** Direct plugin set override. Usually omitted when `juniorNitro()` uses a plugin module. */
   plugins?: JuniorPluginSet;
   /** Sandbox execution options. */
@@ -786,9 +788,7 @@ export async function createApp(options?: JuniorAppOptions): Promise<Hono> {
   let pluginTaskPOST:
     | ReturnType<typeof createVercelPluginTaskCallback>
     | undefined;
-  let conversationWorkOptions:
-    | VercelConversationWorkCallbackOptions
-    | undefined;
+  let conversationWorkOptions: ConversationWorkCallbackOptions | undefined;
   const getConversationWorkOptions = () => {
     conversationWorkOptions ??=
       options?.conversationWork ??
@@ -798,6 +798,22 @@ export async function createApp(options?: JuniorAppOptions): Promise<Hono> {
       });
     return conversationWorkOptions;
   };
+  if (isExperimentalFeatureEnabled("acp")) {
+    const work = getConversationWorkOptions();
+    const cancellation = work.apiTurnCancellation;
+    if (!cancellation) {
+      throw new Error("Experimental ACP requires API Turn cancellation wiring");
+    }
+    const handleAcpRequest = createAcpHttpHandler({
+      cancellation,
+      conversationStore: work.conversationStore,
+      queue: work.queue ?? getVercelConversationWorkQueue(),
+      state: work.state,
+    });
+    app.on(["GET", "POST", "DELETE"], "/api/acp", (c) =>
+      handleAcpRequest(c.req.raw),
+    );
+  }
   if (process.env.NODE_ENV === "development") {
     registerVercelConversationWorkDevConsumer(getConversationWorkOptions());
     registerVercelPluginTaskDevConsumer();
