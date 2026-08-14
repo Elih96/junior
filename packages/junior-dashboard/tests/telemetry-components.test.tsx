@@ -586,19 +586,94 @@ describe("dashboard canonical-event components", () => {
     expect(html).toContain('title="Open pull request"');
   });
 
-  it("renders plugin-selected sidebar annotations", () => {
-    const html = renderToStaticMarkup(
+  it("labels one or two scopes and clusters the rest on desktop", () => {
+    const single = renderToStaticMarkup(
       <ConversationSidebarAnnotations
         annotations={[
-          { icon: "git-merge", key: "github", label: "2 repos" },
-          { icon: "git-pull-request", key: "open-pr", label: "junior" },
+          {
+            icon: "circle-dot",
+            key: "getsentry/junior#2",
+            label: "junior",
+          },
         ]}
       />,
     );
-    expect(html).toContain("2 repos");
-    expect(html).toContain("Merged");
-    expect(html).toContain("Open pull request");
-    expect(html).toContain("min-w-0 truncate whitespace-nowrap font-sans");
+    expect(single).toContain(">junior<");
+    expect(single).toContain("getsentry/junior#2");
+
+    const dual = renderToStaticMarkup(
+      <ConversationSidebarAnnotations
+        annotations={[
+          {
+            icon: "circle-dot",
+            key: "getsentry/junior#2",
+            label: "junior",
+          },
+          {
+            icon: "git-merge",
+            key: "getsentry/payments#1",
+            label: "payments",
+          },
+        ]}
+      />,
+    );
+    expect(dual).toContain(
+      'aria-label="Linked work, newest first: getsentry/junior#2, getsentry/payments#1"',
+    );
+    expect(dual.indexOf(">junior<")).toBeLessThan(dual.indexOf(">payments<"));
+    expect(dual).not.toContain(">+1<");
+    // Chip icons are decorative; the parent aria-label carries the identity.
+    expect(dual).toContain("lucide-circle-dot");
+    expect(dual).toContain("lucide-git-merge");
+
+    const stacked = renderToStaticMarkup(
+      <ConversationSidebarAnnotations
+        annotations={[
+          {
+            icon: "circle-dashed",
+            key: "getsentry/junior#3",
+            label: "junior",
+          },
+          {
+            icon: "circle-dot",
+            key: "getsentry/payments#2",
+            label: "payments",
+          },
+          {
+            icon: "git-merge",
+            key: "getsentry/relay#1",
+            label: "relay",
+          },
+        ]}
+      />,
+    );
+    expect(stacked).toContain(">junior<");
+    expect(stacked).toContain(">+2<");
+    expect(stacked).not.toContain(">payments<");
+    expect(stacked).not.toContain(">relay<");
+    expect(stacked).toContain("getsentry/payments#2");
+    expect(stacked).toContain("getsentry/relay#1");
+
+    const sameRepo = renderToStaticMarkup(
+      <ConversationSidebarAnnotations
+        annotations={[
+          {
+            icon: "circle-dot",
+            key: "getsentry/junior#2",
+            label: "junior",
+          },
+          {
+            icon: "git-merge",
+            key: "getsentry/junior#1",
+            label: "junior",
+          },
+        ]}
+      />,
+    );
+    expect(sameRepo).toContain(">junior<");
+    expect(sameRepo.match(/>junior</g)).toHaveLength(1);
+    expect(sameRepo).not.toContain(">+1<");
+    expect(sameRepo).toContain("getsentry/junior#1");
   });
 
   it("distinguishes initial detail failures from stale refresh failures", () => {

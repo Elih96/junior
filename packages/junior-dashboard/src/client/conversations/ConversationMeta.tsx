@@ -8,6 +8,7 @@ import {
   LockKeyhole,
   TriangleAlert,
 } from "lucide-react";
+import { useSyncExternalStore } from "react";
 import { Link } from "react-router";
 import type { ConversationDetailReport } from "@sentry/junior/api/schema";
 
@@ -22,8 +23,11 @@ import {
 } from "../format";
 import { Tooltip } from "../components/Tooltip";
 import { MetricList, type MetricListItem } from "../components/Metric";
+import { cn } from "../styles";
 import { CostMetric, DurationMetric, TokenMetric } from "./TelemetryMetrics";
 import type { Conversation } from "../types";
+
+const MOBILE_MEDIA_QUERY = "(max-width: 767px)";
 
 /** Show a pending OAuth authorization call-to-action above the composer. */
 export function PendingAuthorization(props: {
@@ -96,23 +100,233 @@ export function hasConversationAnnotations(
   );
 }
 
-/** Render annotations selected by plugins for a conversation row. */
+/** Render plugin annotations as a newest-first stack in a conversation row. */
 export function ConversationSidebarAnnotations(props: {
   annotations: ConversationDetailReport["sidebarAnnotations"] | undefined;
 }) {
-  if (!props.annotations?.length) return null;
-  return props.annotations.map((summary) => (
-    <span
-      className="inline-flex min-w-0 max-w-full items-center gap-1 truncate"
-      key={summary.key}
-      title={summary.label}
+  const annotations = props.annotations;
+  const isMobile = useIsMobileViewport();
+  if (!annotations?.length) return null;
+
+  const details = annotations.map((annotation) =>
+    sidebarAnnotationDetail(annotation),
+  );
+  // Collapse same-label scopes for the stack so one repo doesn't become two
+  // chips. The tooltip still lists every annotation.
+  const stack = collapseSidebarAnnotationStack(annotations);
+
+  return (
+    <Tooltip
+      align="left"
+      content={
+        <ul className="m-0 list-none space-y-1 p-0">
+          {annotations.map((annotation, index) => (
+            <li
+              className="flex min-w-0 items-center gap-1.5"
+              key={`${annotation.key}:${index}`}
+            >
+              {annotation.icon ? (
+                <SidebarAnnotationIcon icon={annotation.icon} />
+              ) : null}
+              <span className="min-w-0 truncate">{details[index]}</span>
+            </li>
+          ))}
+        </ul>
+      }
+      label="Linked work"
+      triggerClassName="min-w-0"
     >
-      {summary.icon ? <SidebarAnnotationIcon icon={summary.icon} /> : null}
-      <span className="min-w-0 truncate whitespace-nowrap font-sans text-dashboard-text-muted">
-        {summary.label}
+      <span
+        aria-label={`Linked work, newest first: ${details.join(", ")}`}
+        className="inline-flex min-w-0 max-w-full items-center"
+      >
+        {isMobile ? (
+          <SidebarAnnotationIconFacepile
+            annotations={stack}
+            // Discs sit on the sidebar panel / row surface (#09090b).
+            cutoutColor="var(--color-dashboard-surface-panel)"
+          />
+        ) : stack.length <= 2 ? (
+          <span className="inline-flex min-w-0 items-center gap-1">
+            {stack.map((annotation) => (
+              <SidebarAnnotationChip
+                annotation={annotation}
+                key={annotation.key}
+              />
+            ))}
+          </span>
+        ) : (
+          <SidebarAnnotationOverflowStack annotations={stack} />
+        )}
+      </span>
+    </Tooltip>
+  );
+}
+
+/** Compact overlapping status chips used by mobile and overflow clusters. */
+function SidebarAnnotationIconFacepile(props: {
+  annotations: NonNullable<ConversationDetailReport["sidebarAnnotations"]>;
+  /**
+   * CSS color for the avatar-stack cutout ring. Must match the surface under
+   * the facepile so lower chips read as clean silhouettes.
+   */
+  cutoutColor: string;
+  className?: string;
+}) {
+  return (
+    <span
+      className={cn(
+        // Isolate stacking context so z-index only orders chips inside the pile.
+        // Extra right pad keeps the last chip's cutout ring from clipping.
+        "relative isolate inline-flex h-[18px] items-center pr-0.5",
+        props.className,
+      )}
+    >
+      {props.annotations.map((annotation, index) => (
+        <SidebarAnnotationStatusChip
+          annotation={annotation}
+          cutoutColor={props.cutoutColor}
+          key={annotation.key}
+          // Each chip to the right layers above the chip before it.
+          stacked={index > 0}
+          zIndex={index + 1}
+        />
+      ))}
+    </span>
+  );
+}
+
+/** One continuous stack: labeled chip, icon chips, then the count chip. */
+function SidebarAnnotationOverflowStack(props: {
+  annotations: NonNullable<ConversationDetailReport["sidebarAnnotations"]>;
+}) {
+  const [primary, ...overflow] = props.annotations;
+  if (!primary || overflow.length === 0) return null;
+  return (
+    <span className="isolate inline-flex h-5 min-w-0 items-center pr-0.5">
+      <SidebarAnnotationChip annotation={primary} />
+      {overflow.map((annotation, index) => (
+        <SidebarAnnotationStatusChip
+          annotation={annotation}
+          cutoutColor="var(--color-dashboard-surface-panel)"
+          key={annotation.key}
+          stacked
+          zIndex={index + 1}
+        />
+      ))}
+      <span
+        className="relative -ml-1.5 inline-flex h-5 min-w-7 shrink-0 items-center justify-center rounded-full border border-white/12 bg-dashboard-control px-1.5 font-mono text-2xs leading-none text-dashboard-text-muted"
+        style={{
+          boxShadow: "0 0 0 2px var(--color-dashboard-surface-panel)",
+          zIndex: overflow.length + 1,
+        }}
+      >
+        +{overflow.length}
       </span>
     </span>
-  ));
+  );
+}
+
+function SidebarAnnotationChip(props: {
+  annotation: NonNullable<
+    ConversationDetailReport["sidebarAnnotations"]
+  >[number];
+}) {
+  return (
+    <span className="inline-flex h-5 min-w-0 max-w-28 shrink-0 items-center gap-1 truncate rounded-full border border-white/10 bg-dashboard-control px-1.5 font-sans text-2xs leading-none text-dashboard-text-muted">
+      {props.annotation.icon ? (
+        <SidebarAnnotationIcon
+          decorative
+          icon={props.annotation.icon}
+          size={11}
+        />
+      ) : null}
+      <span className="min-w-0 truncate whitespace-nowrap">
+        {props.annotation.label}
+      </span>
+    </span>
+  );
+}
+
+/** Icon-only chip that matches labeled-chip chrome and stacks like a facepile. */
+function SidebarAnnotationStatusChip(props: {
+  annotation: NonNullable<
+    ConversationDetailReport["sidebarAnnotations"]
+  >[number];
+  cutoutColor: string;
+  stacked?: boolean;
+  zIndex: number;
+}) {
+  const tone = props.annotation.icon
+    ? SIDEBAR_ICON_PRESENTATION[props.annotation.icon]
+    : undefined;
+  return (
+    <span
+      aria-hidden="true"
+      className={cn(
+        // Same border + fill language as labeled chips so the stack reads as
+        // real chips, not floating glyphs. Box-shadow cutout (not border) keeps
+        // layout at 18px while punching a surface-colored ring through the chip
+        // underneath — classic avatar-facepile silhouette.
+        "relative box-border inline-flex size-[18px] shrink-0 items-center justify-center rounded-full border border-white/12 bg-dashboard-control",
+        props.stacked && "-ml-2",
+      )}
+      style={{
+        boxShadow: `0 0 0 2px ${props.cutoutColor}`,
+        zIndex: props.zIndex,
+      }}
+      title={tone?.label}
+    >
+      {props.annotation.icon ? (
+        <SidebarAnnotationIcon
+          decorative
+          icon={props.annotation.icon}
+          size={11}
+        />
+      ) : (
+        <span className="font-sans text-2xs font-semibold leading-none text-dashboard-text-muted">
+          {props.annotation.label.slice(0, 1)}
+        </span>
+      )}
+    </span>
+  );
+}
+
+function useIsMobileViewport(): boolean {
+  return useSyncExternalStore(
+    (onStoreChange) => {
+      if (typeof window === "undefined") return () => {};
+      const media = window.matchMedia(MOBILE_MEDIA_QUERY);
+      media.addEventListener("change", onStoreChange);
+      return () => media.removeEventListener("change", onStoreChange);
+    },
+    () =>
+      typeof window !== "undefined" &&
+      window.matchMedia(MOBILE_MEDIA_QUERY).matches,
+    () => false,
+  );
+}
+
+function collapseSidebarAnnotationStack(
+  annotations: NonNullable<ConversationDetailReport["sidebarAnnotations"]>,
+): NonNullable<ConversationDetailReport["sidebarAnnotations"]> {
+  const seen = new Set<string>();
+  return annotations.filter((annotation) => {
+    if (seen.has(annotation.label)) return false;
+    seen.add(annotation.label);
+    return true;
+  });
+}
+
+function sidebarAnnotationDetail(annotation: {
+  key: string;
+  label: string;
+}): string {
+  // Prefer the plugin key when it carries a fuller resource identity than the
+  // compact label (for example owner/repo#123 vs repo).
+  return annotation.key.includes("/") || annotation.key.includes("#")
+    ? annotation.key
+    : annotation.label;
 }
 
 type SidebarAnnotationIconName = NonNullable<
@@ -146,16 +360,31 @@ const SIDEBAR_ICON_PRESENTATION = {
 function SidebarAnnotationIcon(props: {
   icon: SidebarAnnotationIconName;
   size?: number;
+  /** Hide accessible name when a parent already labels the control. */
+  decorative?: boolean;
 }) {
   const presentation = SIDEBAR_ICON_PRESENTATION[props.icon];
+  const size = props.size ?? 11;
   return (
-    <span className={`shrink-0 ${presentation.className}`} title={presentation.label}>
+    <span
+      aria-hidden={props.decorative ? true : undefined}
+      className={cn(
+        "inline-flex shrink-0 items-center justify-center leading-none",
+        presentation.className,
+      )}
+      // Fixed box stops lucide/svg metrics from shifting chip/disc baselines.
+      style={{ width: size, height: size }}
+      title={props.decorative ? undefined : presentation.label}
+    >
       <presentation.Icon
         aria-hidden="true"
-        size={props.size ?? 11}
+        className="block"
+        size={size}
         strokeWidth={2.25}
       />
-      <span className="sr-only">{presentation.label}</span>
+      {props.decorative ? null : (
+        <span className="sr-only">{presentation.label}</span>
+      )}
     </span>
   );
 }

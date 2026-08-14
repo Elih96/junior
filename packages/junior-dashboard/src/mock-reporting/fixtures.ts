@@ -133,7 +133,13 @@ function activeConversation(nowMs: number): ConversationDetailReport {
     assignedWork: true,
     unfinishedWork: true,
     isPriority: true,
-    sidebarAnnotations: [{ icon: "git-pull-request", key: "github", label: "payments" }],
+    sidebarAnnotations: [
+      {
+        icon: "git-pull-request",
+        key: "getsentry/payments#42",
+        label: "payments",
+      },
+    ],
     annotations: [
       {
         kind: "resource_link",
@@ -331,7 +337,18 @@ function dashboardQaConversation(nowMs: number): ConversationDetailReport {
     assignedWork: true,
     unfinishedWork: true,
     isPriority: true,
-    sidebarAnnotations: [{ icon: "git-pull-request", key: "github", label: "junior" }],
+    sidebarAnnotations: [
+      {
+        icon: "git-pull-request",
+        key: "getsentry/junior#1081",
+        label: "junior",
+      },
+      {
+        icon: "circle-dot",
+        key: "getsentry/junior#1090",
+        label: "junior",
+      },
+    ],
     annotations: [
       {
         kind: "resource_link",
@@ -763,7 +780,23 @@ function longConversation(nowMs: number): ConversationDetailReport {
     assignedWork: true,
     unfinishedWork: true,
     isPriority: true,
-    sidebarAnnotations: [{ icon: "git-pull-request", key: "github", label: "2 repos" }],
+    sidebarAnnotations: [
+      {
+        icon: "circle-dashed",
+        key: "getsentry/junior#2201",
+        label: "junior",
+      },
+      {
+        icon: "git-pull-request",
+        key: "getsentry/payments#91",
+        label: "payments",
+      },
+      {
+        icon: "git-merge",
+        key: "getsentry/relay#44",
+        label: "relay",
+      },
+    ],
     annotations: [
       {
         kind: "resource_link",
@@ -777,16 +810,6 @@ function longConversation(nowMs: number): ConversationDetailReport {
       },
       {
         kind: "resource_link",
-        key: "getsentry/payments#88",
-        label: "getsentry/payments#88",
-        plugin: "github",
-        status: "open",
-        url: "https://github.com/getsentry/payments/issues/88",
-        createdAt: startedAt,
-        updatedAt: iso(Date.parse(startedAt), 70_000),
-      },
-      {
-        kind: "resource_link",
         key: "getsentry/payments#91",
         label: "getsentry/payments#91",
         plugin: "github",
@@ -794,6 +817,16 @@ function longConversation(nowMs: number): ConversationDetailReport {
         url: "https://github.com/getsentry/payments/pull/91",
         createdAt: startedAt,
         updatedAt: iso(Date.parse(startedAt), 75_000),
+      },
+      {
+        kind: "resource_link",
+        key: "getsentry/relay#44",
+        label: "getsentry/relay#44",
+        plugin: "github",
+        status: "merged",
+        url: "https://github.com/getsentry/relay/pull/44",
+        createdAt: startedAt,
+        updatedAt: iso(Date.parse(startedAt), 70_000),
       },
     ],
     cumulativeDurationMs: 552_761,
@@ -839,7 +872,18 @@ function incidentConversation(nowMs: number): ConversationDetailReport {
     // Finished links show the final annotation state in the sidebar.
     assignedWork: true,
     finishedWorkAt: iso(nowMs, -42 * 60_000),
-    sidebarAnnotations: [{ icon: "git-merge", key: "github", label: "payments" }],
+    sidebarAnnotations: [
+      {
+        icon: "git-merge",
+        key: "getsentry/payments#77",
+        label: "payments",
+      },
+      {
+        icon: "circle-x",
+        key: "getsentry/payments#61",
+        label: "payments",
+      },
+    ],
     annotations: [
       {
         kind: "resource_link",
@@ -1736,7 +1780,8 @@ export function readMockPeoplePluginReports(
             id: "pull-requests-created",
             type: "bar_chart",
             title: "Pull requests opened",
-            description: "Junior-owned pull requests opened for this person per day",
+            description:
+              "Junior-owned pull requests opened for this person per day",
             timeRangeDays: [7, 30, 90],
             series: [{ key: "created", label: "Opened" }],
             categories: days,
