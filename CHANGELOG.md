@@ -1,4 +1,24 @@
 # Changelog
+## 0.163.0
+
+### New Features ✨
+
+- (acp) Add remote ACP prototype by @gricha in [#1559](https://github.com/getsentry/junior/pull/1559)
+- (dashboard) Set chat composer mobile input hints by @sentry-junior in [#1556](https://github.com/getsentry/junior/pull/1556)
+- (workspaces) Add database-backed repository workspaces by @sentry-junior in [#1420](https://github.com/getsentry/junior/pull/1420)
+
+### Internal Changes 🔧
+
+#### Slack
+
+- Exercise real paused turn wakes by @dcramer in [#1561](https://github.com/getsentry/junior/pull/1561)
+- Run handler completions through real agent by @dcramer in [#1557](https://github.com/getsentry/junior/pull/1557)
+- Run normal completions through real agent by @dcramer in [#1555](https://github.com/getsentry/junior/pull/1555)
+
+#### Other
+
+- Remove agent outcome exceptions by @dcramer in [#1558](https://github.com/getsentry/junior/pull/1558)
+
 ## 0.162.0
 
 ### New Features ✨
