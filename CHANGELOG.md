@@ -1,4 +1,22 @@
 # Changelog
+## 0.167.0
+
+### New Features ✨
+
+#### Workspaces
+
+- Show baseline snapshot on Workspaces page by @sentry-junior in [#1588](https://github.com/getsentry/junior/pull/1588)
+- Add write tools by @sentry-junior in [#1578](https://github.com/getsentry/junior/pull/1578)
+
+### Bug Fixes 🐛
+
+- (dashboard) Keep mobile jump button out of transcript flow by @sentry-junior in [#1584](https://github.com/getsentry/junior/pull/1584)
+- (workspaces) Make list rows clickable by @sentry-junior in [#1585](https://github.com/getsentry/junior/pull/1585)
+
+### Internal Changes 🔧
+
+- (dashboard) Keep mobile typing urgent by @sentry-junior in [#1583](https://github.com/getsentry/junior/pull/1583)
+
 ## 0.166.0
 
 ### New Features ✨
