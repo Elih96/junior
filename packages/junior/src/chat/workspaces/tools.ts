@@ -17,6 +17,7 @@ const repoSchema = z.object({
 const workspaceSchema = z.object({
   id: z.string(),
   name: z.string(),
+  setup_script: z.string(),
   repos: z.array(repoSchema),
 });
 
@@ -24,6 +25,7 @@ function view(workspace: Workspace) {
   return {
     id: workspace.id,
     name: workspace.name,
+    setup_script: workspace.setupScript,
     repos: workspace.repos.map((repo) => ({
       provider: repo.provider,
       repo: repo.repo,
@@ -46,7 +48,7 @@ export function createWorkspaceTools(
         readOnlyHint: true,
       },
       description:
-        "List named repository workspaces that can replace the current sandbox.",
+        "List named repository workspaces that can replace the current sandbox. Manage install-wide Workspace recipes from the authenticated dashboard or `/api/workspaces`.",
       inputSchema: z.object({}).strict(),
       outputSchema: juniorToolOutputSchema.extend({
         active_workspace_id: z.string().nullable(),

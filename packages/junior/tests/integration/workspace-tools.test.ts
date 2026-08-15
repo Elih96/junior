@@ -4,7 +4,7 @@ import { normalizeLocalConversationId } from "@/chat/local/conversation";
 import {
   runLocalAgentTurn,
   type LocalAgentReply,
-  type LocalToolResult
+  type LocalToolResult,
 } from "@/chat/local/runner";
 import { juniorWorkspaceRepos, juniorWorkspaces } from "@/db/schema";
 import { createModelAgentRunner } from "../fixtures/agent-runner";
@@ -22,9 +22,9 @@ describe("Workspace tools", () => {
       repos: [
         {
           provider: "github",
-          repo: "getsentry/sentry"
+          repo: "getsentry/sentry",
         },
-      ]
+      ],
     };
     const db = getDb();
     await db.insert(juniorWorkspaces).values({
@@ -32,27 +32,27 @@ describe("Workspace tools", () => {
       name: workspace.name,
       setupScript: workspace.setupScript,
       createdAt: now,
-      updatedAt: now
+      updatedAt: now,
     });
     await db.insert(juniorWorkspaceRepos).values({
       workspaceId: workspace.id,
-      ...workspace.repos[0]!
+      ...workspace.repos[0]!,
     });
     await expect(
       listWorkspaceNamesByRepository(db, {
         provider: "github",
-        repo: "getsentry/sentry"
+        repo: "getsentry/sentry",
       }),
     ).resolves.toEqual(["sentry"]);
     await expect(
       listWorkspaceNamesByRepository(db, {
         provider: "GitHub",
-        repo: "GetSentry/Sentry"
+        repo: "GetSentry/Sentry",
       }),
     ).resolves.toEqual(["sentry"]);
     const conversationId = normalizeLocalConversationId({
       alias: "workspace-tools",
-      cwd: "/tmp/local-agent-workspace-tools"
+      cwd: "/tmp/local-agent-workspace-tools",
     });
     expect(conversationId).toBeDefined();
     const delivered: LocalAgentReply[] = [];
@@ -61,7 +61,7 @@ describe("Workspace tools", () => {
     await runLocalAgentTurn(
       {
         conversationId: conversationId!,
-        message: "List the available Workspaces."
+        message: "List the available Workspaces.",
       },
       {
         agentRunner: createModelAgentRunner(
@@ -70,7 +70,7 @@ describe("Workspace tools", () => {
             {
               type: "toolCall",
               name: "switchWorkspace",
-              arguments: { name: "missing" }
+              arguments: { name: "missing" },
             },
             { type: "text", text: "The missing Workspace was not found." },
           ]),
@@ -80,7 +80,7 @@ describe("Workspace tools", () => {
         },
         onToolResult: async (result) => {
           results.push(result);
-        }
+        },
       },
     );
 
@@ -96,23 +96,24 @@ describe("Workspace tools", () => {
             {
               id: "workspace-1",
               name: "sentry",
+              setup_script: "pnpm install",
               repos: [
                 {
                   provider: "github",
                   repo: "getsentry/sentry",
-                  checkout_path: "repos/sentry"
+                  checkout_path: "repos/sentry",
                 },
-              ]
+              ],
             },
-          ]
-        }
+          ],
+        },
       }),
       expect.objectContaining({
         error: "Workspace not found: missing",
         ok: false,
         toolCallId: expect.any(String),
         toolName: "switchWorkspace",
-        params: { name: "missing" }
+        params: { name: "missing" },
       }),
     ]);
     expect(delivered).toEqual([
