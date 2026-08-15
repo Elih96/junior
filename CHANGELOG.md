@@ -1,4 +1,13 @@
 # Changelog
+## 0.169.0
+
+### New Features ✨
+
+#### Workspaces
+
+- Add Workspace usage stats by @sentry-junior in [#1592](https://github.com/getsentry/junior/pull/1592)
+- Add agent write tools by @sentry-junior in [#1591](https://github.com/getsentry/junior/pull/1591)
+
 ## 0.168.0
 
 ### Bug Fixes 🐛
