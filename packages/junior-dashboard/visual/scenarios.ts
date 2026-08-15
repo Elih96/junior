@@ -27,6 +27,7 @@ export const MOBILE: VisualViewport = {
 };
 
 const ACTIVE_CONVERSATION_ID = "slack:CQA123:1770003600.000200";
+const WORKSPACE_ID = "11111111-1111-4111-8111-111111111111";
 
 /** Named dashboard surfaces CI can screenshot for a PR. */
 export const VISUAL_SCENARIOS: VisualScenario[] = [
@@ -56,8 +57,24 @@ export const VISUAL_SCENARIOS: VisualScenario[] = [
     id: "system",
     label: "System",
     path: "/system",
-    ready: "Model spend",
+    // Page header, not a buried chart/stat label.
+    ready: "System",
     viewports: [DESKTOP],
+  },
+  {
+    id: "workspaces",
+    label: "Workspaces",
+    path: "/system/workspaces",
+    // Baseline card heading proves the list payload rendered.
+    ready: "Baseline snapshot",
+    viewports: [DESKTOP, MOBILE],
+  },
+  {
+    id: "workspace-detail",
+    label: "Workspace detail",
+    path: `/system/workspaces/${WORKSPACE_ID}`,
+    ready: "Current snapshot",
+    viewports: [DESKTOP, MOBILE],
   },
   {
     id: "memories",
@@ -104,6 +121,16 @@ const PATH_RULES: PathRule[] = [
     match: (filePath) =>
       filePath.startsWith("packages/junior-dashboard/src/client/pages/people/"),
     scenarioIds: ["person-profile"],
+  },
+  {
+    match: (filePath) =>
+      filePath.startsWith(
+        "packages/junior-dashboard/src/client/pages/system/",
+      ) &&
+      /(?:^|\/)(?:BaselineSnapshot|SnapshotSummary|Workspace|workspace)/.test(
+        filePath,
+      ),
+    scenarioIds: ["workspaces", "workspace-detail"],
   },
   {
     match: (filePath) =>

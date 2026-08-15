@@ -1,13 +1,15 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus } from "lucide-react";
-import { Link } from "react-router";
 import {
   workspaceListSchema,
+  type BaselineSnapshotReport,
   type WorkspaceReport,
 } from "@sentry/junior/api/schema";
 
 import { getDashboardAgentName } from "../../agentName";
+import { ButtonLink } from "../../components/Button";
 import { EmptyTelemetry } from "../../components/EmptyTelemetry";
+import { InlineError } from "../../components/InlineError";
 import { LoadingView } from "../../components/LoadingView";
 import { Card } from "../../components/layout/Card";
 import { PageHeader } from "../../components/layout/PageHeader";
@@ -16,6 +18,7 @@ import {
   deleteDashboardResource,
   fetchDashboardJson,
 } from "../../http";
+import { BaselineSnapshotCard } from "./BaselineSnapshotCard";
 import { SystemPageLayout } from "./SystemPageLayout";
 import { WorkspaceList } from "./WorkspaceList";
 
@@ -53,14 +56,15 @@ export function WorkspacesPage() {
     },
     onSuccess: async (workspace) => {
       await queryClient.cancelQueries({ queryKey: workspacesQueryKey });
-      queryClient.setQueryData<{ workspaces: WorkspaceReport[] }>(
-        workspacesQueryKey,
-        (current) => ({
-          workspaces: (current?.workspaces ?? []).filter(
-            (item) => item.id !== workspace.id,
-          ),
-        }),
-      );
+      queryClient.setQueryData<{
+        baselineSnapshot: BaselineSnapshotReport | null;
+        workspaces: WorkspaceReport[];
+      }>(workspacesQueryKey, (current) => ({
+        baselineSnapshot: current?.baselineSnapshot ?? null,
+        workspaces: (current?.workspaces ?? []).filter(
+          (item) => item.id !== workspace.id,
+        ),
+      }));
     },
   });
 
@@ -73,17 +77,15 @@ export function WorkspacesPage() {
   }
 
   const workspaces = workspacesQuery.data?.workspaces ?? [];
+  const baselineSnapshot = workspacesQuery.data?.baselineSnapshot ?? null;
   return (
     <SystemPageLayout>
       <PageHeader
         actions={
-          <Link
-            className="inline-flex h-9 items-center gap-2 rounded border border-white/15 bg-dashboard-surface-raised px-3 font-mono text-sm font-semibold leading-none text-dashboard-text no-underline transition-colors hover:border-white/30 hover:bg-dashboard-surface-hover"
-            to="/system/workspaces/new"
-          >
+          <ButtonLink to="/system/workspaces/new">
             <Plus aria-hidden="true" size={14} />
             New Workspace
-          </Link>
+          </ButtonLink>
         }
         description={`Named repository recipes ${getDashboardAgentName()} can switch into without cloning each turn.`}
         title="Workspaces"
@@ -98,12 +100,16 @@ export function WorkspacesPage() {
       ) : null}
 
       {deleteMutation.error ? (
-        <p className="m-0 text-sm text-rose-300" role="alert">
+        <InlineError>
           {readWorkspaceApiError(
             deleteMutation.error,
             "Could not delete the Workspace. Try again.",
           )}
-        </p>
+        </InlineError>
+      ) : null}
+
+      {!workspacesQuery.error ? (
+        <BaselineSnapshotCard snapshot={baselineSnapshot} />
       ) : null}
 
       <WorkspaceList
