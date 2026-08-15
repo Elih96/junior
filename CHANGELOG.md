@@ -1,4 +1,10 @@
 # Changelog
+## 0.168.0
+
+### Bug Fixes 🐛
+
+- (github) Gate ad-hoc clone on matching Workspaces by @sentry-junior in [#1590](https://github.com/getsentry/junior/pull/1590)
+
 ## 0.167.0
 
 ### New Features ✨
