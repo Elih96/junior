@@ -119,7 +119,7 @@ export function ConversationPage(props: {
     <div className="grid min-h-0 min-w-0 grid-rows-[minmax(7rem,1fr)_minmax(0,auto)]">
       <div
         aria-label="Conversation transcript"
-        className="min-h-0 overflow-y-auto overscroll-contain px-3 pb-3 md:px-7 md:pb-5"
+        className="min-h-0 overflow-y-auto overscroll-contain px-3 pb-1.5 md:px-7 md:pb-2"
         tabIndex={0}
       >
         <section className="min-w-0">
@@ -259,7 +259,6 @@ export function ConversationPage(props: {
           // Only pass committed ids for mailbox de-dupe. The full transcript is
           // too large to re-enter the footer on every live poll while typing.
           committedMessageIds={mailboxCommittedIds}
-          live={live}
           onPinRequest={requestPin}
           pendingAuthorization={detail.pendingAuthorization}
           pendingGeneratedAt={detail.pendingGeneratedAt}
@@ -281,7 +280,6 @@ export function ConversationPage(props: {
 function ConversationReplyFooter(props: {
   committedMessageIds: readonly string[];
   conversationId: string;
-  live: boolean;
   onPinRequest: () => void;
   pendingAuthorization?: ConversationPendingMessagesReport["authorization"];
   pendingGeneratedAt?: string;
@@ -370,18 +368,9 @@ function ConversationReplyFooter(props: {
   }, []);
 
   return (
-    <div className="flex w-full min-h-0 max-h-[min(calc(var(--dashboard-viewport-height,100dvh)*0.55),24rem)] flex-col overflow-hidden self-end px-2 pt-1.5 pb-[calc(0.375rem+env(safe-area-inset-bottom))] md:max-h-none md:overflow-visible md:self-auto md:px-7 md:py-4 md:pb-4">
+    <div className="flex w-full min-h-0 max-h-[min(calc(var(--dashboard-viewport-height,100dvh)*0.55),24rem)] flex-col overflow-hidden self-end px-2 pt-1 pb-[calc(0.375rem+env(safe-area-inset-bottom))] md:max-h-none md:overflow-visible md:self-auto md:px-7 md:pt-2 md:pb-3">
       {/* Queue chrome may scroll; keep the composer pinned below it on mobile. */}
       <div className="min-h-0 min-w-0 shrink overflow-y-auto overscroll-contain md:overflow-visible">
-        {props.live ? (
-          <div className="mb-1.5 flex items-center gap-2 font-sans text-xs text-dashboard-text-muted md:hidden">
-            <span
-              aria-hidden="true"
-              className="size-1.5 shrink-0 animate-pulse rounded-full bg-emerald-300"
-            />
-            <span>Junior is working…</span>
-          </div>
-        ) : null}
         {props.pendingAuthorization ? (
           <PendingAuthorization authorization={props.pendingAuthorization} />
         ) : null}

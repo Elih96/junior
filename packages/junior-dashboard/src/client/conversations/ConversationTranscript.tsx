@@ -75,7 +75,7 @@ export const ConversationTranscriptView = memo(function ConversationTranscriptVi
   const messages = useMemo(() => transcriptMessagesFromEvents(events), [events]);
 
   return (
-    <section className="min-w-0 py-1">
+    <section className="min-w-0 pt-1">
       <div className="min-w-0">
         <SegmentEvents
           onOpenSubagentTranscript={props.onOpenSubagentTranscript}
