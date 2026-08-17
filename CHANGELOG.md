@@ -1,4 +1,23 @@
 # Changelog
+## 0.170.0
+
+### Bug Fixes 🐛
+
+#### Dashboard
+
+- Clean up mobile conversation chrome by @sentry-junior in [#1598](https://github.com/getsentry/junior/pull/1598)
+- Update responsive dashboard branding by @sentry-junior in [#1597](https://github.com/getsentry/junior/pull/1597)
+- Compact live working indicator by @sentry-junior in [#1593](https://github.com/getsentry/junior/pull/1593)
+- Remove empty message placeholder by @sentry-junior in [#1595](https://github.com/getsentry/junior/pull/1595)
+
+#### Other
+
+- (slack) Prefer ids and known destinations for channel refs by @sentry-junior in [#1596](https://github.com/getsentry/junior/pull/1596)
+
+### Internal Changes 🔧
+
+- (dashboard) Stop live polls thrashing typing by @sentry-junior in [#1594](https://github.com/getsentry/junior/pull/1594)
+
 ## 0.169.0
 
 ### New Features ✨
