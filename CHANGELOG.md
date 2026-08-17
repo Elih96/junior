@@ -1,4 +1,22 @@
 # Changelog
+## 0.171.0
+
+### New Features ✨
+
+- (workspaces) Move snapshots to dedicated table by @dcramer in [#1606](https://github.com/getsentry/junior/pull/1606)
+
+### Bug Fixes 🐛
+
+- (dashboard) Pin chat composer and keep typing snappy by @sentry-junior in [#1603](https://github.com/getsentry/junior/pull/1603)
+
+### Documentation 📚
+
+- (testing) Limit integration fakes to Slack and LLMs by @dcramer in [#1605](https://github.com/getsentry/junior/pull/1605)
+
+### Internal Changes 🔧
+
+- (agent) Keep invocation failures at owning boundaries by @dcramer in [#1602](https://github.com/getsentry/junior/pull/1602)
+
 ## 0.170.0
 
 ### Bug Fixes 🐛
