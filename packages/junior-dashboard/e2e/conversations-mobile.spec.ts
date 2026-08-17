@@ -19,6 +19,91 @@ test.beforeEach(async ({ page }) => {
   await mockDashboardApis(page);
 });
 
+/**
+ * Focused composers must stay in the bottom of the visual viewport.
+ * Hit-test near the bottom edge so a mid-screen/centered regression fails
+ * without using banned bounding-box layout APIs.
+ */
+async function expectFocusedComposerAtVisualViewportBottom(
+  composer: import("@playwright/test").Locator,
+  visualHeightPx: number,
+) {
+  await expect(composer).toBeFocused();
+  await expect
+    .poll(() =>
+      composer.evaluate((node, heightPx) => {
+        const form = node.closest("form");
+        if (!(node instanceof HTMLElement) || !form) return "missing-form";
+        if (document.activeElement !== node) return "not-focused";
+
+        // Sample just above the bottom edge of the simulated visual viewport.
+        const sampleY = heightPx - 12;
+        const sampleX = Math.max(24, Math.floor(window.innerWidth / 2));
+        const hit = document.elementFromPoint(sampleX, sampleY);
+        if (!hit) return "no-hit";
+        if (hit === node || form.contains(hit) || node.contains(hit)) {
+          return "composer-at-bottom";
+        }
+        return "composer-not-at-bottom";
+      }, visualHeightPx),
+    )
+    .toBe("composer-at-bottom");
+}
+
+test("keeps the new conversation composer above the mobile keyboard", async ({
+  page,
+}) => {
+  await page.setViewportSize({ height: 844, width: 390 });
+  await page.goto(server.baseURL);
+  await page.getByRole("button", { name: "New conversation" }).click();
+
+  const heading = page.getByRole("heading", { name: "New conversation" });
+  const composer = page.getByLabel("Start a conversation");
+  await expect(heading).toBeVisible();
+  await composer.focus();
+  await expect(composer).toBeFocused();
+
+  // Create mode must pin the composer outside the scroll body, same shell as
+  // reply chats. Layout pixels belong to visual QA; this checks structure.
+  await expect
+    .poll(() =>
+      composer.evaluate((node) => {
+        const form = node.closest("form");
+        if (!form) return "missing-form";
+        let current: Element | null = form.parentElement;
+        while (current) {
+          const overflowY = getComputedStyle(current).overflowY;
+          if (overflowY === "auto" || overflowY === "scroll") {
+            return "composer-in-scroll";
+          }
+          if (current.getAttribute("aria-label") === "Selected conversation") {
+            break;
+          }
+          current = current.parentElement;
+        }
+        return "pinned-footer";
+      }),
+    )
+    .toBe("pinned-footer");
+
+  const shell = page.locator("main").first();
+  await page.evaluate(() => {
+    Object.defineProperties(window.visualViewport, {
+      height: { configurable: true, value: 520 },
+      offsetTop: { configurable: true, value: 0 },
+    });
+    window.visualViewport?.dispatchEvent(new Event("resize"));
+  });
+  await expect
+    .poll(() =>
+      shell.evaluate((element) =>
+        element.style.getPropertyValue("--dashboard-viewport-height"),
+      ),
+    )
+    .toBe("520px");
+  await expectFocusedComposerAtVisualViewportBottom(composer, 520);
+});
+
 test("opens and closes a conversation in the mobile workspace", async ({
   page,
 }) => {
@@ -196,6 +281,8 @@ test("opens and closes a conversation in the mobile workspace", async ({
       ),
     )
     .toBe("0px");
+  // Focused reply input must stay docked at the bottom of the visual viewport.
+  await expectFocusedComposerAtVisualViewportBottom(composer, 520);
 
   await composer.blur();
   await page.evaluate(() => {
