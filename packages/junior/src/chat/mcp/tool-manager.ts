@@ -433,8 +433,10 @@ export class McpToolManager {
     }
 
     const availableToolNames = new Set(tools.map((tool) => tool.name));
+    const optionalToolNames = new Set(plugin.manifest.mcp?.optionalTools ?? []);
     const missingTools = allowedTools.filter(
-      (toolName) => !availableToolNames.has(toolName),
+      (toolName) =>
+        !optionalToolNames.has(toolName) && !availableToolNames.has(toolName),
     );
     if (missingTools.length > 0) {
       throw new Error(

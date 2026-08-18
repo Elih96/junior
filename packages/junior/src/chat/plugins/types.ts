@@ -125,6 +125,7 @@ export interface PluginManifestConfig {
     url?: string;
     headers?: Record<string, string | null> | null;
     allowedTools?: string[] | null;
+    optionalTools?: string[] | null;
     wrappedTools?: string[] | null;
   } | null;
   oauth?: PluginOAuthConfigPatch | null;

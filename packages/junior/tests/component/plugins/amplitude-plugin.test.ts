@@ -51,6 +51,20 @@ const readOnlyTools = [
   "get_data_warehouse_destinations",
   "get_data_warehouse_jobs",
 ];
+const optionalReadOnlyTools = [
+  "query_amplitude_data",
+  "get_amp_user_data",
+  "query_wave_opportunities",
+  "query_wave_product_areas",
+  "get_amplitude_agent_analytics_info",
+  "get_data_ingestion_sources",
+  "get_data_source_details",
+  "get_data_warehouse_destinations",
+  "get_data_warehouse_jobs",
+];
+const requiredReadOnlyTools = readOnlyTools.filter(
+  (tool) => !optionalReadOnlyTools.includes(tool),
+);
 const blockedTools = [
   "render_amplitude_chart",
   "use_amplitude_chart_monitors",
@@ -127,9 +141,12 @@ describe("Amplitude plugin package", () => {
     });
     const allowedTools = providers[0]?.manifest.mcp?.allowedTools;
     expect(allowedTools).toEqual(readOnlyTools);
+    expect(providers[0]?.manifest.mcp?.optionalTools).toEqual(
+      optionalReadOnlyTools,
+    );
 
     listToolsMock.mockResolvedValue(
-      [...readOnlyTools, ...blockedTools].map((name) => ({
+      [...requiredReadOnlyTools, ...blockedTools].map((name) => ({
         name,
         description: `Amplitude ${name}`,
         inputSchema: { type: "object", properties: {} },
@@ -140,7 +157,7 @@ describe("Amplitude plugin package", () => {
     await manager.activateProvider("amplitude");
 
     expect(manager.getActiveToolCatalog().map((tool) => tool.rawName)).toEqual(
-      readOnlyTools,
+      requiredReadOnlyTools,
     );
   });
 });

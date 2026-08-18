@@ -392,6 +392,7 @@ interface WritePackagedPluginWithMcpOptions {
   url?: string;
   headers?: Record<string, string>;
   allowedTools?: string[];
+  optionalTools?: string[];
   envVars?: Record<string, { default?: string } | null>;
 }
 
@@ -431,6 +432,12 @@ async function writePackagedPluginWithMcp(
   if (options.allowedTools) {
     lines.push("  allowed-tools:");
     for (const tool of options.allowedTools) {
+      lines.push(`    - ${tool}`);
+    }
+  }
+  if (options.optionalTools) {
+    lines.push("  optional-tools:");
+    for (const tool of options.optionalTools) {
       lines.push(`    - ${tool}`);
     }
   }
@@ -1109,6 +1116,7 @@ describe("plugin registry package discovery", () => {
     await writePackagedPluginWithMcp(tempRoot, {
       headers: { "X-Workspace": "acme" },
       allowedTools: ["search", "fetch"],
+      optionalTools: ["fetch"],
     });
     await fs.writeFile(
       path.join(tempRoot, "package.json"),
@@ -1140,6 +1148,7 @@ describe("plugin registry package discovery", () => {
         "X-Workspace": "acme",
       },
       allowedTools: ["search", "fetch"],
+      optionalTools: ["fetch"],
     });
     expect(
       registry.getMcpProviders().map((plugin) => plugin.manifest.name),
@@ -1173,6 +1182,39 @@ describe("plugin registry package discovery", () => {
     await expectRegistryLoadFailure(
       ["@acme/junior-plugin-mcp-invalid-allowed-tools"],
       "Plugin demo mcp.allowed-tools must be an array of strings when provided",
+    );
+  });
+
+  it("rejects MCP optional-tools outside allowed-tools", async () => {
+    const tempRoot = await fs.mkdtemp(
+      path.join(os.tmpdir(), "junior-plugin-package-"),
+    );
+    await writePackagedPluginWithMcp(tempRoot, {
+      allowedTools: ["search"],
+      optionalTools: ["fetch"],
+    });
+    await fs.writeFile(
+      path.join(tempRoot, "package.json"),
+      JSON.stringify({
+        name: "temp-junior-app",
+        private: true,
+        dependencies: {
+          "@acme/junior-plugin-mcp": "1.0.0",
+        },
+      }),
+      "utf8",
+    );
+    process.chdir(tempRoot);
+
+    vi.resetModules();
+    vi.doMock("@/chat/discovery", async (importOriginal) => ({
+      ...(await importOriginal<typeof import("@/chat/discovery")>()),
+      pluginRoots: () => [],
+    }));
+
+    await expectRegistryLoadFailure(
+      ["@acme/junior-plugin-mcp"],
+      "Plugin demo mcp.optional-tools must be included in allowed-tools: fetch",
     );
   });
 

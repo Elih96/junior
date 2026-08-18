@@ -16,18 +16,18 @@ description: Internal provider workflows
 
 ## Optional
 
-| Field                  | Purpose                     | Rules                                                                               |
-| ---------------------- | --------------------------- | ----------------------------------------------------------------------------------- |
-| `config-keys`          | defaults/targets            | short tokens, qualified as `<plugin>.<key>`                                         |
-| `env-vars`             | allowed deployment env refs | keys match `[A-Z_][A-Z0-9_]*`                                                       |
-| `domains`              | header injection domains    | required with `api-headers`                                                         |
-| `api-headers`          | literal/env-backed headers  | values may use declared `${NAME}`                                                   |
-| `credentials`          | token delivery              | `oauth-bearer` in `plugin.yaml`; code plugins can own egress credentials with hooks |
-| `oauth`                | user OAuth                  | requires `credentials.type: oauth-bearer` in `plugin.yaml`                          |
-| `target`               | target/config metadata      | `config-key` must be in `config-keys`                                               |
-| `runtime-dependencies` | sandbox packages            | `npm` or `system`                                                                   |
-| `runtime-postinstall`  | setup commands              | `cmd`, optional `args`, optional `sudo`                                             |
-| `mcp`                  | hosted HTTP MCP             | HTTPS `url`; omit `allowed-tools` by default; optional `wrapped-tools`              |
+| Field                  | Purpose                     | Rules                                                                                       |
+| ---------------------- | --------------------------- | ------------------------------------------------------------------------------------------- |
+| `config-keys`          | defaults/targets            | short tokens, qualified as `<plugin>.<key>`                                                 |
+| `env-vars`             | allowed deployment env refs | keys match `[A-Z_][A-Z0-9_]*`                                                               |
+| `domains`              | header injection domains    | required with `api-headers`                                                                 |
+| `api-headers`          | literal/env-backed headers  | values may use declared `${NAME}`                                                           |
+| `credentials`          | token delivery              | `oauth-bearer` in `plugin.yaml`; code plugins can own egress credentials with hooks         |
+| `oauth`                | user OAuth                  | requires `credentials.type: oauth-bearer` in `plugin.yaml`                                  |
+| `target`               | target/config metadata      | `config-key` must be in `config-keys`                                                       |
+| `runtime-dependencies` | sandbox packages            | `npm` or `system`                                                                           |
+| `runtime-postinstall`  | setup commands              | `cmd`, optional `args`, optional `sudo`                                                     |
+| `mcp`                  | hosted HTTP MCP             | HTTPS `url`; omit `allowed-tools` by default; optional `optional-tools` and `wrapped-tools` |
 
 ## OAuth bearer
 
@@ -79,6 +79,9 @@ mcp:
 
 Omit `allowed-tools` unless the plugin must hide part of the provider surface.
 When set, only listed tools are exposed and discovery fails if any are missing.
+List an allowed tool in `optional-tools` when the provider may omit it by
+account, region, or rollout. Missing optional tools do not fail discovery.
+Every optional tool must also be in `allowed-tools`.
 
 ### MCP wrapper tools
 

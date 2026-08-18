@@ -12,7 +12,7 @@ related:
 
 The Amplitude plugin lets Slack users inspect product usage, active users, event segmentation, funnels, retention, saved charts, experiments, selected taxonomy data, session replay, feature flags, guides and surveys, feedback, agent analytics, Wave, data warehouse status, and user activity. The plugin does not grant Junior access to mutation tools.
 
-Junior connects to Amplitude's hosted MCP server and starts Amplitude's OAuth flow when a user first requests analytics. The plugin exposes a fixed allowlist of tools whose full contract is read-only.
+Junior connects to Amplitude's hosted MCP server and starts Amplitude's OAuth flow when a user first requests analytics. The plugin exposes a fixed allowlist of tools whose full contract is read-only. Tools that Amplitude does not return for an account, region, or rollout stay unavailable without disabling the other read-only tools.
 
 ## Install
 
@@ -96,7 +96,7 @@ get_data_warehouse_destinations
 get_data_warehouse_jobs
 ```
 
-Every other Amplitude MCP tool is unavailable through the plugin. When Amplitude adds another read operation, the package must explicitly add it before Junior can call it.
+Every other Amplitude MCP tool is unavailable through the plugin. When Amplitude adds another read operation, the package must explicitly add it before Junior can call it. A documented tool is exposed only when the connected MCP server returns it during discovery.
 
 ## What users can query
 

@@ -237,6 +237,7 @@ const mcpSourceSchema = z
     url: httpsUrlString,
     headers: stringMapSchema.optional(),
     "allowed-tools": nonEmptyStringArraySchema("allowed-tools").optional(),
+    "optional-tools": nonEmptyStringArraySchema("optional-tools").optional(),
     "wrapped-tools": nonEmptyStringArraySchema("wrapped-tools").optional(),
   })
   .passthrough();
@@ -361,6 +362,7 @@ function manifestConfigPatch(
       setDefined(mcp, "url", config.mcp.url);
       setDefined(mcp, "headers", config.mcp.headers);
       setDefined(mcp, "allowed-tools", config.mcp.allowedTools);
+      setDefined(mcp, "optional-tools", config.mcp.optionalTools);
       setDefined(mcp, "wrapped-tools", config.mcp.wrappedTools);
       result.mcp = mcp;
     }
@@ -945,13 +947,26 @@ function normalizeMcp(
       })
     : undefined;
 
+  const allowedTools = result.data["allowed-tools"];
+  const optionalTools = result.data["optional-tools"];
+  if (optionalTools) {
+    const allowedToolSet = new Set(allowedTools ?? []);
+    const disallowedOptionalTools = optionalTools.filter(
+      (tool) => !allowedToolSet.has(tool),
+    );
+    if (disallowedOptionalTools.length > 0) {
+      throw new Error(
+        `Plugin ${name} mcp.optional-tools must be included in allowed-tools: ${disallowedOptionalTools.join(", ")}`,
+      );
+    }
+  }
+
   return {
     transport: "http",
     url: result.data.url,
     ...(headers ? { headers } : {}),
-    ...(result.data["allowed-tools"]
-      ? { allowedTools: result.data["allowed-tools"] }
-      : {}),
+    ...(allowedTools ? { allowedTools } : {}),
+    ...(optionalTools ? { optionalTools } : {}),
     ...(result.data["wrapped-tools"]
       ? { wrappedTools: result.data["wrapped-tools"] }
       : {}),

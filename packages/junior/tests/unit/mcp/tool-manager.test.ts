@@ -63,7 +63,11 @@ import { McpToolManager } from "@/chat/mcp/tool-manager";
 
 function buildPlugin(
   name = "demo",
-  options: { allowedTools?: string[]; wrappedTools?: string[] } = {},
+  options: {
+    allowedTools?: string[];
+    optionalTools?: string[];
+    wrappedTools?: string[];
+  } = {},
 ): PluginDefinition {
   return {
     dir: `/tmp/plugins/${name}`,
@@ -77,6 +81,9 @@ function buildPlugin(
         transport: "http",
         url: "https://mcp.example.com",
         ...(options.allowedTools ? { allowedTools: options.allowedTools } : {}),
+        ...(options.optionalTools
+          ? { optionalTools: options.optionalTools }
+          : {}),
         ...(options.wrappedTools ? { wrappedTools: options.wrappedTools } : {}),
       },
     },
@@ -527,6 +534,41 @@ describe("McpToolManager", () => {
     await expect(manager.activateProvider("notion")).rejects.toThrow(
       "Plugin notion MCP discovery missing allowlisted tools: notion-fetch",
     );
+  });
+
+  it("activates with the discovered subset of optional allowlisted MCP tools", async () => {
+    const plugin = buildPlugin("notion", {
+      allowedTools: ["notion-search", "notion-fetch", "notion-read-page"],
+      optionalTools: ["notion-fetch", "notion-read-page"],
+    });
+    listToolsMock.mockResolvedValue([
+      {
+        name: "notion-search",
+        title: "Search",
+        description: "Search Notion",
+        inputSchema: { type: "object", properties: {} },
+      },
+      {
+        name: "notion-fetch",
+        title: "Fetch",
+        description: "Fetch Notion content",
+        inputSchema: { type: "object", properties: {} },
+      },
+      {
+        name: "notion-create-pages",
+        title: "Create",
+        description: "Create Notion pages",
+        inputSchema: { type: "object", properties: {} },
+      },
+    ]);
+
+    const manager = new McpToolManager([plugin]);
+    await manager.activateProvider("notion");
+
+    expect(manager.getActiveToolCatalog().map((tool) => tool.rawName)).toEqual([
+      "notion-search",
+      "notion-fetch",
+    ]);
   });
 
   it("invokes onToolSuccess after a successful model-facing MCP call", async () => {

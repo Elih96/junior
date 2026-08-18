@@ -36,3 +36,13 @@ mcp:
     - get_data_source_details
     - get_data_warehouse_destinations
     - get_data_warehouse_jobs
+  optional-tools:
+    - query_amplitude_data
+    - get_amp_user_data
+    - query_wave_opportunities
+    - query_wave_product_areas
+    - get_amplitude_agent_analytics_info
+    - get_data_ingestion_sources
+    - get_data_source_details
+    - get_data_warehouse_destinations
+    - get_data_warehouse_jobs

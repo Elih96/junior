@@ -56,6 +56,8 @@ export interface PluginMcpConfig {
   /** Provider tools exposed directly to the model. */
   allowedTools?: string[];
   headers?: Record<string, string>;
+  /** Allowed provider tools that may be absent from discovery. */
+  optionalTools?: string[];
   transport: "http";
   url: string;
   /** Provider tools hidden from the model and callable only by plugin-owned wrapper tools. */
