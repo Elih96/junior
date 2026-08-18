@@ -1,4 +1,11 @@
 # Changelog
+
+## 0.172.2
+
+### Bug Fixes 🐛
+
+- (amplitude) Tolerate optional MCP tools by @Elih96 in [31d6bcd4](https://github.com/Elih96/junior/commit/31d6bcd4a0c727fbddaa5a342ac478746db62a6c)
+
 ## 0.172.1
 
 ### Bug Fixes 🐛
@@ -1597,4 +1604,3 @@
 - Organize and shard end-to-end suites by @sentry-junior in [#968](https://github.com/getsentry/junior/pull/968)
 - Accept explicit Slack URL links by @dcramer in [#967](https://github.com/getsentry/junior/pull/967)
 - Add isolated global sandbox egress by @dcramer in [#943](https://github.com/getsentry/junior/pull/943)
-
