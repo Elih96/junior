@@ -1,4 +1,10 @@
 # Changelog
+## 0.172.0
+
+### Bug Fixes 🐛
+
+- (dashboard) Dock composer on first keyboard focus by @sentry-junior in [#1608](https://github.com/getsentry/junior/pull/1608)
+
 ## 0.171.0
 
 ### New Features ✨
