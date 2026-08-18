@@ -13,6 +13,30 @@ export type MobileViewportMetrics = {
   offsetTopPx: number;
 };
 
+export type MobileViewportSyncSource =
+  | "focusout"
+  | "measure"
+  | "resize"
+  | "scroll";
+
+const mobileViewportSyncPriority: Record<MobileViewportSyncSource, number> = {
+  focusout: 2,
+  measure: 1,
+  resize: 3,
+  scroll: 0,
+};
+
+/** Keep the strongest viewport signal when browser events share one frame. */
+export function coalescedMobileViewportSyncSource(
+  current: MobileViewportSyncSource | undefined,
+  next: MobileViewportSyncSource,
+): MobileViewportSyncSource {
+  if (current === undefined) return next;
+  return mobileViewportSyncPriority[next] > mobileViewportSyncPriority[current]
+    ? next
+    : current;
+}
+
 /**
  * Map layout + visual viewport into shell geometry.
  * Only follow visualViewport offset/height while the keyboard is open so
@@ -47,13 +71,23 @@ export function mobileViewportMetrics(input: {
   };
 }
 
-/** Keep Safari focus panning from moving the fixed workspace with the keyboard. */
+/**
+ * Keep Safari focus panning from moving the fixed workspace with the keyboard.
+ *
+ * First focus opens the keyboard with a resize that may set a non-zero
+ * offsetTop. Accept that dock so the composer stays on the visual bottom.
+ * Freeze only scroll-driven pans while an editor is focused.
+ */
 export function mobileViewportOffsetTop(input: {
   editableFocused: boolean;
   nextOffsetTop: number;
   previousOffsetTop: number;
+  source: MobileViewportSyncSource;
 }): number {
-  return input.editableFocused ? input.previousOffsetTop : input.nextOffsetTop;
+  if (input.editableFocused && input.source === "scroll") {
+    return input.previousOffsetTop;
+  }
+  return input.nextOffsetTop;
 }
 
 /** Keep the mobile workspace inside the visual viewport while the keyboard is open. */
@@ -68,6 +102,7 @@ export function useMobileViewportHeight(
     const mobile = window.matchMedia("(max-width: 767px)");
     const viewport = window.visualViewport;
     let frame: number | undefined;
+    let pendingSource: MobileViewportSyncSource | undefined;
     let lastHeight = "";
     let lastOffsetTop = "";
     let appliedOffsetTopPx = 0;
@@ -97,9 +132,12 @@ export function useMobileViewportHeight(
       appliedOffsetTopPx = 0;
     };
 
-    const syncHeight = () => {
-      if (frame !== undefined) cancelAnimationFrame(frame);
+    const syncHeight = (source: MobileViewportSyncSource) => {
+      pendingSource = coalescedMobileViewportSyncSource(pendingSource, source);
+      if (frame !== undefined) return;
       frame = requestAnimationFrame(() => {
+        const syncSource = pendingSource ?? source;
+        pendingSource = undefined;
         const metrics = mobileViewportMetrics({
           layoutHeight: window.innerHeight,
           mobile: mobile.matches,
@@ -119,6 +157,7 @@ export function useMobileViewportHeight(
           editableFocused: isEditableElement(document.activeElement),
           nextOffsetTop: metrics.offsetTopPx,
           previousOffsetTop: appliedOffsetTopPx,
+          source: syncSource,
         });
         const nextHeight = `${metrics.heightPx}px`;
         const nextOffsetTop = `${offsetTopPx}px`;
@@ -135,21 +174,26 @@ export function useMobileViewportHeight(
       });
     };
 
-    syncHeight();
-    mobile.addEventListener("change", syncHeight);
-    window.addEventListener("resize", syncHeight);
-    // Keep height current during keyboard animation. Ignore Safari's focus pan
-    // offset until focus leaves the editor, or the fixed shell chases the pan.
-    viewport?.addEventListener("resize", syncHeight);
-    viewport?.addEventListener("scroll", syncHeight);
-    document.addEventListener("focusout", syncHeight);
+    const syncFromMeasure = () => syncHeight("measure");
+    const syncFromResize = () => syncHeight("resize");
+    const syncFromScroll = () => syncHeight("scroll");
+    const syncFromFocusOut = () => syncHeight("focusout");
+
+    syncFromMeasure();
+    mobile.addEventListener("change", syncFromMeasure);
+    window.addEventListener("resize", syncFromResize);
+    // Keyboard open arrives as resize (accept dock offset). Safari focus pans
+    // arrive as scroll while focused (freeze so the shell does not chase).
+    viewport?.addEventListener("resize", syncFromResize);
+    viewport?.addEventListener("scroll", syncFromScroll);
+    document.addEventListener("focusout", syncFromFocusOut);
     return () => {
       if (frame !== undefined) cancelAnimationFrame(frame);
-      mobile.removeEventListener("change", syncHeight);
-      window.removeEventListener("resize", syncHeight);
-      viewport?.removeEventListener("resize", syncHeight);
-      viewport?.removeEventListener("scroll", syncHeight);
-      document.removeEventListener("focusout", syncHeight);
+      mobile.removeEventListener("change", syncFromMeasure);
+      window.removeEventListener("resize", syncFromResize);
+      viewport?.removeEventListener("resize", syncFromResize);
+      viewport?.removeEventListener("scroll", syncFromScroll);
+      document.removeEventListener("focusout", syncFromFocusOut);
       setDocumentScrollLocked(false);
       clearViewportProperties();
     };
