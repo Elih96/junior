@@ -1,4 +1,18 @@
 # Changelog
+## 0.172.1
+
+### Bug Fixes 🐛
+
+#### Release
+
+- Use hosted runner on forks by @Elih96 in [1afeaae5](https://github.com/Elih96/junior/commit/1afeaae5ad09652d9e424c194f9be4c1a06ae865)
+- Support fork workflow token by @Elih96 in [3f4bb56f](https://github.com/Elih96/junior/commit/3f4bb56f274e80e1785fb810bb74ccc0380d58f1)
+
+#### Other
+
+- (amplitude) Align MCP read-only tools by @Elih96 in [3f62c2ab](https://github.com/Elih96/junior/commit/3f62c2ab9f97b177ed87d4232ad6a7faaa226403)
+- (auth) Use long-lived TTL when refresh token expiry is missing by @Elih96 in [4d5749e9](https://github.com/Elih96/junior/commit/4d5749e947989d544c8fe083d078f7099b4318ad)
+
 ## 0.172.0
 
 ### Bug Fixes 🐛
