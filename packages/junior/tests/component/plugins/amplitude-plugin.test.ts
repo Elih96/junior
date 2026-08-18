@@ -21,49 +21,56 @@ vi.mock("@/chat/mcp/client", () => ({
 import { McpToolManager } from "@/chat/mcp/tool-manager";
 
 const originalCwd = process.cwd();
+// Reviewed against Amplitude's official MCP tool roster on 2026-08-18.
 const readOnlyTools = [
   "search",
   "get_from_url",
-  "get_context",
-  "get_project_context",
-  "get_workspace_context",
-  "get_charts",
-  "get_dashboard",
-  "get_cohorts",
+  "get_amplitude_context",
+  "query_amplitude_data",
+  "get_amplitude_charts",
+  "get_amp_user_data",
   "get_experiments",
-  "get_users",
+  "query_experiment",
   "get_flags",
   "get_deployments",
-  "get_agent_results",
-  "get_events",
   "get_properties",
-  "get_custom_or_labeled_events",
   "get_transformations",
   "get_group_types",
   "get_session_replays",
   "list_session_replays",
   "get_session_replay_events",
-  "query_chart",
-  "query_charts",
-  "query_amplitude_data",
-  "query_experiment",
-  "get_cohort_sync_destinations",
-  "get_cohort_syncs",
-  "get_cohort_sync_history",
-  "get_branches",
   "list_guides_surveys",
   "get_guide_or_survey",
-  "get_feedback_insights",
-  "get_feedback_comments",
-  "get_feedback_mentions",
-  "get_feedback_sources",
-  "get_feedback_trends",
-  "query_agent_analytics_metrics",
-  "query_agent_analytics_sessions",
-  "query_agent_analytics_spans",
-  "get_agent_analytics_conversation",
-  "search_agent_analytics_conversations",
-  "get_agent_analytics_schema",
+  "query_wave_opportunities",
+  "query_wave_product_areas",
+  "use_amplitude_ai_feedback",
+  "get_agent_results",
+  "get_amplitude_agent_analytics_info",
+  "get_data_ingestion_sources",
+  "get_data_source_details",
+  "get_data_warehouse_destinations",
+  "get_data_warehouse_jobs",
+];
+const blockedTools = [
+  "render_amplitude_chart",
+  "use_amplitude_chart_monitors",
+  "use_amp_dashboards",
+  "use_amp_notebooks",
+  "use_amp_comments",
+  "share_amp_entities",
+  "use_amplitude_cohorts",
+  "create_experiment",
+  "update_experiment",
+  "create_metric",
+  "create_flags",
+  "update_flag",
+  "manage_amp_events",
+  "create_properties",
+  "update_properties",
+  "manage_amp_data_taxonomy",
+  "manage_wave_opportunities",
+  "manage_wave_product_areas",
+  "manage_wave_verification_artifacts",
 ];
 
 afterEach(() => {
@@ -121,18 +128,13 @@ describe("Amplitude plugin package", () => {
     const allowedTools = providers[0]?.manifest.mcp?.allowedTools;
     expect(allowedTools).toEqual(readOnlyTools);
 
-    listToolsMock.mockResolvedValue([
-      ...readOnlyTools.map((name) => ({
+    listToolsMock.mockResolvedValue(
+      [...readOnlyTools, ...blockedTools].map((name) => ({
         name,
         description: `Amplitude ${name}`,
         inputSchema: { type: "object", properties: {} },
       })),
-      {
-        name: "create_dashboard",
-        description: "Create a dashboard",
-        inputSchema: { type: "object", properties: {} },
-      },
-    ]);
+    );
 
     const manager = new McpToolManager(providers);
     await manager.activateProvider("amplitude");

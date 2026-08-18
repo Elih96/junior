@@ -1,6 +1,6 @@
 name: amplitude
 display-name: Amplitude
-description: Read-only Amplitude analytics, taxonomy, replay, feedback, experiments, and product content
+description: Read-only Amplitude analytics, replay, feedback, experiments, Wave, and data warehouse status
 
 env-vars:
   AMPLITUDE_MCP_URL:
@@ -11,43 +11,28 @@ mcp:
   allowed-tools:
     - search
     - get_from_url
-    - get_context
-    - get_project_context
-    - get_workspace_context
-    - get_charts
-    - get_dashboard
-    - get_cohorts
+    - get_amplitude_context
+    - query_amplitude_data
+    - get_amplitude_charts
+    - get_amp_user_data
     - get_experiments
-    - get_users
+    - query_experiment
     - get_flags
     - get_deployments
-    - get_agent_results
-    - get_events
     - get_properties
-    - get_custom_or_labeled_events
     - get_transformations
     - get_group_types
     - get_session_replays
     - list_session_replays
     - get_session_replay_events
-    - query_chart
-    - query_charts
-    - query_amplitude_data
-    - query_experiment
-    - get_cohort_sync_destinations
-    - get_cohort_syncs
-    - get_cohort_sync_history
-    - get_branches
     - list_guides_surveys
     - get_guide_or_survey
-    - get_feedback_insights
-    - get_feedback_comments
-    - get_feedback_mentions
-    - get_feedback_sources
-    - get_feedback_trends
-    - query_agent_analytics_metrics
-    - query_agent_analytics_sessions
-    - query_agent_analytics_spans
-    - get_agent_analytics_conversation
-    - search_agent_analytics_conversations
-    - get_agent_analytics_schema
+    - query_wave_opportunities
+    - query_wave_product_areas
+    - use_amplitude_ai_feedback
+    - get_agent_results
+    - get_amplitude_agent_analytics_info
+    - get_data_ingestion_sources
+    - get_data_source_details
+    - get_data_warehouse_destinations
+    - get_data_warehouse_jobs

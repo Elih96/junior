@@ -19,8 +19,8 @@ Should trigger for:
 - event counts, uniques, sessions, or property segmentation
 - funnel conversion and drop-off analysis
 - retention analysis
-- saved Amplitude chart or dashboard interpretation
-- experiment, cohort, taxonomy, session-replay, feature-flag, guide, survey, feedback, agent-analytics, or user-activity inspection
+- saved Amplitude chart interpretation
+- experiment, taxonomy-property, session-replay, feature-flag, guide, survey, feedback, agent-analytics, Wave, data-warehouse, or user-activity inspection
 
 Should not trigger for:
 
@@ -33,10 +33,11 @@ Should not trigger for:
 
 1. Load the live Amplitude MCP catalog through Junior's provider bridge.
 2. Use exact discovered tool names and schemas.
-3. Expose only official Amplitude tools documented as search, retrieval, or query operations.
+3. Expose only official Amplitude tools whose full contract is read-only.
 4. Never bypass MCP filtering through direct HTTP or shell calls.
 5. Preserve explicit identifiers, filters, and time ranges.
 6. State assumptions and distinguish users, events, sessions, and percentages.
+7. Exclude mixed tools that combine read and mutation operations.
 
 ## Validation
 
