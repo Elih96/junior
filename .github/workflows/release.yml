@@ -28,13 +28,17 @@ jobs:
   release:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     name: Release a new version
+    env:
+      RELEASE_APP_ID: ${{ vars.SENTRY_RELEASE_BOT_CLIENT_ID }}
+      RELEASE_PRIVATE_KEY: ${{ secrets.SENTRY_RELEASE_BOT_PRIVATE_KEY }}
     steps:
       - name: Get auth token
         id: token
+        if: env.RELEASE_APP_ID != '' && env.RELEASE_PRIVATE_KEY != ''
         uses: actions/create-github-app-token@5d869da34e18e7287c1daad50e0b8ea0f506ce69 # v1.11.0
         with:
-          app-id: ${{ vars.SENTRY_RELEASE_BOT_CLIENT_ID }}
-          private-key: ${{ secrets.SENTRY_RELEASE_BOT_PRIVATE_KEY }}
+          app-id: ${{ env.RELEASE_APP_ID }}
+          private-key: ${{ env.RELEASE_PRIVATE_KEY }}
           permission-checks: read
           permission-statuses: read
           permission-contents: write
@@ -43,7 +47,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          token: ${{ steps.token.outputs.token }}
+          token: ${{ steps.token.outputs.token || github.token }}
           fetch-depth: 0
           fetch-tags: true
 
@@ -70,7 +74,7 @@ jobs:
       - name: Prepare release
         uses: getsentry/action-prepare-release@c8e1c2009ab08259029170132c384f03c1064c0e # v1
         env:
-          GITHUB_TOKEN: ${{ steps.token.outputs.token }}
+          GITHUB_TOKEN: ${{ steps.token.outputs.token || github.token }}
         with:
           version: ${{ steps.version.outputs.new }}
           force: ${{ inputs.force }}
