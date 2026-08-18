@@ -70,6 +70,11 @@ describe("dashboard canonical-event mock routes", () => {
       mockConversations: true,
     });
 
+    const me = await app.fetch(new Request("http://localhost/api/me"));
+    await expect(me.json()).resolves.toEqual({
+      user: { email: "dev@example.com", emailVerified: true },
+    });
+
     const conversations = await app.fetch(
       new Request("http://localhost/api/conversations"),
     );
@@ -103,13 +108,13 @@ describe("dashboard canonical-event mock routes", () => {
 
     const personal = await app.fetch(
       new Request(
-        "http://localhost/api/conversations?actorEmail=morgan%40sentry.io",
+        "http://localhost/api/conversations?actorEmail=dev%40example.com",
       ),
     );
     const personalBody = (await personal.json()) as typeof body;
     expect(
       personalBody.conversations.every(
-        (item) => item.actorIdentity?.email === "morgan@sentry.io",
+        (item) => item.actorIdentity?.email === "dev@example.com",
       ),
     ).toBe(true);
 
@@ -239,14 +244,58 @@ describe("dashboard canonical-event mock routes", () => {
           event.data.assistant !== undefined,
       ),
     ).toBe(true);
-    expect(dashboardQa.annotations).toEqual([
-      expect.objectContaining({
-        kind: "resource_link",
-        key: "getsentry/junior#1081",
-        plugin: "github",
-        status: "open",
-      }),
+    expect(dashboardQa.annotations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "resource_link",
+          key: "getsentry/getsentry#21571",
+          plugin: "github",
+          status: "merged",
+        }),
+        expect.objectContaining({
+          kind: "resource_link",
+          key: "getsentry/getsentry#21572",
+          plugin: "github",
+          status: "open",
+        }),
+        expect.objectContaining({
+          kind: "resource_link",
+          key: "getsentry/getsentry#21569",
+          plugin: "github",
+          status: "draft",
+        }),
+        expect.objectContaining({
+          kind: "resource_link",
+          key: "getsentry/sentry#121727",
+          plugin: "github",
+          status: "merged",
+        }),
+      ]),
+    );
+    expect(dashboardQa.annotations).toHaveLength(4);
+    expect(dashboardQa.sidebarAnnotations).toEqual([
+      {
+        icon: "git-merge",
+        key: "getsentry/getsentry#21571",
+        label: "getsentry",
+      },
+      {
+        icon: "git-pull-request",
+        key: "getsentry/getsentry#21572",
+        label: "getsentry",
+      },
+      {
+        icon: "circle-dashed",
+        key: "getsentry/getsentry#21569",
+        label: "getsentry",
+      },
+      {
+        icon: "git-merge",
+        key: "getsentry/sentry#121727",
+        label: "sentry",
+      },
     ]);
+    expect(dashboardQa.unfinishedWork).toBe(true);
 
     const failed = await readDetail("slack:CQA777:1770014400.000500");
     expect(failed.events.at(-1)?.data).toMatchObject({

@@ -1,0 +1,330 @@
+import {
+  memo,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactElement,
+  type ReactNode,
+} from "react";
+import {
+  AlertCircle,
+  Clock3,
+  LoaderCircle,
+  SkipForward,
+  X,
+  type LucideIcon,
+} from "lucide-react";
+
+import { Tooltip } from "../components/Tooltip";
+import { actorLabel } from "../format";
+import type { ConversationMailboxMessage } from "./conversationOutbox";
+import {
+  TranscriptHeadingMeta,
+  TranscriptHeadingRow,
+} from "./TranscriptHeadingRow";
+import { SlackMark } from "./SlackMark";
+
+const MAX_EXPANDED_PENDING_ROWS = 3;
+const COLLAPSED_PENDING_ROW_COUNT = 2;
+
+function pendingDeliveryMeta(
+  message: Pick<ConversationMailboxMessage, "clientStatus" | "delivery">,
+): { icon: LucideIcon; label: string; spin?: boolean } {
+  if (message.clientStatus === "failed") {
+    return { icon: AlertCircle, label: "Failed to send" };
+  }
+  if (message.clientStatus === "sending") {
+    return { icon: LoaderCircle, label: "Sending", spin: true };
+  }
+  if (message.delivery === "interrupt") {
+    return { icon: SkipForward, label: "Interrupt" };
+  }
+  return { icon: Clock3, label: "Queued" };
+}
+
+function PendingMetaIcon(props: { children: ReactElement; label: string }) {
+  return (
+    <Tooltip content={props.label} placement="above">
+      <span
+        aria-label={props.label}
+        className="inline-flex text-dashboard-text-muted"
+      >
+        {props.children}
+      </span>
+    </Tooltip>
+  );
+}
+
+function PendingMetaIcons(props: {
+  cancelDisabled: boolean;
+  cancelError: boolean;
+  cancelPending: boolean;
+  message: ConversationMailboxMessage;
+  onCancel?: () => void;
+  showSlack: boolean;
+}) {
+  const delivery = pendingDeliveryMeta(props.message);
+  const DeliveryIcon = delivery.icon;
+
+  return (
+    <TranscriptHeadingMeta className="flex min-w-0 items-center justify-end gap-1.5 text-xs leading-none text-dashboard-text-muted">
+      {props.showSlack ? (
+        <Tooltip content="Slack" placement="above">
+          <span className="inline-flex text-dashboard-text-muted">
+            <SlackMark className="size-3.5" />
+          </span>
+        </Tooltip>
+      ) : null}
+      <PendingMetaIcon label={delivery.label}>
+        <DeliveryIcon
+          aria-hidden="true"
+          className={delivery.spin ? "animate-spin" : undefined}
+          size={13}
+          strokeWidth={2.2}
+        />
+      </PendingMetaIcon>
+      {props.onCancel ? (
+        <Tooltip content="Remove queued message" placement="above">
+          <button
+            aria-label={
+              props.cancelError
+                ? "Could not remove. Try again."
+                : "Remove queued message"
+            }
+            className="inline-flex size-5 cursor-pointer items-center justify-center rounded border-0 bg-transparent p-0 text-dashboard-text-muted transition-colors hover:bg-white/[0.06] hover:text-amber-50 focus-visible:outline focus-visible:outline-1 focus-visible:outline-amber-200/55 disabled:cursor-default disabled:opacity-50"
+            disabled={props.cancelDisabled}
+            onClick={props.onCancel}
+            type="button"
+          >
+            {props.cancelPending ? (
+              <LoaderCircle
+                aria-hidden="true"
+                className="animate-spin"
+                size={13}
+              />
+            ) : (
+              <X aria-hidden="true" size={14} strokeWidth={2.2} />
+            )}
+          </button>
+        </Tooltip>
+      ) : null}
+    </TranscriptHeadingMeta>
+  );
+}
+
+function PendingRow(props: {
+  cancelDisabled: boolean;
+  cancelError: boolean;
+  cancelPending: boolean;
+  message: ConversationMailboxMessage;
+  onCancel?(message: ConversationMailboxMessage): void;
+  onRetry?(message: ConversationMailboxMessage): void;
+}) {
+  const text = props.message.text ?? "";
+  const redacted = Boolean(props.message.redacted);
+  // Pending rows are always the local user message. Avoid rebuilding a full
+  // transcript projection just to label the stack above the composer.
+  const roleLabel = actorLabel(props.message.actorIdentity) ?? "User";
+  const showSlack = props.message.source === "slack";
+  const canRetry =
+    props.message.clientStatus === "failed" &&
+    Boolean(props.message.idempotencyKey) &&
+    Boolean(props.onRetry);
+
+  return (
+    <article className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-1 px-3 py-2 text-dashboard-text md:px-3.5">
+      <TranscriptHeadingRow
+        left={
+          <span className="inline-block max-w-full truncate font-display text-sm font-semibold leading-tight text-dashboard-text">
+            {roleLabel}
+          </span>
+        }
+        leftClassName="text-sm leading-snug text-dashboard-text"
+        right={
+          <PendingMetaIcons
+            cancelDisabled={props.cancelDisabled}
+            cancelError={props.cancelError}
+            cancelPending={props.cancelPending}
+            message={props.message}
+            onCancel={
+              props.onCancel ? () => props.onCancel?.(props.message) : undefined
+            }
+            showSlack={showSlack}
+          />
+        }
+      />
+      {redacted ? (
+        <p className="m-0 font-mono text-sm leading-snug text-dashboard-text-muted">
+          [redacted]
+        </p>
+      ) : (
+        <p className="m-0 line-clamp-3 font-mono text-sm leading-snug text-dashboard-text/90">
+          {text}
+        </p>
+      )}
+      {canRetry ? (
+        <div className="flex min-w-0 items-center gap-2">
+          <p className="m-0 font-sans text-xs text-red-300/80">
+            Could not send.
+          </p>
+          <button
+            className="cursor-pointer border-0 bg-transparent p-0 font-sans text-xs font-medium text-cyan-200/90 underline-offset-2 hover:underline focus-visible:outline focus-visible:outline-1 focus-visible:outline-cyan-300/55"
+            onClick={() => props.onRetry?.(props.message)}
+            type="button"
+          >
+            Retry
+          </button>
+        </div>
+      ) : null}
+      {props.cancelError ? (
+        <p className="m-0 font-sans text-xs text-amber-100/75">
+          Could not remove. Try again.
+        </p>
+      ) : null}
+    </article>
+  );
+}
+
+function ExpandQueuedMessagesButton(props: {
+  expanded: boolean;
+  hiddenCount: number;
+  onClick(): void;
+  totalCount: number;
+}) {
+  const totalLabel =
+    props.totalCount === 1
+      ? "1 queued message"
+      : `${props.totalCount} queued messages`;
+  const moreLabel =
+    props.hiddenCount > 0
+      ? `${props.hiddenCount} more queued messages`
+      : totalLabel;
+  // Mobile collapses previews and uses the total count as the expand control.
+  const mobileCollapsedLabel = totalLabel;
+  const label = props.expanded ? "Show fewer queued messages" : moreLabel;
+
+  return (
+    <button
+      aria-expanded={props.expanded}
+      className="w-full cursor-pointer border-0 bg-transparent px-3 py-2 text-left font-sans text-xs font-medium text-amber-100/80 transition-colors hover:text-amber-50 focus-visible:outline focus-visible:outline-1 focus-visible:outline-amber-200/55 md:px-3.5"
+      onClick={props.onClick}
+      type="button"
+    >
+      {props.expanded ? (
+        label
+      ) : (
+        <>
+          <span className="md:hidden">{mobileCollapsedLabel}</span>
+          <span className="hidden md:inline">{moreLabel}</span>
+        </>
+      )}
+    </button>
+  );
+}
+
+/** Render accepted mailbox rows as a compact stack attached above the composer. */
+export const PendingMailboxStack = memo(function PendingMailboxStack(props: {
+  cancelError?: boolean;
+  cancelPending?: boolean;
+  cancelTargetInboundMessageId?: string;
+  /** Message ids already present in committed history. */
+  committedMessageIds?: readonly string[];
+  messages: readonly ConversationMailboxMessage[];
+  onCancelMessage?: (message: ConversationMailboxMessage) => void;
+  /** Fires after expand/collapse changes the stack height above the composer. */
+  onLayoutChange?: () => void;
+  onRetry?(message: ConversationMailboxMessage): void;
+}): ReactNode {
+  const [expanded, setExpanded] = useState(false);
+  const onLayoutChangeRef = useRef(props.onLayoutChange);
+  onLayoutChangeRef.current = props.onLayoutChange;
+  const hasMountedExpandedRef = useRef(false);
+  // Expand/collapse changes footer height. Pin after layout so the transcript
+  // scroll root already has the new client height.
+  useLayoutEffect(() => {
+    if (!hasMountedExpandedRef.current) {
+      hasMountedExpandedRef.current = true;
+      return;
+    }
+    onLayoutChangeRef.current?.();
+  }, [expanded]);
+  const committedIds = new Set(props.committedMessageIds ?? []);
+  // Preserve mailbox order and clientStatus from the merged source rows.
+  // History wins on messageId so a send does not appear twice once workers
+  // persist the user message.
+  const rows = props.messages.filter(
+    (message) => !committedIds.has(message.messageId),
+  );
+  if (rows.length === 0) return null;
+
+  const canCollapse = rows.length > MAX_EXPANDED_PENDING_ROWS;
+  const showCollapsed = canCollapse && !expanded;
+  const previewRows = rows.slice(0, COLLAPSED_PENDING_ROW_COUNT);
+  const visibleRows = showCollapsed ? previewRows : rows;
+  const hiddenCount = Math.max(0, rows.length - COLLAPSED_PENDING_ROW_COUNT);
+  const toggleExpanded = () => setExpanded((value) => !value);
+
+  return (
+    <div
+      aria-label="Pending messages"
+      className="mx-2 overflow-hidden rounded-t-lg bg-amber-300/[0.055] md:mx-3"
+    >
+      {showCollapsed ? (
+        // Desktop keeps a two-row preview; mobile collapses to the control only.
+        <div className="hidden md:block">
+          {previewRows.map((message, index) => (
+            <PendingRow
+              cancelDisabled={Boolean(props.cancelPending)}
+              cancelError={Boolean(
+                props.cancelError &&
+                props.cancelTargetInboundMessageId === message.inboundMessageId,
+              )}
+              cancelPending={Boolean(
+                props.cancelPending &&
+                props.cancelTargetInboundMessageId === message.inboundMessageId,
+              )}
+              key={message.messageId ?? `${message.inboundMessageId}:${index}`}
+              message={message}
+              onCancel={
+                message.clientStatus === undefined
+                  ? props.onCancelMessage
+                  : undefined
+              }
+              onRetry={props.onRetry}
+            />
+          ))}
+        </div>
+      ) : (
+        visibleRows.map((message, index) => (
+          <PendingRow
+            cancelDisabled={Boolean(props.cancelPending)}
+            cancelError={Boolean(
+              props.cancelError &&
+              props.cancelTargetInboundMessageId === message.inboundMessageId,
+            )}
+            cancelPending={Boolean(
+              props.cancelPending &&
+              props.cancelTargetInboundMessageId === message.inboundMessageId,
+            )}
+            key={message.messageId ?? `${message.inboundMessageId}:${index}`}
+            message={message}
+            onCancel={
+              message.clientStatus === undefined
+                ? props.onCancelMessage
+                : undefined
+            }
+            onRetry={props.onRetry}
+          />
+        ))
+      )}
+      {canCollapse ? (
+        <ExpandQueuedMessagesButton
+          expanded={expanded}
+          hiddenCount={hiddenCount}
+          onClick={toggleExpanded}
+          totalCount={rows.length}
+        />
+      ) : null}
+    </div>
+  );
+});

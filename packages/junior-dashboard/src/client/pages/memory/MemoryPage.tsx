@@ -14,6 +14,7 @@ import { Navigate, useLocation, useNavigate, useParams } from "react-router";
 import type { PluginUserPageLink } from "@sentry/junior-plugin-api";
 
 import { FilterTabList } from "../../components/FilterBar";
+import { InlineError } from "../../components/InlineError";
 import { LoadingView } from "../../components/LoadingView";
 import { LoadMorePagination } from "../../components/Pagination";
 import { SearchInput } from "../../components/SearchInput";
@@ -51,7 +52,7 @@ export function MemoryPage(props: { page: PluginUserPageLink }) {
   const libraryHref = pathWithSearch(libraryPath, location.search);
 
   return (
-    <div className="min-w-0">
+    <>
       <SecondaryNavigation
         ariaLabel="Memory navigation"
         items={[
@@ -71,7 +72,7 @@ export function MemoryPage(props: { page: PluginUserPageLink }) {
           <MemoryLibrary libraryPath={libraryPath} page={props.page} />
         )}
       </PageLayout>
-    </div>
+    </>
   );
 }
 
@@ -267,9 +268,9 @@ function MemoryLibrary(props: {
             onLoadMore={() => void query.fetchNextPage()}
           />
           {action.error ? (
-            <p className="m-0 text-center text-sm text-rose-300">
+            <InlineError className="text-center">
               Could not complete this action. Try again.
-            </p>
+            </InlineError>
           ) : null}
         </div>
       )}

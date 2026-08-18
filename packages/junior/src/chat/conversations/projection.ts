@@ -45,13 +45,17 @@ import type { ThreadConversationState } from "@/chat/state/conversation";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { appendConversationMessages } from "./messages";
 
-/** Distinct MCP providers durably connected in the given events, sorted. */
+/** Distinct MCP providers one credential subject connected in the given events, sorted. */
 function connectedMcpProvidersFromEvents(
   events: ConversationEvent[],
+  credentialSubjectId: string,
 ): string[] {
   const providers = new Set<string>();
   for (const event of events) {
-    if (event.data.type === "mcp_provider_connected") {
+    if (
+      event.data.type === "mcp_provider_connected" &&
+      event.data.credentialSubjectId === credentialSubjectId
+    ) {
       providers.add(event.data.provider);
     }
   }
@@ -281,14 +285,15 @@ export async function loadTurnProjection(args: {
   return projectConversationEvents(historyEvents);
 }
 
-/** Load MCP providers connected in the current agent-history version. */
-export async function loadConnectedMcpProviders(
-  args: ScopedConversation,
-): Promise<string[]> {
-  const events = await getConversationEventStore().loadCurrentHistory(
+/** Load MCP providers the credential subject connected in this conversation. */
+export async function loadConnectedMcpProviders(args: {
+  conversationId: string;
+  credentialSubjectId: string;
+}): Promise<string[]> {
+  const events = await getConversationEventStore().loadHistory(
     args.conversationId,
   );
-  return connectedMcpProvidersFromEvents(events);
+  return connectedMcpProvidersFromEvents(events, args.credentialSubjectId);
 }
 
 function messageTimestamp(message: PiMessage): number {
@@ -469,19 +474,28 @@ async function commitMessagesLocked(
   };
 }
 
-/** Record a successful MCP provider connection without duplicating the fact. */
+/** Record a successful MCP provider connection for one credential subject without duplicating it. */
 export async function recordMcpProviderConnected(args: {
   conversationId: string;
   provider: string;
+  credentialSubjectId: string;
 }): Promise<void> {
   const eventStore = getConversationEventStore();
   const events = await eventStore.loadCurrentHistory(args.conversationId);
-  if (connectedMcpProvidersFromEvents(events).includes(args.provider)) {
+  if (
+    connectedMcpProvidersFromEvents(events, args.credentialSubjectId).includes(
+      args.provider,
+    )
+  ) {
     return;
   }
   await eventStore.append(args.conversationId, [
     {
-      data: { type: "mcp_provider_connected", provider: args.provider },
+      data: {
+        type: "mcp_provider_connected",
+        provider: args.provider,
+        credentialSubjectId: args.credentialSubjectId,
+      },
       createdAtMs: Date.now(),
     },
   ]);
@@ -823,6 +837,73 @@ export async function recordToolExecutionStarted(args: {
         type: "tool_execution_started",
         toolCallId: args.toolCallId,
         toolName: args.toolName,
+      },
+      createdAtMs: args.createdAtMs ?? Date.now(),
+    },
+  ]);
+}
+
+/** Stable write key so retries do not mint duplicate delivery rows. */
+function attachmentsDeliveredIdempotencyKey(args: {
+  attachments: Array<{ id: string }>;
+  conversationId: string;
+  toolCallId?: string;
+  turnId?: string;
+}): string {
+  if (args.toolCallId) {
+    return `attachments_delivered:tool:${args.toolCallId}`;
+  }
+  if (args.turnId) {
+    return (
+      `attachments_delivered:turn:${args.turnId}:` +
+      args.attachments
+        .map((attachment) => attachment.id)
+        .sort()
+        .join(",")
+    );
+  }
+  return (
+    `attachments_delivered:${args.conversationId}:` +
+    args.attachments
+      .map((attachment) => attachment.id)
+      .sort()
+      .join(",")
+  );
+}
+
+/** Record files delivered for humans without adding them to Pi replay. */
+export async function recordAttachmentsDelivered(args: {
+  attachments: Array<{
+    bytes: number;
+    contentType: string;
+    filename: string;
+    id: string;
+  }>;
+  conversationId: string;
+  createdAtMs?: number;
+  toolCallId?: string;
+  turnId?: string;
+}): Promise<void> {
+  if (args.attachments.length === 0) return;
+  await getConversationEventStore().append(args.conversationId, [
+    {
+      // Retries after a successful Slack upload must not create duplicate rows.
+      idempotencyKey: attachmentsDeliveredIdempotencyKey({
+        attachments: args.attachments,
+        conversationId: args.conversationId,
+        ...(args.toolCallId ? { toolCallId: args.toolCallId } : {}),
+        ...(args.turnId ? { turnId: args.turnId } : {}),
+      }),
+      data: {
+        type: "attachments_delivered",
+        attachments: args.attachments.map((attachment) => ({
+          id: attachment.id,
+          filename: attachment.filename,
+          contentType: attachment.contentType,
+          bytes: attachment.bytes,
+        })),
+        ...(args.toolCallId ? { toolCallId: args.toolCallId } : {}),
+        ...(args.turnId ? { turnId: args.turnId } : {}),
       },
       createdAtMs: args.createdAtMs ?? Date.now(),
     },

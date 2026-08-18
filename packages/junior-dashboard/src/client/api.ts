@@ -4,6 +4,7 @@ import type { LocationDetailReport } from "@sentry/junior/api/schema";
 import {
   conversationFeedSchema,
   conversationStatsReportSchema,
+  statsReportSchema,
 } from "@sentry/junior/api/schema";
 import {
   actorDirectoryReportSchema,
@@ -87,19 +88,11 @@ export function usePluginUserPagesData() {
 }
 
 /** Fetch the conversation summary feed used by list-oriented dashboard routes. */
-export function useConversationsData(actorEmail?: string) {
+export function useConversationsData() {
   return useQuery({
-    queryKey: ["dashboard", "conversations", actorEmail ?? "all"],
-    queryFn: ({ signal }) => {
-      const query = new URLSearchParams();
-      if (actorEmail) query.set("actorEmail", actorEmail);
-      const search = query.toString();
-      return fetchDashboardJson(
-        conversationFeedSchema,
-        `/api/conversations${search ? `?${search}` : ""}`,
-        signal,
-      );
-    },
+    queryKey: ["dashboard", "conversations", "viewer"],
+    queryFn: ({ signal }) =>
+      fetchDashboardJson(conversationFeedSchema, "/api/conversations", signal),
     retry: false,
   });
 }
@@ -164,6 +157,21 @@ export function useActorProfileData(email: string | undefined) {
       fetchDashboardJson(
         actorProfileReportSchema,
         `/api/people/${encodeURIComponent(email!)}`,
+        signal,
+      ),
+    retry: false,
+  });
+}
+
+/** Fetch person-scoped plugin reports for one People profile. */
+export function useActorPluginReportsData(email: string | undefined) {
+  return useQuery({
+    enabled: Boolean(email),
+    queryKey: ["dashboard", "people", email, "plugin-reports"],
+    queryFn: ({ signal }) =>
+      fetchDashboardJson(
+        pluginOperationalReportFeedSchema,
+        `/api/people/${encodeURIComponent(email!)}/plugin-reports`,
         signal,
       ),
     retry: false,
@@ -238,6 +246,16 @@ export function usePluginReportsData() {
         "/api/plugin-reports",
         signal,
       ),
+    retry: false,
+  });
+}
+
+/** Fetch named daily counters used by Workspace usage charts. */
+export function useStatsData() {
+  return useQuery({
+    queryKey: ["dashboard", "stats"],
+    queryFn: ({ signal }) =>
+      fetchDashboardJson(statsReportSchema, "/api/stats", signal),
     retry: false,
   });
 }

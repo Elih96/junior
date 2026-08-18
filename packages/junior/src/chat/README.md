@@ -25,7 +25,10 @@ file.
    delivery or intentional no-reply completion commits the durable turn outcome.
 
 The local CLI uses `local/runner.ts` directly rather than pretending to be a
-mailbox-backed provider.
+mailbox-backed provider. API-authored root turns and dashboard continues of
+existing conversations use the shared mailbox and worker through `api-turns/`
+with `publishExternally: false`. Continues keep the conversation destination
+(including Slack) for location context and never copy replies to the provider.
 
 ## Ownership
 
@@ -33,6 +36,9 @@ mailbox-backed provider.
 - `ingress/`: source parsing, classification, and routing.
 - `task-execution/`: mailbox, queue, lease, checkpoint, worker, and recovery.
 - `runtime/`: turn orchestration and provider-neutral delivery callbacks.
+- `api-turns/`: mailbox enqueue and worker consumer for dashboard/API turns
+  that stay in the conversation log (`publishExternally: false`), including
+  continues of Slack-rooted conversations by verified participants.
 - `agent-dispatch/`: durable task and plugin dispatch authority, mailbox
   adaptation, and plugin-facing outcome projection.
 - `agent-invocations/`: durable parent/child bindings, delegated work, and
@@ -43,6 +49,8 @@ mailbox-backed provider.
 - `tasks/`: signed-in user projection across scheduled and event tasks.
 - `agent/` and `pi/`: model execution and Pi state conversion.
 - `services/`: consumer-owned domain decisions.
+- `attachments/`: provider-neutral attachment metadata, object storage, and garbage collection.
+- `artifacts/`: content-addressed public artifacts, SQL metadata, and their unauthenticated read path.
 - `state/` and `conversations/`: persistence by concern.
 - `slack/` and `local/`: platform adapters.
 - `plugins/`, `credentials/`, `sandbox/`, and `mcp/`: external capability
@@ -97,6 +105,9 @@ delegation without becoming the execution actor or a general task owner.
 - Durable state is committed before acknowledging queue work or yielding.
 - Conversation events emitted by plugin operations preserve conversation
   activity, archive, and transcript-retention state.
+- Archive stays set through system noise (resource events, turn lifecycle,
+  compaction/handoff). Only a human user instruction or human visible user
+  message restores an archived conversation to the feed.
 - Model input stays below the configured bot context cap and the active model's
   advertised window. The agent checks before its first provider request and
   after each tool batch; an in-turn compaction commits its history replacement
@@ -108,6 +119,10 @@ delegation without becoming the execution actor or a general task owner.
 - Cooperative yield preserves the exact agent history and occurs only at a user
   or tool-result tail. Unlike timeout or auth recovery, it never rolls history
   back past delivered assistant output.
+- Once destination accepts a tool-free assistant reply, the turn is finished for
+  that reply. Hard timeout must complete the turn. It must not park a shorter
+  history. Soft yield after a pure assistant tail already cannot park; soft yield
+  after delivery plus steering may still park so steered work can continue.
 - Unexpected failures propagate to the boundary that owns capture and fallback
   delivery.
 - Actor, execution destination, conversation, and credential context remain
@@ -115,13 +130,16 @@ delegation without becoming the execution actor or a general task owner.
   conversation receives its bounded execution destination from its durable
   agent invocation.
 - External publish is controlled per turn via `publishExternally`. Slack
-  ingress/resume publish unless the flag is explicitly false. Non-Slack and
-  destinationless work stay conversation-only unless the flag is true.
-  Destination presence must not invent publish.
+  ingress/resume publish unless the flag is explicitly false. Non-Slack,
+  destinationless, and dashboard/web work stay conversation-only unless the
+  flag is true. Destination presence must not invent publish. A web Source may
+  keep a Slack Destination when `publishExternally` is false.
 - Host-owned runtime context and the actor's current instruction are separate
   user messages. The context message immediately precedes the instruction,
   remains context-authority on resume, and may be replaced before a later model
-  sample without replaying the actor's instruction.
+  sample without replaying the actor's instruction. Ambient thread history in
+  that context message is evidence only; only `<current-instruction>` authorizes
+  work.
 - Action review sees the validated, hook-adjusted semantic input immediately
   before execution; hook-injected environment values stay execution-only.
   Plugin tools with omitted approval modes use auto policy; core tools must opt

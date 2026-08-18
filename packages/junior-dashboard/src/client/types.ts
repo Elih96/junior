@@ -78,7 +78,20 @@ export type TranscriptViewStructuredEventPart = {
   version: number;
 };
 
+export type TranscriptViewDeliveredAttachment = {
+  bytes: number;
+  contentType: string;
+  filename: string;
+  id: string;
+};
+
+export type TranscriptViewAttachmentsDeliveredPart = {
+  attachments: TranscriptViewDeliveredAttachment[];
+  type: "attachments_delivered";
+};
+
 export type TranscriptViewPart =
+  | TranscriptViewAttachmentsDeliveredPart
   | TranscriptViewContextEventPart
   | TranscriptViewStructuredEventPart
   | TranscriptViewReasoningPart
@@ -97,7 +110,17 @@ export type TranscriptViewTurnContext = {
 export type TranscriptViewMessage = {
   actorIdentity?: ActorIdentity;
   contexts?: TranscriptViewTurnContext[];
+  /** Mailbox delivery mode while the message is still pending history commit. */
+  delivery?: "defer" | "interrupt";
   eventType?: string;
+  /** Whether the source message addressed Junior directly. */
+  explicitMention?: boolean;
+  /** Whether a non-mention message was used as input to a turn. */
+  context?: boolean;
+  /** Stable history/message id used to drop pending rows after commit. */
+  messageId?: string;
+  /** True while the message is accepted in the mailbox but not yet in history. */
+  pending?: boolean;
   route?: {
     confidence?: number;
     modelId: string;
@@ -108,6 +131,7 @@ export type TranscriptViewMessage = {
   outcome?: "error" | "delivery_failed";
   parts: TranscriptViewPart[];
   role: "assistant" | "system" | "tool" | "user";
+  source?: "slack" | "web";
   sourceSeq: number;
   timestamp?: number;
 };
@@ -115,6 +139,8 @@ export type TranscriptViewMessage = {
 export type ConversationTranscript = ConversationDetailReport;
 
 export type Conversation = {
+  annotations?: ConversationSummaryReport["annotations"];
+  sidebarAnnotations?: ConversationSummaryReport["sidebarAnnotations"];
   archivedAt?: string;
   auxiliaryCosts?: ConversationSummaryReport["auxiliaryCosts"];
   channel?: string;
@@ -134,6 +160,8 @@ export type Conversation = {
   status: ConversationSummaryReport["status"];
   surface: ConversationSummaryReport["surface"];
   traceId?: string;
+  isPriority?: boolean;
+  unfinishedWork?: boolean;
   visibility?: ConversationSummaryReport["visibility"];
 };
 

@@ -55,6 +55,7 @@ import {
   type ConversationMessageProvenance,
 } from "@/chat/conversations/provenance";
 import type { Actor } from "@/chat/actor";
+import { credentialUserSubjectId } from "@/chat/credentials/context";
 import {
   GEN_AI_PROVIDER_NAME,
   completeObject,
@@ -113,15 +114,15 @@ import {
 import { resolveDestinationVisibility } from "@/chat/conversations/destination-visibility";
 import {
   RetryableDeliveryError,
-  assertRunRoutingConsistency,
-  actorFromRouting,
+  assertRunConsistency,
+  actorFromRun,
   isAgentRunFeatureDisabled,
-  surfaceFromRouting,
-  type AgentRunRequest,
-} from "@/chat/agent/request";
+  surfaceFromRun,
+  type AgentRun,
+} from "@/chat/agent/types";
 import { actionConfirmationRetryMessages } from "@/chat/agent/action-confirmation-retry";
 import { loadTurnCheckpoint } from "@/chat/task-execution/checkpoint";
-import { discoverRunSkills, restoreSkillRuntime } from "@/chat/agent/skills";
+import { discoverRunSkills, loadRunSkill } from "@/chat/agent/skills";
 import {
   assemblePrompt,
   buildPromptInput,
@@ -193,47 +194,48 @@ function waitForAbortSettlement(
 /**
  * Run a full agent turn, optionally using a caller-provided model stream.
  *
- * The stream changes model output only; prompt assembly, persistence, tools,
- * delivery, and completion still use the normal agent runtime.
+ * Prefer binding `streamFn` through `createAgentRunner`. The stream changes
+ * model output only; prompt assembly, persistence, tools, delivery, and
+ * completion still use the normal agent runtime.
  */
 export async function executeAgentRun(
-  request: AgentRunRequest,
+  run: AgentRun,
   streamFn?: StreamFn,
 ): Promise<AgentRunOutcome> {
-  if (!request.routing.destination) {
+  if (!run.destination) {
     throw new TypeError("Assistant reply generation requires a destination");
   }
   const destinationVisibility = await resolveDestinationVisibility({
-    destination: request.routing.destination,
-    visibility: request.routing.destinationVisibility,
+    destination: run.destination,
+    visibility: run.destinationVisibility,
   });
   const conversationPrivacy = resolveConversationPrivacy({
     visibility: destinationVisibility,
   });
-  const resolvedRequest = destinationVisibility
+  const resolvedRun = destinationVisibility
     ? {
-        ...request,
-        routing: { ...request.routing, destinationVisibility },
+        ...run,
+        destinationVisibility,
       }
-    : request;
-  const credentialActor = request.routing.credentialContext?.actor;
-  const actor = actorFromRouting(request.routing);
+    : run;
+  const credentialActor = run.credentialContext?.actor;
+  const actor = actorFromRun(run);
   const userActor = actor && "userId" in actor ? actor : undefined;
   const runLogContext: LogContext = {
-    conversationId: request.conversationId,
-    platform: request.routing.source.platform,
+    conversationId: run.conversationId,
+    platform: run.source.platform,
     messageConversationId:
-      request.routing.source.platform === "slack"
-        ? request.conversationId
-        : request.routing.source.conversationId,
+      run.source.platform === "slack"
+        ? run.conversationId
+        : run.source.conversationId,
     destinationName:
-      request.routing.destination.platform === "slack"
-        ? request.routing.destination.channelId
-        : request.routing.destination.conversationId,
+      run.destination.platform === "slack"
+        ? run.destination.channelId
+        : run.destination.conversationId,
     userId: userActor?.userId,
     userName: userActor?.userName,
     userEmail: userActor?.email,
-    runId: request.runId,
+    runId: run.runId,
     actorType: credentialActor
       ? "type" in credentialActor
         ? credentialActor.type
@@ -249,7 +251,7 @@ export async function executeAgentRun(
   return withLogContext(runLogContext, () =>
     runWithConversationPrivacy(conversationPrivacy, () =>
       executeAgentRunInPrivacyContext(
-        resolvedRequest,
+        resolvedRun,
         conversationPrivacy,
         runLogContext,
         streamFn,
@@ -259,23 +261,88 @@ export async function executeAgentRun(
 }
 
 async function executeAgentRunInPrivacyContext(
-  request: AgentRunRequest,
+  run: AgentRun,
   conversationPrivacy: ConversationPrivacy | undefined,
   runLogContext: LogContext,
   streamFn: StreamFn | undefined,
 ): Promise<AgentRunOutcome> {
-  const { conversationId, input, routing, runId, turnId } = request;
-  const policy = request.policy ?? {};
+  // Local views keep the existing loop body readable while the public edge is flat.
+  const conversationId = run.conversationId;
+  const turnId = run.turnId;
+  const runId = run.runId;
+  const input = {
+    actor: run.instruction.actor,
+    includeConversationContextWithPiMessages:
+      run.instruction.includeConversationContextWithHistory,
+    messageText: run.instruction.text,
+    userAttachments: run.instruction.attachments
+      ? [...run.instruction.attachments]
+      : undefined,
+    inboundAttachmentCount: run.instruction.inboundAttachmentCount,
+    omittedImageAttachmentCount: run.instruction.omittedImageAttachmentCount,
+    piMessages: run.history ? [...run.history] : undefined,
+    conversationContext: run.instruction.context,
+  };
+  const routing = {
+    actor: run.actor,
+    credentialContext: run.credentialContext,
+    source: run.source,
+    slackConversation: run.slackConversation,
+    slackActionToken: run.slackActionToken,
+    destination: run.destination,
+    publishExternally: run.publishExternally,
+    destinationVisibility: run.destinationVisibility,
+    surface: run.surface,
+    dispatch: run.dispatch,
+    toolChannelId: run.toolChannelId,
+  };
+  const policy = {
+    disabledFeatures: run.disabledFeatures,
+    turnDeadlineAtMs: run.deadlineAtMs,
+    signal: run.signal,
+    reasoningLevel: run.reasoning,
+    configuration: run.environment?.configuration,
+    locationConfiguration: run.environment?.locationConfiguration,
+    skillDirs: run.environment?.skillDirs,
+    sandboxTracePropagation: run.environment?.sandboxTracePropagation,
+    sandboxEgressSignals: run.environment?.sandboxEgressSignals,
+    toolOverrides: run.environment?.toolOverrides,
+  };
   const signal = policy.signal;
-  const state = request.state ?? {};
-  const observers = request.observers ?? {};
-  const delivery = request.delivery;
-  const authorization = request.authorization;
-  const durability = request.durability ?? {};
+  const state = run.state ?? {};
+  const observers = {
+    onStatus: run.onEvent
+      ? async (status: { text: string }) => {
+          await run.onEvent?.({ type: "status", text: status.text });
+        }
+      : undefined,
+    onToolInvocation: run.onEvent
+      ? async (invocation: {
+          params: Record<string, unknown>;
+          toolCallId: string;
+          toolName: string;
+        }) => {
+          await run.onEvent?.({
+            type: "tool_started",
+            params: invocation.params,
+            toolCallId: invocation.toolCallId,
+            toolName: invocation.toolName,
+          });
+        }
+      : undefined,
+    onToolResult: run.onEvent
+      ? async (report: import("@/chat/tool-support/tool-execution-report").ToolExecutionReport) => {
+          await run.onEvent?.({ type: "tool_finished", report });
+        }
+      : undefined,
+  };
+  const delivery = run.delivery;
+  const authorization = run.authorization;
+  const durability = run.durability ?? {};
 
   signal?.throwIfAborted();
 
-  assertRunRoutingConsistency(request);
+  assertRunConsistency(run);
 
   const replyStartedAtMs = Date.now();
   const configuredTurnDeadlineAtMs = replyStartedAtMs + botConfig.turnTimeoutMs;
@@ -297,6 +364,13 @@ async function executeAgentRunInPrivacyContext(
   let connectedMcpProviders = new Set<string>();
   let turnUsage: AgentTurnUsage | undefined;
   let priorPhaseUsage: AgentTurnUsage | undefined;
+  // Kept outside the main try so timeout recovery can finish after delivery.
+  let agent: Agent | undefined;
+  let acceptedToolFreeAssistant = false;
+  const generatedFiles: FileUpload[] = [];
+  const toolCalls: string[] = [];
+  let shouldTrace = false;
+  let getSandboxRef: (() => typeof state.sandboxRef) | undefined;
   const configuredReasoningLevel =
     policy.reasoningLevel ?? botConfig.reasoningLevel;
   let turnRoute: TurnRoute | undefined = configuredReasoningLevel
@@ -308,22 +382,30 @@ async function executeAgentRunInPrivacyContext(
     : undefined;
   let activeModelProfile: ModelProfile = STANDARD_MODEL_PROFILE;
   let activeModelId = modelIdForProfile(botConfig, activeModelProfile);
-  const actor = actorFromRouting(routing);
-  const surface = surfaceFromRouting(routing);
+  const actor = actorFromRun(run);
+  const surface = surfaceFromRun(run);
   const runSource = routing.source;
   const slackSource = runSource.platform === "slack" ? runSource : undefined;
   const slackDestination =
     routing.destination.platform === "slack" ? routing.destination : undefined;
   const slackActor = actor?.platform === "slack" ? actor : undefined;
   const userInput = input.messageText;
+  const credentialUserId = run.credentialContext
+    ? credentialUserSubjectId(run.credentialContext)
+    : undefined;
   const recordConnectedMcpProvider = async (provider: string) => {
     if (connectedMcpProviders.has(provider)) {
       return;
     }
-    await recordMcpProviderConnected({
-      conversationId,
-      provider,
-    });
+    // Only durable when we know who owns the connection. Restore filters by
+    // this credential subject on later turns.
+    if (credentialUserId) {
+      await recordMcpProviderConnected({
+        conversationId,
+        provider,
+        credentialSubjectId: credentialUserId,
+      });
+    }
     connectedMcpProviders.add(provider);
   };
   const recordActiveMcpProviders = async () => {
@@ -339,7 +421,7 @@ async function executeAgentRunInPrivacyContext(
     activeModelProfile = projection.modelProfile;
     activeModelId = modelIdForProfile(botConfig, activeModelProfile);
     let durableModelProfile = projection.modelProfile;
-    const shouldTrace = shouldEmitDevAgentTrace();
+    shouldTrace = shouldEmitDevAgentTrace();
     const spanContext: LogContext = { modelId: activeModelId };
 
     // ── Skill discovery ──────────────────────────────────────────────
@@ -466,27 +548,36 @@ async function executeAgentRunInPrivacyContext(
     const priorPiMessages = resumedFromSessionRecord
       ? existingSessionRecord?.piMessages
       : input.piMessages;
+    // Load only providers this credential subject connected. Shared thread
+    // history is not authority and must not warm another person's MCP servers.
     connectedMcpProviders = new Set(
-      await loadConnectedMcpProviders({ conversationId }),
+      credentialUserId
+        ? await loadConnectedMcpProviders({
+            conversationId,
+            credentialSubjectId: credentialUserId,
+          })
+        : [],
     );
 
-    // ── Restore skill runtime handles from durable Pi history ────────
-    await restoreSkillRuntime({
+    // A new turn starts with no active skill. A resumed turn recovers only its
+    // last successful loadSkill result, never skill state from older turns.
+    const explicitSkill = await loadRunSkill({
       activeSkills,
+      currentTurnMessages,
       invokedSkill,
-      priorPiMessages,
+      resumed: resumedFromSessionRecord,
       skillSandbox,
     });
-    const explicitSkill = invokedSkill
-      ? (activeSkills.find((skill) => skill.name === invokedSkill.name) ?? null)
-      : null;
     // ── Prompt input ─────────────────────────────────────────────────
     const { contextContentParts, routerBlocks, userContentParts } =
-      buildPromptInput(input);
+      buildPromptInput({
+        instruction: run.instruction,
+        history: run.history,
+      });
     const preAgentPromptMessages = (): PiMessage[] =>
       existingSessionRecord?.piMessages ?? [...(input.piMessages ?? [])];
 
-    const handoffEnabled = !isAgentRunFeatureDisabled(policy, "handoff");
+    const handoffEnabled = !isAgentRunFeatureDisabled(policy.disabledFeatures, "handoff");
     const storedTurnRoute = await loadTurnRoute({ conversationId, turnId });
     if (storedTurnRoute) {
       const resumedAfterHandoff =
@@ -605,9 +696,6 @@ async function executeAgentRunInPrivacyContext(
     activeModelId = routedModelId;
 
     // ── Mutable turn state ───────────────────────────────────────────
-    const generatedFiles: FileUpload[] = [];
-    const toolCalls: string[] = [];
-    let agent: Agent | undefined;
     let pendingPiHookError: Error | undefined;
     // Handoff becomes live only after its replacement epoch commits. This
     // pending value then drives the one-way model/context swap at Pi's boundary.
@@ -756,7 +844,7 @@ async function executeAgentRunInPrivacyContext(
       authorization,
       generatedFiles,
       invokedSkill,
-      observers,
+      onEvent: run.onEvent,
       onFatalToolError(error) {
         pendingPiHookError = error;
         agent?.abort();
@@ -764,15 +852,11 @@ async function executeAgentRunInPrivacyContext(
       onSandboxRefChanged: (sandboxRef) => {
         lastKnownSandboxRef = sandboxRef;
       },
-      policy,
       preAgentPromptMessages,
-      priorPiMessages,
       recordConnectedMcpProvider,
       requestHandoff,
       resume: runResume,
-      routing,
-      conversationId,
-      turnId,
+      run,
       skillSandbox,
       spanContext,
       state,
@@ -784,6 +868,7 @@ async function executeAgentRunInPrivacyContext(
     });
     mcpToolManager = wiring.mcpToolManager;
     closeTools = wiring.close;
+    getSandboxRef = () => wiring.getSandboxRef();
     const initialRepositoryInstructions = wiring.getSandboxRef()
       ? await wiring.captureRepositoryInstructions()
       : undefined;
@@ -869,7 +954,7 @@ async function executeAgentRunInPrivacyContext(
       explicitSkill,
       priorPiMessages,
       resumedFromSessionRecord,
-      routing,
+      run,
       spanContext,
       turnId,
       toolGuidance: wiring.toolGuidance,
@@ -1001,6 +1086,7 @@ async function executeAgentRunInPrivacyContext(
       }
       try {
         await delivery(message);
+        acceptedToolFreeAssistant = true;
       } catch (error) {
         assistantMessageDeliveryError = new AssistantMessageDeliveryError(
           error,
@@ -1601,6 +1687,33 @@ async function executeAgentRunInPrivacyContext(
       // Eager provider restoration can request auth before the agent span
       // exists; use the same durable parking operation as the in-span path.
       return await resume.parkForAuth(runError, turnUsage);
+    }
+    // One writer for agent history: once destination accepted a tool-free
+    // reply, hard timeout must finish the turn. Do not park a trimmed boundary
+    // that fights the accepted assistant already written by delivery.
+    // Soft yield after a pure assistant tail is already a no-op (not
+    // continuable). Soft yield after delivery + steering still parks so the
+    // steered work can run on the next slice.
+    if (resume?.timedOut && acceptedToolFreeAssistant && agent && turnRoute) {
+      await recordActiveMcpProviders();
+      const piMessages = [...agent.state.messages];
+      return {
+        status: "completed",
+        result: buildTurnResult({
+          newMessages: piMessages.slice(resume.beforeMessageCount),
+          userInput,
+          toolCalls,
+          sandboxRef: getSandboxRef?.() ?? lastKnownSandboxRef,
+          piMessages,
+          durationMs: Date.now() - replyStartedAtMs,
+          generatedFileCount: generatedFiles.length,
+          shouldTrace,
+          usage: turnUsage,
+          executionProfile: turnRoute,
+          assistantUserName: botConfig.userName,
+          modelId: activeModelId,
+        }),
+      };
     }
     if (resume) {
       const outcome = await resume.translateSuspension({

@@ -1,15 +1,13 @@
+import type { User } from "@sentry/junior-plugin-api";
 import { getDb, getSqlExecutor } from "@/chat/db";
 import { readConversationAccessFromSql } from "./access";
 import { decodeConversationCursor, encodeConversationCursor } from "./cursor";
 import { readConversationEventPage } from "./event-page";
 import { readConversationRecordFromSql } from "./list";
 import { conversationEventHistory } from "./projection";
-import { parseParams, parseQuery, throwApiError } from "../http";
-import { defineApiRoute } from "../route";
+import { throwApiError } from "../http";
 import {
   conversationEventPageSchema,
-  conversationEventsQuerySchema,
-  conversationParamsSchema,
   type ConversationEventPage,
 } from "../schema/conversation";
 
@@ -19,7 +17,7 @@ export async function readConversationEvents(
   beforeValue: string,
   options: {
     limit?: number;
-    verifiedViewerEmail?: string;
+    viewer?: User;
   } = {},
 ): Promise<ConversationEventPage | undefined> {
   const record = await readConversationRecordFromSql(conversationId);
@@ -34,7 +32,7 @@ export async function readConversationEvents(
   const accessByConversation = await readConversationAccessFromSql(
     getDb(),
     [conversationId],
-    options.verifiedViewerEmail,
+    options.viewer,
   );
   const access = accessByConversation.get(conversationId);
   const canExposePayload = access?.canViewPrivateContent ?? false;
@@ -66,26 +64,3 @@ export async function readConversationEvents(
     generatedAt: new Date().toISOString(),
   });
 }
-
-export default defineApiRoute({
-  method: "get",
-  path: "/:conversationId/events",
-  responseSchema: conversationEventPageSchema,
-  handler: async (c) => {
-    const { conversationId } = parseParams(
-      conversationParamsSchema,
-      c.req.param(),
-    );
-    const { before, limit } = parseQuery(
-      conversationEventsQuerySchema,
-      c.req.query(),
-    );
-    const verifiedViewerEmail = c.get("verifiedViewerEmail");
-    const report = await readConversationEvents(conversationId, before, {
-      limit,
-      ...(verifiedViewerEmail ? { verifiedViewerEmail } : {}),
-    });
-    if (!report) throwApiError(404, "Conversation not found.");
-    return report;
-  },
-});

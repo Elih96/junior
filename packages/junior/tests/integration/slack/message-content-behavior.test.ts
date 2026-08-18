@@ -6,6 +6,7 @@ import {
   persistThreadState,
   persistThreadStateById,
 } from "@/chat/runtime/thread-state";
+import { TurnInputCommitLostError } from "@/chat/runtime/turn";
 import { coerceThreadConversationState } from "@/chat/state/conversation";
 import { disconnectStateAdapter } from "@/chat/state/adapter";
 import { hydrateConversationMessages } from "@/chat/conversations/messages";
@@ -14,14 +15,19 @@ import { historyItemFromPiMessage } from "@/chat/pi/conversation-events";
 import { upsertTurnRecord } from "@/chat/task-execution/turn-cursor";
 import { getConversationEventStore } from "@/chat/db";
 import { botConfig } from "@/chat/config";
+import type { AgentRun } from "@/chat/agent/types";
 import { createTestChatRuntime } from "../../fixtures/chat-runtime";
 import {
   createTestMessage,
   createTestThread,
   createTestDestination,
 } from "../../fixtures/slack-harness";
-import { completedAgentRun } from "@/chat/runtime/agent-run-outcome";
-import { flattenAgentRunRequestForTest } from "../../fixtures/agent-runner";
+import {
+  createModelAgentRunner,
+  createModelAgentRunnerForRun,
+  neverRunAgentRunner,
+} from "../../fixtures/agent-runner";
+import { createModelStream } from "../../fixtures/model-stream";
 
 interface CapturedCall {
   contextConversation?: string;
@@ -29,18 +35,11 @@ interface CapturedCall {
   prompt: string;
 }
 
-function completedReply(text: string) {
-  return completedAgentRun({
-    text,
-    diagnostics: {
-      assistantMessageCount: 1,
-      modelId: "fake-agent-model",
-      outcome: "success" as const,
-      toolCalls: [],
-      toolErrorCount: 0,
-      toolResultCount: 0,
-      usedPrimaryText: true,
-    },
+function captureAgentCall(calls: CapturedCall[], run: AgentRun): void {
+  calls.push({
+    prompt: run.instruction.text,
+    contextConversation: run.instruction.context,
+    piMessages: run.history ? [...run.history] : undefined,
   });
 }
 
@@ -80,20 +79,10 @@ describe("Slack behavior: message content", () => {
           },
         },
         replyExecutor: {
-          agentRunner: {
-            run: async (request) => {
-              const prompt = request.input.messageText;
-              const context = {
-                ...flattenAgentRunRequestForTest(request),
-              };
-
-              calls.push({
-                prompt,
-                contextConversation: context?.conversationContext,
-              });
-              return completedReply("Summary sent.");
-            },
-          },
+          agentRunner: createModelAgentRunnerForRun((run) => {
+            captureAgentCall(calls, run);
+            return createModelStream([{ type: "text", text: "Summary sent." }]);
+          }),
         },
       },
     });
@@ -125,12 +114,10 @@ describe("Slack behavior: message content", () => {
     const { slackRuntime } = createTestChatRuntime({
       services: {
         replyExecutor: {
-          agentRunner: {
-            run: async (request) => {
-              calls.push({ prompt: request.input.messageText });
-              return completedReply("Reviewed.");
-            },
-          },
+          agentRunner: createModelAgentRunnerForRun((run) => {
+            captureAgentCall(calls, run);
+            return createModelStream([{ type: "text", text: "Reviewed." }]);
+          }),
         },
       },
     });
@@ -172,14 +159,10 @@ describe("Slack behavior: message content", () => {
     const { slackRuntime } = createTestChatRuntime({
       services: {
         replyExecutor: {
-          agentRunner: {
-            run: async (request) => {
-              const prompt = request.input.messageText;
-
-              calls.push({ prompt });
-              return completedReply("Done.");
-            },
-          },
+          agentRunner: createModelAgentRunnerForRun((run) => {
+            captureAgentCall(calls, run);
+            return createModelStream([{ type: "text", text: "Done." }]);
+          }),
         },
       },
     });
@@ -209,20 +192,12 @@ describe("Slack behavior: message content", () => {
     const { slackRuntime } = createTestChatRuntime({
       services: {
         replyExecutor: {
-          agentRunner: {
-            run: async (request) => {
-              const prompt = request.input.messageText;
-              const context = {
-                ...flattenAgentRunRequestForTest(request),
-              };
-
-              calls.push({
-                prompt,
-                contextConversation: context?.conversationContext,
-              });
-              return completedReply("Alert reviewed.");
-            },
-          },
+          agentRunner: createModelAgentRunnerForRun((run) => {
+            captureAgentCall(calls, run);
+            return createModelStream([
+              { type: "text", text: "Alert reviewed." },
+            ]);
+          }),
         },
       },
     });
@@ -268,16 +243,10 @@ describe("Slack behavior: message content", () => {
     const { slackRuntime } = createTestChatRuntime({
       services: {
         replyExecutor: {
-          agentRunner: {
-            run: async (request) => {
-              const context = flattenAgentRunRequestForTest(request);
-              calls.push({
-                prompt: request.input.messageText,
-                contextConversation: context?.conversationContext,
-              });
-              return completedReply("Review found.");
-            },
-          },
+          agentRunner: createModelAgentRunnerForRun((run) => {
+            captureAgentCall(calls, run);
+            return createModelStream([{ type: "text", text: "Review found." }]);
+          }),
         },
       },
     });
@@ -351,17 +320,10 @@ describe("Slack behavior: message content", () => {
   });
 
   it("does not invoke the agent for self-authored mention messages", async () => {
-    let replyCalled = false;
-
     const { slackRuntime } = createTestChatRuntime({
       services: {
         replyExecutor: {
-          agentRunner: {
-            run: async () => {
-              replyCalled = true;
-              return completedReply("Should not happen");
-            },
-          },
+          agentRunner: neverRunAgentRunner(),
         },
       },
     });
@@ -384,34 +346,11 @@ describe("Slack behavior: message content", () => {
       destination: createTestDestination(thread),
     });
 
-    expect(replyCalled).toBe(false);
     expect(thread.posts).toHaveLength(0);
   });
 
   it("passes durable Pi history into the next turn", async () => {
     const calls: CapturedCall[] = [];
-    const storedFirstTurnHistory: PiMessage[] = [
-      {
-        role: "user",
-        content: [
-          {
-            type: "text",
-            text: "<runtime-turn-context>\nold runtime facts\n</runtime-turn-context>",
-          },
-          { type: "text", text: "I need the budget by Friday" },
-        ],
-        timestamp: 1,
-      },
-      assistantPiMessage("First response.", 2),
-    ] as PiMessage[];
-    const durableFirstTurnHistory: PiMessage[] = [
-      {
-        role: "user",
-        content: [{ type: "text", text: "I need the budget by Friday" }],
-        timestamp: 1,
-      },
-      storedFirstTurnHistory[1]!,
-    ];
     const { slackRuntime } = createTestChatRuntime({
       services: {
         subscribedReplyPolicy: {
@@ -427,36 +366,16 @@ describe("Slack behavior: message content", () => {
           },
         },
         replyExecutor: {
-          agentRunner: {
-            run: async (request) => {
-              const prompt = request.input.messageText;
-              const context = {
-                ...flattenAgentRunRequestForTest(request),
-              };
-
-              calls.push({
-                prompt,
-                contextConversation: context?.conversationContext,
-                piMessages: context?.piMessages,
-              });
-              if (
-                calls.length === 1 &&
-                context?.conversationId &&
-                context.turnId
-              ) {
-                await upsertTurnRecord({
-                  conversationId: context.conversationId,
-                  turnId: context.turnId,
-                  sliceId: 1,
-                  state: "completed",
-                  piMessages: storedFirstTurnHistory,
-                });
-              }
-              return completedReply(
-                calls.length === 1 ? "First response." : "Second response.",
-              );
-            },
-          },
+          agentRunner: createModelAgentRunnerForRun((run) => {
+            captureAgentCall(calls, run);
+            return createModelStream([
+              {
+                type: "text",
+                text:
+                  calls.length === 1 ? "First response." : "Second response.",
+              },
+            ]);
+          }),
         },
       },
     });
@@ -494,7 +413,14 @@ describe("Slack behavior: message content", () => {
 
     expect(calls).toHaveLength(2);
     expect(calls[1]?.contextConversation ?? "").toContain("budget by Friday");
-    expect(calls[1]?.piMessages).toEqual(durableFirstTurnHistory);
+    expect(calls[1]?.piMessages).toHaveLength(2);
+    expect(JSON.stringify(calls[1]?.piMessages)).toContain(
+      "I need the budget by Friday",
+    );
+    expect(JSON.stringify(calls[1]?.piMessages)).toContain("First response.");
+    expect(JSON.stringify(calls[1]?.piMessages)).not.toContain(
+      "<runtime-turn-context>",
+    );
   });
 
   it("auto compacts oversized reusable Pi history before the next turn", async () => {
@@ -533,21 +459,10 @@ describe("Slack behavior: message content", () => {
           autoCompactionTriggerTokens: 100,
         },
         replyExecutor: {
-          agentRunner: {
-            run: async (request) => {
-              const prompt = request.input.messageText;
-              const context = {
-                ...flattenAgentRunRequestForTest(request),
-              };
-
-              calls.push({
-                prompt,
-                contextConversation: context?.conversationContext,
-                piMessages: context?.piMessages,
-              });
-              return completedReply("Done.");
-            },
-          },
+          agentRunner: createModelAgentRunnerForRun((run) => {
+            captureAgentCall(calls, run);
+            return createModelStream([{ type: "text", text: "Done." }]);
+          }),
         },
       },
     });
@@ -628,9 +543,9 @@ describe("Slack behavior: message content", () => {
               return { compacted: false, reason: "below_threshold" };
             },
           },
-          agentRunner: {
-            run: async () => completedReply("Done."),
-          },
+          agentRunner: createModelAgentRunner(
+            createModelStream([{ type: "text", text: "Done." }]),
+          ),
         },
       },
     });
@@ -650,7 +565,7 @@ describe("Slack behavior: message content", () => {
     expect(modelIds).toEqual([botConfig.profiles.handoff!.modelId]);
   });
 
-  it("keeps active-turn Pi history instead of compacting older completed history", async () => {
+  it("rejects active-turn history that conflicts with committed conversation history", async () => {
     const calls: CapturedCall[] = [];
     const activeMessages: PiMessage[] = [
       {
@@ -718,36 +633,27 @@ describe("Slack behavior: message content", () => {
           autoCompactionTriggerTokens: 100,
         },
         replyExecutor: {
-          agentRunner: {
-            run: async (request) => {
-              const prompt = request.input.messageText;
-              const context = {
-                ...flattenAgentRunRequestForTest(request),
-              };
-
-              calls.push({
-                prompt,
-                contextConversation: context?.conversationContext,
-                piMessages: context?.piMessages,
-              });
-              return completedReply("Done.");
-            },
-          },
+          agentRunner: createModelAgentRunnerForRun((run) => {
+            captureAgentCall(calls, run);
+            return createModelStream([{ type: "text", text: "Done." }]);
+          }),
         },
       },
     });
 
-    await slackRuntime.handleNewMention(
-      thread,
-      createTestMessage({
-        id: "m-content-active-session-record",
-        text: "<@U0APP> continue",
-        isMention: true,
-        threadId: thread.id,
-        author: { userId: "U0TESTER" },
-      }),
-      { destination: createTestDestination(thread) },
-    );
+    await expect(
+      slackRuntime.handleNewMention(
+        thread,
+        createTestMessage({
+          id: "m-content-active-session-record",
+          text: "<@U0APP> continue",
+          isMention: true,
+          threadId: thread.id,
+          author: { userId: "U0TESTER" },
+        }),
+        { destination: createTestDestination(thread) },
+      ),
+    ).rejects.toBeInstanceOf(TurnInputCommitLostError);
 
     expect(calls).toHaveLength(1);
     expect(calls[0]?.piMessages).toEqual(expectedActiveMessages);

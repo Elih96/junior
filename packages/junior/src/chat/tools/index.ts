@@ -1,4 +1,4 @@
-import { resolveChannelCapabilities } from "@/chat/slack/tools/channel-capabilities";
+import { resolveChannelCapabilities } from "@/chat/slack/tool-support/channel-capabilities";
 import { botConfig } from "@/chat/config";
 import { createBashTool } from "@/chat/tools/sandbox/bash";
 import { createEditFileTool } from "@/chat/tools/sandbox/edit-file";
@@ -19,12 +19,14 @@ import { createResourceEventTools } from "@/chat/tools/resource-events";
 import { getResourceEventCatalog } from "@/chat/resource-events/runtime-catalog";
 import { createEventTaskTools } from "@/chat/tools/event-tasks";
 import { createScheduledTaskTools } from "@/chat/tools/scheduled-tasks";
+import { createSlackChannelJoinTool } from "@/chat/slack/tools/channel-join";
 import { createSlackChannelListMessagesTool } from "@/chat/slack/tools/channel-list-messages";
 import { createSlackConversationMessageSearchTool } from "@/chat/slack/tools/conversation-message-search";
 import { createSlackPublicSearchTool } from "@/chat/slack/tools/public-search";
-import { getSlackToolContext } from "@/chat/slack/tools/context";
+import { getSlackToolContext } from "@/chat/slack/tool-support/context";
 import { createSlackMessageAddReactionTool } from "@/chat/slack/tools/message-add-reaction";
 import { createSendFilesTool } from "@/chat/slack/tools/send-files";
+import { getSqlExecutor } from "@/chat/db";
 import { createSlackCanvasCreateTool } from "@/chat/slack/tools/canvas/create";
 import { createSlackCanvasEditTool } from "@/chat/slack/tools/canvas/edit";
 import { createSlackCanvasReadTool } from "@/chat/slack/tools/canvas/read";
@@ -36,6 +38,8 @@ import { createSlackListUpdateItemTool } from "@/chat/slack/tools/list/update-it
 import { createSlackThreadReadTool } from "@/chat/slack/tools/thread-read";
 import { createUserLookupTool } from "@/chat/tools/user-lookup";
 import { createSystemTimeTool } from "@/chat/tools/system-time";
+import { createPublishImageTool } from "@/chat/tools/publish-image";
+import { createUnpublishImageTool } from "@/chat/tools/unpublish-image";
 import { createSearchConversationEventsTool } from "@/chat/tools/search-conversation-events";
 import { createHandoffTool } from "@/chat/tools/handoff/tool";
 import type { ToolRegistry } from "@/chat/tools/definition";
@@ -50,6 +54,7 @@ import { getOAuthAccountProviders } from "@/chat/plugins/credential-hooks";
 import { createWebFetchTool } from "@/chat/tools/web/fetch-tool";
 import { createWebSearchTool } from "@/chat/tools/web/search";
 import { createWriteFileTool } from "@/chat/tools/sandbox/write-file";
+import { createWorkspaceTools } from "@/chat/workspaces/tools";
 
 function createToolState(): ToolState {
   const operationResultCache = new Map<string, unknown>();
@@ -112,6 +117,7 @@ export function createTools(
     ...createResourceEventTools(context, resourceEventCatalog),
     ...createEventTaskTools(context, resourceEventCatalog),
     ...createScheduledTaskTools(context),
+    ...createWorkspaceTools(context),
   };
   if (context.conversationId) {
     tools.searchConversationEvents =
@@ -136,6 +142,18 @@ export function createTools(
       hooks.toolOverrides?.imageGenerate,
     );
   }
+  if (context.attachmentStorage && context.conversationId) {
+    tools.publishImage = createPublishImageTool({
+      conversationId: context.conversationId,
+      db: getSqlExecutor(),
+      storage: context.attachmentStorage,
+      workspace: context.workspace,
+    });
+    tools.unpublishImage = createUnpublishImageTool({
+      conversationId: context.conversationId,
+      db: getSqlExecutor(),
+    });
+  }
 
   if (context.handoff) {
     tools.handoff = createHandoffTool(context.handoff);
@@ -155,6 +173,7 @@ export function createTools(
     tools.slackCanvasEdit = createSlackCanvasEditTool(state);
     tools.slackCanvasWrite = createSlackCanvasWriteTool(state);
     tools.slackThreadRead = createSlackThreadReadTool(slackContext);
+    tools.slackChannelJoin = createSlackChannelJoinTool(slackContext);
     if (context.conversationId && slackContext.source.visibility === "public") {
       tools.searchConversationMessages =
         createSlackConversationMessageSearchTool(
@@ -166,7 +185,9 @@ export function createTools(
           context.conversationId,
         );
     }
-    if (context.source.platform === "slack" && context.slackActionToken) {
+    // Always register public search in Slack turns. Without an action token the
+    // tool stays visible and returns an honest interactive-turn limit.
+    if (context.source.platform === "slack") {
       tools.slackPublicSearch = createSlackPublicSearchTool(
         context.slackActionToken,
       );
@@ -199,15 +220,24 @@ export function createTools(
     }
 
     if (rawChannelCapabilities.canSendFiles) {
-      tools.sendFiles = createSendFilesTool(slackContext, state, (input) =>
-        readSandboxFileUpload(context.workspace, input),
+      tools.sendFiles = createSendFilesTool(
+        slackContext,
+        state,
+        (input) => readSandboxFileUpload(context.workspace, input),
+        context.conversationId && context.attachmentStorage
+          ? {
+              conversationId: context.conversationId,
+              db: getSqlExecutor(),
+              storage: context.attachmentStorage,
+            }
+          : undefined,
       );
     }
 
-    if (outputCapabilities?.canPostToChannel) {
-      tools.slackChannelListMessages =
-        createSlackChannelListMessagesTool(slackContext);
-    }
+    // Channel history is available in any Slack context, including DMs, so the
+    // model can read the active destination or another accessible public channel.
+    tools.slackChannelListMessages =
+      createSlackChannelListMessagesTool(slackContext);
 
     if (rawChannelCapabilities.canAddReactions) {
       tools.addReaction = createSlackMessageAddReactionTool(

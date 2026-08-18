@@ -1,5 +1,8 @@
-import { readCanvas } from "@/chat/slack/tools/canvas/api";
-import { resolveCanvasTarget } from "@/chat/slack/tools/canvas/context";
+import { readCanvas } from "@/chat/slack/tool-support/canvas/api";
+import {
+  resolveCanvasTarget,
+  slackCanvasRefParam,
+} from "@/chat/slack/tool-support/canvas/context";
 import { z } from "zod";
 import { juniorToolOutputSchema } from "@/chat/tool-support/structured-result";
 import { zodTool } from "@/chat/tool-support/zod-tool";
@@ -29,8 +32,7 @@ const slackCanvasReadOutputSchema = juniorToolOutputSchema
  */
 export function createSlackCanvasReadTool() {
   return zodTool({
-    description:
-      "Read a bounded line range from a Slack canvas as markdown. Use when you need exact Canvas contents to verify facts or make edits safely. Do not use for generic web pages — use webFetch for those.",
+    description: "Read a bounded line range from a Slack canvas as markdown.",
     annotations: {
       destructiveHint: false,
       idempotentHint: true,
@@ -38,12 +40,7 @@ export function createSlackCanvasReadTool() {
       readOnlyHint: true,
     },
     inputSchema: z.object({
-      canvas: z
-        .string()
-        .min(1)
-        .describe(
-          "Canvas/file ID (e.g. `F0ABCDEF`) or Slack canvas/docs URL (e.g. `https://team.slack.com/docs/T.../F...`).",
-        ),
+      canvas: slackCanvasRefParam,
       offset: z.coerce
         .number()
         .int()

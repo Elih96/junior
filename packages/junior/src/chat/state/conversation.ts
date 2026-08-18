@@ -3,6 +3,7 @@ import { isRecord, toOptionalNumber, toOptionalString } from "@/chat/coerce";
 type ConversationRole = "assistant" | "system" | "user";
 
 export interface ConversationAuthor {
+  email?: string;
   fullName?: string;
   isBot?: boolean;
   userId?: string;
@@ -11,6 +12,8 @@ export interface ConversationAuthor {
 
 export interface ConversationMessageMeta {
   attachmentCount?: number;
+  /** Known message provenance. Omit when unknown; never invent a default. */
+  source?: "slack" | "web";
   eventType?: string;
   explicitMention?: boolean;
   imageAttachmentCount?: number;

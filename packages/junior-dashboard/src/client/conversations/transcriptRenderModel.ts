@@ -1,4 +1,5 @@
 import type {
+  TranscriptViewAttachmentsDeliveredPart,
   TranscriptViewContextEventPart,
   TranscriptViewMessage,
   TranscriptViewStructuredEventPart,
@@ -12,6 +13,13 @@ export type RenderedFailureEntry = {
   key: string;
   kind: "failure";
   outcome: "error" | "delivery_failed";
+  timestamp?: number;
+};
+
+export type RenderedAttachmentsDeliveredEntry = {
+  key: string;
+  kind: "attachments_delivered";
+  part: TranscriptViewAttachmentsDeliveredPart;
   timestamp?: number;
 };
 
@@ -59,6 +67,7 @@ export type RenderedMessageEntry = {
 };
 
 export type RenderedTranscriptEntry =
+  | RenderedAttachmentsDeliveredEntry
   | RenderedContextEventEntry
   | RenderedFailureEntry
   | RenderedMessageEntry
@@ -80,10 +89,16 @@ export function groupTranscriptMessages(
     let textGroup = 0;
     const flushMessage = () => {
       if (textParts.length === 0) return;
+      // Keep the original message object when the whole body is one text group so
+      // memoized message rows can skip work on unchanged history.
+      const nextMessage =
+        textGroup === 0 && textParts.length === message.parts.length
+          ? message
+          : { ...message, parts: textParts };
       entries.push({
         key: `${message.sourceSeq}:message:${textGroup}`,
         kind: "message",
-        message: { ...message, parts: textParts },
+        message: nextMessage as RenderedMessageEntry["message"],
       });
       textParts = [];
       textGroup += 1;
@@ -121,6 +136,13 @@ export function groupTranscriptMessages(
         entries.push({
           key: `${message.sourceSeq}:structured-event:${part.namespace}:${part.name}`,
           kind: "structured_event",
+          part,
+          timestamp: message.timestamp,
+        });
+      } else if (part.type === "attachments_delivered") {
+        entries.push({
+          key: `${message.sourceSeq}:attachments-delivered`,
+          kind: "attachments_delivered",
           part,
           timestamp: message.timestamp,
         });
@@ -170,6 +192,11 @@ export function messageRawText(message: TranscriptViewMessage): string {
           ]),
         ]
           .filter((line): line is string => line !== undefined)
+          .join("\n");
+      }
+      if (part.type === "attachments_delivered") {
+        return part.attachments
+          .map((attachment) => attachment.filename)
           .join("\n");
       }
       if (part.event.type !== "handoff") {

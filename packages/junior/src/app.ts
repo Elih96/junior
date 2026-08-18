@@ -20,6 +20,7 @@ import { executeAgentRun } from "@/chat/agent";
 import { normalizeSandboxEgressTracePropagationDomains } from "@/chat/sandbox/egress/tracing";
 import {
   getExperimentalFeatures,
+  isExperimentalFeatureEnabled,
   setExperimentalFeatures,
   type ExperimentalFeaturesConfig,
 } from "@/chat/experimental";
@@ -70,7 +71,6 @@ import { JUNIOR_PLUGIN_TASK_CALLBACK_ROUTE } from "@/deployment";
 import {
   createVercelConversationWorkCallback,
   registerVercelConversationWorkDevConsumer,
-  type VercelConversationWorkCallbackOptions,
 } from "@/chat/task-execution/vercel-callback";
 import { getVercelConversationWorkQueue } from "@/chat/task-execution/vercel-queue";
 import { bindSpawnAgent } from "@/chat/agent-invocations/spawn";
@@ -82,12 +82,16 @@ import {
   createProductionConversationWorkOptions,
   createProductionSlackWebhookServices,
 } from "@/chat/app/production";
+import type { ConversationWorkCallbackOptions } from "@/chat/app/conversation-work";
 import { createAgentRunner } from "@/chat/runtime/agent-runner";
+import { createVercelAttachmentStorage } from "@/chat/attachments/vercel";
+import { publicArtifactGET } from "@/handlers/artifacts";
 import type { WaitUntilFn } from "@/handlers/types";
 import { ingestResourceEvent } from "@/chat/resource-events/ingest";
 import { createResourceEventTeamIdResolver } from "@/chat/resource-events/workspace";
 import { ingestEventTasks } from "@/chat/event-tasks/ingest";
 import { receiveLocalOAuthCredential } from "@/chat/local/credential-sync";
+import { createAcpHttpHandler } from "@/api/acp/route";
 
 export { defineJuniorPlugins } from "./plugins";
 export { JUNIOR_VERSION } from "./version";
@@ -116,7 +120,7 @@ export interface JuniorAppOptions {
   /** Install-wide provider defaults. Unregistered `provider.key` entries warn at startup. */
   configDefaults?: Record<string, unknown>;
   /** Queue consumer wiring for the durable conversation worker. */
-  conversationWork?: VercelConversationWorkCallbackOptions;
+  conversationWork?: ConversationWorkCallbackOptions;
   /** Direct plugin set override. Usually omitted when `juniorNitro()` uses a plugin module. */
   plugins?: JuniorPluginSet;
   /** Sandbox execution options. */
@@ -421,7 +425,8 @@ function dashboardHostRoutePaths(dashboard: JuniorDashboardOptions): string[] {
     `${pagePath("system")}/*`,
     pagePath("plugins"),
     `${pagePath("plugins")}/*`,
-    pagePath("settings/api-tokens"),
+    pagePath("settings"),
+    `${pagePath("settings")}/*`,
   ];
   if (dashboard.componentGallery) {
     pagePaths.push(pagePath("dev"), `${pagePath("dev")}/*`);
@@ -433,6 +438,8 @@ function dashboardHostRoutePaths(dashboard: JuniorDashboardOptions): string[] {
     "/favicon.ico",
     "/_junior/dashboard/avatar.png",
     "/_junior/dashboard/client.js",
+    "/_junior/dashboard/icon-512.png",
+    "/_junior/dashboard/manifest.webmanifest",
     loginPath,
     "/api/health",
     "/api/runtime",
@@ -453,6 +460,8 @@ function dashboardHostRoutePaths(dashboard: JuniorDashboardOptions): string[] {
     "/api/people/*",
     "/api/personal-tokens",
     "/api/personal-tokens/*",
+    "/api/workspaces",
+    "/api/workspaces/*",
     "/api/config",
     "/api/me",
     authPath,
@@ -692,7 +701,9 @@ export async function createApp(options?: JuniorAppOptions): Promise<Hono> {
   const waitUntil = options?.waitUntil ?? (await defaultWaitUntil());
   const tracePropagation = { domains: sandboxEgressTracePropagationDomains };
   const conversationWorkQueue = getVercelConversationWorkQueue();
+  const attachmentStorage = createVercelAttachmentStorage();
   const agentRunner = createAgentRunner(executeAgentRun, {
+    attachmentStorage,
     bindSpawnAgent: (request) =>
       bindSpawnAgent(request, { queue: conversationWorkQueue }),
     tracePropagation,
@@ -732,18 +743,26 @@ export async function createApp(options?: JuniorAppOptions): Promise<Hono> {
 
   app.get("/", () => healthGET());
   app.get("/health", () => healthGET());
+  app.get("/public/artifacts/:filename", (c) =>
+    publicArtifactGET({
+      filename: c.req.param("filename"),
+      storage: attachmentStorage,
+    }),
+  );
 
   // MCP callback must be registered before the generic OAuth callback
   // because Hono matches routes top-down and `:provider` would swallow `mcp/`.
   app.get("/api/oauth/callback/mcp/:provider", (c) => {
     return mcpOauthCallbackGET(c.req.raw, c.req.param("provider"), waitUntil, {
       agentRunner,
+      conversationWorkQueue: getVercelConversationWorkQueue(),
     });
   });
 
   app.get("/api/oauth/callback/:provider", (c) => {
     return oauthCallbackGET(c.req.raw, c.req.param("provider"), waitUntil, {
       agentRunner,
+      conversationWorkQueue: getVercelConversationWorkQueue(),
     });
   });
 
@@ -771,9 +790,7 @@ export async function createApp(options?: JuniorAppOptions): Promise<Hono> {
   let pluginTaskPOST:
     | ReturnType<typeof createVercelPluginTaskCallback>
     | undefined;
-  let conversationWorkOptions:
-    | VercelConversationWorkCallbackOptions
-    | undefined;
+  let conversationWorkOptions: ConversationWorkCallbackOptions | undefined;
   const getConversationWorkOptions = () => {
     conversationWorkOptions ??=
       options?.conversationWork ??
@@ -783,6 +800,22 @@ export async function createApp(options?: JuniorAppOptions): Promise<Hono> {
       });
     return conversationWorkOptions;
   };
+  if (isExperimentalFeatureEnabled("acp")) {
+    const work = getConversationWorkOptions();
+    const cancellation = work.apiTurnCancellation;
+    if (!cancellation) {
+      throw new Error("Experimental ACP requires API Turn cancellation wiring");
+    }
+    const handleAcpRequest = createAcpHttpHandler({
+      cancellation,
+      conversationStore: work.conversationStore,
+      queue: work.queue ?? getVercelConversationWorkQueue(),
+      state: work.state,
+    });
+    app.on(["GET", "POST", "DELETE"], "/api/acp", (c) =>
+      handleAcpRequest(c.req.raw),
+    );
+  }
   if (process.env.NODE_ENV === "development") {
     registerVercelConversationWorkDevConsumer(getConversationWorkOptions());
     registerVercelPluginTaskDevConsumer();

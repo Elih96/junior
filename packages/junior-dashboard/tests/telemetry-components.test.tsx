@@ -19,7 +19,13 @@ import {
   type SubagentTranscriptTarget,
 } from "../src/client/conversations/SubagentTranscriptDrawer";
 import { Transcript } from "../src/client/conversations/TranscriptView";
-import { TranscriptHeader } from "../src/client/conversations/TranscriptHeader";
+import { ConversationHeader } from "../src/client/conversations/ConversationHeader";
+import {
+  ConversationAnnotations,
+  ConversationSidebarAnnotations,
+  ConversationStats,
+} from "../src/client/conversations/ConversationMeta";
+import { conversationFromDetail } from "../src/client/format";
 import { TranscriptMarkdown } from "../src/client/conversations/TranscriptMarkdown";
 import { TranscriptText } from "../src/client/conversations/TranscriptText";
 import { TranscriptToolView } from "../src/client/conversations/TranscriptToolView";
@@ -68,11 +74,14 @@ function conversation(
   };
 }
 
-function renderTranscript(detail: ConversationTranscript): string {
+function renderTranscript(
+  detail: ConversationTranscript,
+  view: "raw" | "rich" = "rich",
+): string {
   return renderToStaticMarkup(
     <QueryClientProvider client={client}>
       <TranscriptSearchProvider query="">
-        <ConversationTranscriptView conversation={detail} view="rich" />
+        <ConversationTranscriptView conversation={detail} view={view} />
       </TranscriptSearchProvider>
     </QueryClientProvider>,
   );
@@ -89,6 +98,7 @@ function systemData(): SystemData {
       componentGallery: false,
       sentryConversationLinks: false,
       timeZone: "UTC",
+      version: "0.0.0-test",
     },
     me: { user: { email: "viewer@example.com" } },
     conversationStats: {
@@ -118,10 +128,12 @@ function systemData(): SystemData {
       },
       metricDays: [
         {
+          cachedInputTokens: 9_000,
           conversations: 2,
           costUsd: 4.56,
           date: "2026-01-01",
           durationMs: 12_000,
+          inputTokens: 3_000,
           tokens: 12_345,
         },
       ],
@@ -199,6 +211,22 @@ describe("dashboard canonical-event components", () => {
     expect(html).toContain("italic text");
   });
 
+  it("renders bold-wrapped bare URLs without leaking emphasis markers into the href", () => {
+    const html = renderToStaticMarkup(
+      <TranscriptSearchProvider query="">
+        <TranscriptMarkdown text="**PR is up: https://github.com/getsentry/getsentry/pull/21513**" />
+      </TranscriptSearchProvider>,
+    );
+
+    expect(html).toContain(
+      'href="https://github.com/getsentry/getsentry/pull/21513"',
+    );
+    expect(html).not.toContain("pull/21513**");
+    expect(html).not.toContain(">**</");
+    expect(html).toContain("<strong");
+    expect(html).toContain("PR is up:");
+  });
+
   it("renders code-like user prose as markdown", () => {
     const html = renderToStaticMarkup(
       <QueryClientProvider client={client}>
@@ -252,7 +280,7 @@ describe("dashboard canonical-event components", () => {
     );
     expect(html).toContain("jr-rpc config get github.repo");
     expect(html).toContain("junior-qa");
-    expect(html).toContain('aria-label="Tool failed"');
+    expect(html).toContain('aria-label="bash (failed)"');
   });
 
   it("keeps a running tool name searchable and accessible", () => {
@@ -302,10 +330,33 @@ describe("dashboard canonical-event components", () => {
 
   it("exposes pressed state for transcript view controls", () => {
     const html = renderToStaticMarkup(
-      <TranscriptHeader redacted={false} value="raw" onChange={() => {}} />,
+      <ConversationHeader
+        annotations={null}
+        archive={{
+          archived: false,
+          disabled: false,
+          error: false,
+          onClick: () => {},
+          pending: false,
+        }}
+        conversationId="conversation-1"
+        identity={null}
+        live={false}
+        onSearchChange={() => {}}
+        onViewChange={() => {}}
+        privacy={null}
+        search=""
+        stats={null}
+        title="Header QA"
+        view="raw"
+      />,
     );
-    expect(html.match(/aria-pressed="true"/g) ?? []).toHaveLength(1);
-    expect(html.match(/aria-pressed="false"/g) ?? []).toHaveLength(1);
+    expect(html).toContain('aria-pressed="true"');
+    expect(html).toContain('aria-label="Conversation"');
+    expect(html).toContain('aria-label="Event log"');
+    expect(html).toContain('aria-label="Search transcript"');
+    expect(html).toContain('aria-label="Conversation details"');
+    expect(html).toContain('aria-label="Archive"');
   });
 
   it("shows responding state independently from live transcript following", () => {
@@ -370,16 +421,16 @@ describe("dashboard canonical-event components", () => {
     );
     const completeTranscriptHtml = renderTranscript(conversation(events));
 
-    // Conversation-level turn/tool totals only when the loaded history is complete.
+    // Conversation header no longer shows turn or tool totals.
     expect(partialHtml).not.toContain("1 turn");
+    expect(completeHtml).not.toContain("1 turn");
     expect(partialHtml).not.toContain("1 tool call");
-    expect(completeHtml).toContain("1 turn");
-    expect(completeHtml).toContain("1 tool call");
-    // Transcript no longer mirrors those conversation totals in a segment row.
+    expect(completeHtml).not.toContain("1 tool call");
+    // Transcript collapses activity to a uniform event count.
     expect(partialTranscriptHtml).not.toContain("1 turn");
-    expect(partialTranscriptHtml).not.toContain("1 tool call");
     expect(completeTranscriptHtml).not.toContain("1 turn");
-    expect(completeTranscriptHtml).not.toContain("1 tool call");
+    expect(partialTranscriptHtml).toContain("1 event");
+    expect(completeTranscriptHtml).toContain("1 event");
   });
 
   it("renders each user message with its own actor", () => {
@@ -405,6 +456,68 @@ describe("dashboard canonical-event components", () => {
     expect(html).not.toContain("Morgan Lee");
   });
 
+  it("shows a Slack icon for Slack-origin messages only", () => {
+    const slackHtml = renderTranscript(
+      conversation(
+        [
+          event(0, {
+            messageId: "unknown-user-source",
+            role: "user",
+            text: "Unknown source.",
+            type: "message",
+          }),
+          event(1, {
+            messageId: "slack-user",
+            role: "user",
+            source: "slack",
+            text: "From Slack.",
+            type: "message",
+          }),
+          event(2, {
+            messageId: "slack-assistant",
+            role: "assistant",
+            source: "slack",
+            text: "Posted to Slack.",
+            type: "message",
+          }),
+          event(3, {
+            messageId: "dashboard-user",
+            role: "user",
+            source: "web",
+            text: "Continued from the dashboard.",
+            type: "message",
+          }),
+          event(4, {
+            messageId: "dashboard-assistant",
+            role: "assistant",
+            source: "web",
+            text: "Stays in Junior.",
+            type: "message",
+          }),
+        ],
+        { surface: "slack" },
+      ),
+    );
+    const dashboardRootHtml = renderTranscript(
+      conversation([
+        event(0, {
+          messageId: "web-message",
+          role: "user",
+          source: "web",
+          text: "From the dashboard.",
+          type: "message",
+        }),
+      ]),
+    );
+
+    expect(slackHtml).toContain('aria-label="Slack"');
+    expect(slackHtml).not.toContain(">Slack<");
+    // Known Slack user + assistant only. Null/web stay unmarked.
+    expect(slackHtml.match(/aria-label="Slack"/g)).toHaveLength(2);
+    expect(dashboardRootHtml).not.toContain("Dashboard");
+    expect(dashboardRootHtml).not.toContain('aria-label="Slack"');
+  });
+
   it("omits status badges from conversation detail while retaining progress", () => {
     const activeClient = conversationQueryClient();
     activeClient.setQueryData(
@@ -426,32 +539,144 @@ describe("dashboard canonical-event components", () => {
   });
 
   it("renders conversation resource links without pull request assumptions", () => {
-    const queryClient = conversationQueryClient();
-    queryClient.setQueryData(
-      conversationDetailQueryKey("conversation-1"),
-      conversation([], {
-        annotations: [
-          {
-            kind: "resource_link",
-            key: "getsentry/junior#1081",
-            label: "getsentry/junior#1081",
-            plugin: "github",
-            status: "open",
-            url: "https://github.com/getsentry/junior/issues/1081",
-            createdAt: "2026-01-01T00:00:00.000Z",
-            updatedAt: "2026-01-01T00:00:01.000Z",
-          },
-        ],
-      }),
+    const html = renderToStaticMarkup(
+      <ConversationAnnotations
+        detail={conversation([], {
+          annotations: [
+            {
+              kind: "resource_link",
+              key: "getsentry/junior#1081",
+              label: "getsentry/junior#1081",
+              plugin: "github",
+              status: "open",
+              url: "https://github.com/getsentry/junior/issues/1081",
+              createdAt: "2026-01-01T00:00:00.000Z",
+              updatedAt: "2026-01-01T00:00:01.000Z",
+            },
+          ],
+        })}
+      />,
     );
-
-    const html = renderConversationPageWithClient(queryClient);
 
     expect(html).toContain("getsentry/junior#1081");
     expect(html).toContain('title="Open"');
     expect(html).not.toContain("Linked resources");
     expect(html).not.toContain("Pull requests");
     expect(html).not.toContain("Open pull request");
+  });
+
+  it("renders open pull request resource links with the pull request icon", () => {
+    const html = renderToStaticMarkup(
+      <ConversationAnnotations
+        detail={conversation([], {
+          annotations: [
+            {
+              kind: "resource_link",
+              key: "getsentry/junior#1081",
+              label: "getsentry/junior#1081",
+              plugin: "github",
+              status: "open",
+              url: "https://github.com/getsentry/junior/pull/1081",
+              createdAt: "2026-01-01T00:00:00.000Z",
+              updatedAt: "2026-01-01T00:00:01.000Z",
+            },
+          ],
+        })}
+      />,
+    );
+
+    expect(html).toContain("getsentry/junior#1081");
+    expect(html).toContain('title="Open pull request"');
+  });
+
+  it("labels one or two scopes and clusters the rest on desktop", () => {
+    const single = renderToStaticMarkup(
+      <ConversationSidebarAnnotations
+        annotations={[
+          {
+            icon: "circle-dot",
+            key: "getsentry/junior#2",
+            label: "junior",
+          },
+        ]}
+      />,
+    );
+    expect(single).toContain(">junior<");
+    expect(single).toContain("getsentry/junior#2");
+
+    const dual = renderToStaticMarkup(
+      <ConversationSidebarAnnotations
+        annotations={[
+          {
+            icon: "circle-dot",
+            key: "getsentry/junior#2",
+            label: "junior",
+          },
+          {
+            icon: "git-merge",
+            key: "getsentry/payments#1",
+            label: "payments",
+          },
+        ]}
+      />,
+    );
+    expect(dual).toContain(
+      'aria-label="Linked work, newest first: getsentry/junior#2, getsentry/payments#1"',
+    );
+    expect(dual.indexOf(">junior<")).toBeLessThan(dual.indexOf(">payments<"));
+    expect(dual).not.toContain(">+1<");
+    // Chip icons are decorative; the parent aria-label carries the identity.
+    expect(dual).toContain("lucide-circle-dot");
+    expect(dual).toContain("lucide-git-merge");
+
+    const stacked = renderToStaticMarkup(
+      <ConversationSidebarAnnotations
+        annotations={[
+          {
+            icon: "circle-dashed",
+            key: "getsentry/junior#3",
+            label: "junior",
+          },
+          {
+            icon: "circle-dot",
+            key: "getsentry/payments#2",
+            label: "payments",
+          },
+          {
+            icon: "git-merge",
+            key: "getsentry/relay#1",
+            label: "relay",
+          },
+        ]}
+      />,
+    );
+    expect(stacked).toContain(">junior<");
+    expect(stacked).toContain(">+2<");
+    expect(stacked).not.toContain(">payments<");
+    expect(stacked).not.toContain(">relay<");
+    expect(stacked).toContain("getsentry/payments#2");
+    expect(stacked).toContain("getsentry/relay#1");
+
+    const sameRepo = renderToStaticMarkup(
+      <ConversationSidebarAnnotations
+        annotations={[
+          {
+            icon: "circle-dot",
+            key: "getsentry/junior#2",
+            label: "junior",
+          },
+          {
+            icon: "git-merge",
+            key: "getsentry/junior#1",
+            label: "junior",
+          },
+        ]}
+      />,
+    );
+    expect(sameRepo).toContain(">junior<");
+    expect(sameRepo.match(/>junior</g)).toHaveLength(1);
+    expect(sameRepo).not.toContain(">+1<");
+    expect(sameRepo).toContain("getsentry/junior#1");
   });
 
   it("distinguishes initial detail failures from stale refresh failures", () => {
@@ -583,6 +808,43 @@ describe("dashboard canonical-event components", () => {
     expect(html).toContain("2 memories captured");
   });
 
+  it("renders delivered attachments as transcript media, not tool chrome", () => {
+    const html = renderTranscript(
+      conversation([
+        event(0, {
+          type: "attachments_delivered",
+          attachments: [
+            {
+              id: "att-1",
+              filename: "chart.png",
+              contentType: "image/png",
+              bytes: 18211,
+            },
+            {
+              id: "att-2",
+              filename: "notes.txt",
+              contentType: "text/plain",
+              bytes: 42,
+            },
+          ],
+        }),
+      ]),
+    );
+
+    expect(html).toContain(
+      'data-transcript-rail-event="attachments_delivered"',
+    );
+    expect(html).toContain("2 files delivered");
+    expect(html).toContain("chart.png");
+    expect(html).toContain("notes.txt");
+    expect(html).toContain(
+      "/api/conversations/conversation-1/attachments/att-1",
+    );
+    expect(html).toContain(
+      "/api/conversations/conversation-1/attachments/att-2",
+    );
+  });
+
   it("keeps recalled memory context collapsed on its user message", () => {
     const html = renderTranscript(
       conversation([
@@ -640,6 +902,22 @@ describe("dashboard canonical-event components", () => {
       "Junior could not deliver this message to its destination.",
     );
     expect(html).not.toContain("Agent response failed");
+  });
+
+  it("does not invent an object for an empty raw message", () => {
+    const html = renderTranscript(
+      conversation([
+        event(0, {
+          type: "message",
+          messageId: "assistant-1",
+          role: "assistant",
+          text: "",
+        }),
+      ]),
+      "raw",
+    );
+
+    expect(html).not.toContain("{}");
   });
 
   it("renders one in-progress row for a tool start", () => {
@@ -830,6 +1108,9 @@ describe("dashboard canonical-event components", () => {
     expect(html).toContain("child detail answer");
     expect(html).toContain("/conversations/child-1");
     expect(html).toContain("Open conversation");
+    expect(html).toContain('aria-label="Search transcript"');
+    expect(html).toContain('aria-label="Conversation"');
+    expect(html).toContain('aria-label="Event log"');
   });
 
   it("keeps the terminal parent error when child detail says completed", () => {
@@ -1138,9 +1419,8 @@ describe("dashboard canonical-event components", () => {
     expect(html).toContain("Back to people");
     expect(html).not.toContain("System / people");
     expect(html).not.toContain('aria-label="Search recent conversations"');
-    expect(html).toContain(">Places<");
+    expect(html).not.toContain(">Places<");
     expect(html).toContain(">Surfaces<");
-    expect(html.indexOf(">Places<")).toBeGreaterThan(activityStart);
     expect(html.indexOf(">Surfaces<")).toBeGreaterThan(activityStart);
     expect(html).not.toContain(">active days<");
     expect(html).not.toContain(">runs<");
@@ -1324,7 +1604,9 @@ describe("dashboard canonical-event components", () => {
     expect(systemHtml).not.toContain("Usage over time");
     expect(systemHtml).toContain("Conversation activity");
     expect(systemHtml).toContain('aria-label="Conversations per day"');
-    expect(systemHtml).toContain("Token usage");
+    expect(systemHtml).toContain("Cache hit rate");
+    expect(systemHtml).toContain("75.0%");
+    expect(systemHtml).toContain("Input token cache");
     expect(systemHtml).toContain("Model spend");
     expect(systemHtml).toContain("Runtime");
     expect(systemHtml).toContain("Guardian reviews");
@@ -1337,7 +1619,7 @@ describe("dashboard canonical-event components", () => {
       'class="flex w-full min-w-0 flex-col justify-end',
     );
     expect(systemHtml.indexOf("Conversation activity")).toBeLessThan(
-      systemHtml.indexOf("Token usage"),
+      systemHtml.indexOf("Input token cache"),
     );
     expect(
       systemHtml.match(/aria-label="Reporting period"/g) ?? [],
@@ -1345,6 +1627,7 @@ describe("dashboard canonical-event components", () => {
     expect(systemHtml).toContain('aria-label="System navigation"');
     expect(systemHtml).toContain('href="/system/people"');
     expect(systemHtml).toContain('href="/system/locations"');
+    expect(systemHtml).toContain('href="/system/workspaces"');
     expect(systemHtml).toContain('href="/system/plugins"');
     expect(systemHtml).toContain(">Plugins</a>");
     expect(systemHtml).not.toContain(">Capabilities<");
@@ -1522,7 +1805,7 @@ describe("dashboard canonical-event components", () => {
     );
     expect(html).toContain('aria-label="2026-07-31, Cost: $0.0042"');
     expect(html).toContain(">$0.0042</text>");
-    expect(html).toContain('x1="72"');
+    expect(html).toContain('x1="104"');
   });
 
   it("renders daily chart ranges from the shared page selection", () => {
@@ -1668,12 +1951,14 @@ describe("dashboard canonical-event components", () => {
         title: "Refresh YC company data",
       },
     });
-    client.setQueryData(
-      conversationDetailQueryKey(detail.conversationId),
-      detail,
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <ConversationStats
+          conversation={conversationFromDetail(detail)}
+          detail={detail}
+        />
+      </MemoryRouter>,
     );
-
-    const html = renderConversationPageWithClient(client);
 
     expect(html).toMatch(
       /href="\/tasks\/sched_source_task"[^>]*>Triggered by Scheduled Task<\/a>/,

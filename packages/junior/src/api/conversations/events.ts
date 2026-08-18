@@ -19,6 +19,7 @@ export const conversationReportSourceEventTypes = [
   "turn_started",
   "turn_context",
   "structured_event",
+  "attachments_delivered",
   "turn_routed",
   "turn_completed",
   "turn_failed",
@@ -317,9 +318,15 @@ function reportEventData(args: {
         type: "message",
         messageId: data.messageId,
         role: data.role,
+        ...(data.meta?.source === "web" || data.meta?.source === "slack"
+          ? { source: data.meta.source }
+          : {}),
         ...(actorIdentity ? { actorIdentity } : {}),
         ...(typeof data.meta?.eventType === "string"
           ? { eventType: data.meta.eventType }
+          : {}),
+        ...(typeof data.meta?.explicitMention === "boolean"
+          ? { explicitMention: data.meta.explicitMention }
           : {}),
         ...(args.canExposePayload
           ? { text: data.text }
@@ -336,6 +343,9 @@ function reportEventData(args: {
         type: "turn_lifecycle",
         turnId: data.turnId,
         state: "started",
+        ...(data.inputMessageIds.length > 0
+          ? { inputMessageIds: data.inputMessageIds }
+          : {}),
       };
     case "turn_context":
       if (!args.canExposePayload) {
@@ -348,6 +358,14 @@ function reportEventData(args: {
         kind: data.kind,
         version: data.version,
         content: data.content,
+      };
+    case "attachments_delivered":
+      if (!args.canExposePayload) {
+        return undefined;
+      }
+      return {
+        type: "attachments_delivered",
+        attachments: data.attachments,
       };
     case "turn_routed":
       return {

@@ -28,9 +28,10 @@ import {
   throwSandboxOperationError,
 } from "@/chat/sandbox/errors";
 import { SANDBOX_WORKSPACE_ROOT } from "@/chat/sandbox/paths";
+import { tryWorkspaceRepoCheckoutPath } from "@/chat/workspaces/checkout-path";
 import {
-  findSingleRepositoryDirectory,
-  resolveRepositoryInstructions,
+  listRepositoryDirectories,
+  resolveRepositoryInstructionsForDirectories,
   type RepositoryInstructions,
 } from "@/chat/repository-instructions";
 import { createSandboxRuntime } from "@/chat/sandbox/session";
@@ -47,6 +48,7 @@ import {
   type SandboxWorkspace,
 } from "@/chat/sandbox/workspace";
 import type { SkillMetadata } from "@/chat/skills";
+import type { Workspace } from "@/chat/workspaces/types";
 import { editFile } from "@/chat/tools/sandbox/edit-file";
 import { findFiles } from "@/chat/tools/sandbox/find-files";
 import {
@@ -80,16 +82,18 @@ export interface SandboxTools {
 }
 
 export interface SandboxAccess {
-  /** Resolve the AGENTS.md bundle for the selected repository directory. */
+  /** Resolve AGENTS.md instructions for each repository directory in the Workspace. */
   captureRepositoryInstructions(): Promise<RepositoryInstructions | undefined>;
   readonly tools: SandboxTools;
   readonly workspace: SandboxWorkspace;
   sandboxRef(): SandboxRef | undefined;
+  switchWorkspace(workspace: Workspace, signal?: AbortSignal): Promise<void>;
   close(): void;
 }
 
 export interface SandboxOptions {
   sandboxRef?: SandboxRef;
+  workspace?: Workspace;
   skills: SkillMetadata[];
   referenceFiles: string[];
   timeoutMs?: number;
@@ -98,6 +102,11 @@ export interface SandboxOptions {
   credentialEgress?: CredentialContext;
   egressSignals?: SandboxEgressSignalTransport;
   prepare?: (workspace: SandboxWorkspace) => void | Promise<void>;
+  prepareWorkspace?: (
+    workspace: SandboxWorkspace,
+    recipe: Workspace,
+    signal?: AbortSignal,
+  ) => Promise<void>;
   onSandboxRefChanged?: (sandboxRef: SandboxRef) => void | Promise<void>;
 }
 
@@ -200,8 +209,10 @@ export function createSandbox(options: SandboxOptions): SandboxAccess {
       ...(permissionDenied ? { permissionDenied } : {}),
     };
   };
+  let activeWorkspace = options.workspace;
   const runtime = createSandboxRuntime({
     sandboxRef: options.sandboxRef,
+    workspace: options.workspace,
     skills: options.skills,
     referenceFiles: options.referenceFiles,
     timeoutMs: options.timeoutMs,
@@ -221,6 +232,7 @@ export function createSandbox(options: SandboxOptions): SandboxAccess {
             })
         : undefined,
     onSandboxPrepare: options.prepare,
+    onWorkspacePrepare: options.prepareWorkspace,
     onSandboxRefChanged: options.onSandboxRefChanged,
   });
   const createToolCallContext = (
@@ -787,14 +799,27 @@ export function createSandbox(options: SandboxOptions): SandboxAccess {
         return undefined;
       }
       const { fs } = await runtime.tools();
-      const selected = await findSingleRepositoryDirectory(fs);
-      if (!selected) return undefined;
-      return await resolveRepositoryInstructions({
-        cwd: selected,
+      const workspaceDirectories =
+        activeWorkspace?.repos
+          .map((repo) => tryWorkspaceRepoCheckoutPath(repo.repo))
+          .filter((checkoutPath): checkoutPath is string => Boolean(checkoutPath))
+          .map(
+            (checkoutPath) => `${SANDBOX_WORKSPACE_ROOT}/${checkoutPath}`,
+          ) ?? [];
+      const directories =
+        workspaceDirectories.length > 0
+          ? workspaceDirectories
+          : await listRepositoryDirectories(fs);
+      return await resolveRepositoryInstructionsForDirectories({
+        directories,
         fs,
       });
     },
     workspace,
+    async switchWorkspace(recipe, signal) {
+      await runtime.switchWorkspace(recipe, signal);
+      activeWorkspace = recipe;
+    },
     tools: {
       supports(toolName: string) {
         return SANDBOX_TOOL_NAMES.has(toolName);

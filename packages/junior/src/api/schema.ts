@@ -1,8 +1,11 @@
 export { dailyConversationActivitySchema } from "./activity";
 export type { DailyConversationActivity } from "./activity";
 export {
+  acceptedConversationMessageSchema,
   archiveConversationBodySchema,
   archiveConversationResponseSchema,
+  cancelConversationPendingMessagesBodySchema,
+  cancelConversationPendingMessagesResponseSchema,
   conversationAuxiliaryCostsSchema,
   conversationDetailQuerySchema,
   conversationDetailReportSchema,
@@ -12,14 +15,23 @@ export {
   conversationFeedQuerySchema,
   conversationFeedSchema,
   conversationParamsSchema,
+  conversationPendingAuthorizationSchema,
+  conversationPendingMessageDeliverySchema,
+  conversationPendingMessageSchema,
+  conversationPendingMessagesReportSchema,
   conversationReportEventDataSchema,
   conversationReportEventSchema,
   conversationStatsReportSchema,
   conversationSummaryReportSchema,
+  createConversationBodySchema,
+  createConversationMessageBodySchema,
 } from "./schema/conversation";
 export type {
+  AcceptedConversationMessage,
   ArchiveConversationBody,
   ArchiveConversationResponse,
+  CancelConversationPendingMessagesBody,
+  CancelConversationPendingMessagesResponse,
   ActorIdentity,
   ConversationAuxiliaryCosts,
   ConversationCost,
@@ -27,6 +39,9 @@ export type {
   ConversationEventPage,
   ConversationEventHistory,
   ConversationFeed,
+  ConversationPendingMessage,
+  ConversationPendingMessageDelivery,
+  ConversationPendingMessagesReport,
   ConversationReportEvent,
   ConversationReportEventData,
   ConversationReportStatus,
@@ -39,6 +54,8 @@ export type {
   ConversationSummaryReport,
   ConversationSurface,
   ConversationUsage,
+  CreateConversationBody,
+  CreateConversationMessageBody,
   GuardianMetricDay,
   GuardianStats,
 } from "./schema/conversation";
@@ -83,6 +100,19 @@ export {
   revokePersonalTokenResponseSchema,
 } from "./schema/personal-token";
 export type { PersonalTokenMetadata } from "./schema/personal-token";
+export {
+  baselineSnapshotSchema,
+  deleteWorkspaceResponseSchema,
+  workspaceBodySchema,
+  workspaceListSchema,
+  workspaceParamsSchema,
+  workspaceRepoSchema,
+  workspaceSchema,
+} from "./schema/workspace";
+export type {
+  BaselineSnapshotReport,
+  WorkspaceReport,
+} from "./schema/workspace";
 export {
   eventTaskSummarySchema,
   scheduledTaskSummarySchema,

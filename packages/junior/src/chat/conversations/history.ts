@@ -122,6 +122,16 @@ const mcpProviderConnectedEventDataSchema = z
   .object({
     type: z.literal("mcp_provider_connected"),
     provider: z.string().min(1),
+    credentialSubjectId: z.string().min(1),
+  })
+  .strict();
+
+// Migration-only fact for connections recorded before credential ownership.
+// Readers keep it replayable, but writers cannot append it and restore ignores it.
+const unownedMcpProviderConnectedEventDataSchema = z
+  .object({
+    type: z.literal("mcp_provider_connected_unowned"),
+    provider: z.string().min(1),
   })
   .strict();
 
@@ -293,11 +303,31 @@ const structuredConversationEventDataSchema = z
   })
   .strict();
 
+/** Durable attachment metadata on host-owned delivery events. */
+const deliveredAttachmentSchema = z
+  .object({
+    id: z.string().min(1),
+    filename: z.string().min(1),
+    contentType: z.string().min(1),
+    bytes: z.number().int().nonnegative(),
+  })
+  .strict();
+
+/** Host-owned transcript item for files delivered to humans this turn. */
+const attachmentsDeliveredEventDataSchema = z
+  .object({
+    type: z.literal("attachments_delivered"),
+    attachments: z.array(deliveredAttachmentSchema).min(1),
+    toolCallId: z.string().min(1).optional(),
+    turnId: z.string().min(1).optional(),
+  })
+  .strict();
+
 const turnCompletedEventDataSchema = z
   .object({
     type: z.literal("turn_completed"),
     turnId: z.string().min(1),
-    outcome: z.enum(["success", "no_reply"]),
+    outcome: z.enum(["success", "no_reply", "cancelled"]),
   })
   .strict();
 
@@ -355,6 +385,7 @@ const appendableConversationEventDataSchema = z.union([
   turnStartedEventDataSchema,
   turnContextEventDataSchema,
   structuredConversationEventDataSchema,
+  attachmentsDeliveredEventDataSchema,
   turnRoutedEventDataSchema,
   turnCompletedEventDataSchema,
   turnFailedEventDataSchema,
@@ -366,6 +397,7 @@ const appendableConversationEventDataSchema = z.union([
 export const conversationEventDataSchema = z.union([
   appendableConversationEventDataSchema,
   historyReplacementEventDataSchema,
+  unownedMcpProviderConnectedEventDataSchema,
 ]);
 
 /** One durable conversation event's validated data. */
@@ -383,6 +415,7 @@ export const KNOWN_CONVERSATION_EVENT_TYPES = [
   "assistant_message",
   "tool_result",
   "mcp_provider_connected",
+  "mcp_provider_connected_unowned",
   "authorization_requested",
   "authorization_completed",
   "tool_execution_started",
@@ -392,6 +425,7 @@ export const KNOWN_CONVERSATION_EVENT_TYPES = [
   "turn_started",
   "turn_context",
   "structured_event",
+  "attachments_delivered",
   "turn_routed",
   "turn_completed",
   "turn_failed",
@@ -527,7 +561,10 @@ export interface ConversationEventPage {
 
 /** Persist and read the canonical per-conversation event log. */
 export interface ConversationEventStore {
-  /** Append events atomically, optionally preserving conversation activity. */
+  /**
+   * Append events atomically, optionally preserving conversation activity.
+   * Archive clears only for human user activity, not every non-preserve write.
+   */
   append(
     conversationId: string,
     events: NewConversationEvent[],

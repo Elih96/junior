@@ -109,6 +109,13 @@ function appendTranscriptMessages(
           entry.message,
           redacted,
         );
+      } else if (entry.message.context) {
+        appendMessageContext(
+          lines,
+          conversationTranscript,
+          entry.message,
+          redacted,
+        );
       } else {
         appendMessage(lines, conversationTranscript, entry.message, redacted);
       }
@@ -168,6 +175,22 @@ function appendTranscriptMessages(
         if (detail.metadata?.length) {
           lines.push(`  ${detail.metadata.join(" · ")}`);
         }
+      }
+      continue;
+    }
+
+    if (entry.kind === "attachments_delivered") {
+      const count = entry.part.attachments.length;
+      lines.push(
+        "",
+        `### ${count === 1 ? "1 file delivered" : `${count} files delivered`}`,
+      );
+      addEventMeta(lines, conversationTranscript, entry.timestamp);
+      for (const attachment of entry.part.attachments) {
+        lines.push(
+          "",
+          `- ${attachment.filename} (${attachment.contentType}, ${attachment.bytes} bytes)`,
+        );
       }
       continue;
     }
@@ -284,6 +307,23 @@ function appendResourceEvent(
 
   const rawText = messageRawText(message);
   lines.push("", rawText.trim().length ? rawText : "_No content._");
+}
+
+function appendMessageContext(
+  lines: string[],
+  conversationTranscript: ConversationTranscript,
+  message: TranscriptViewMessage,
+  redacted: boolean,
+): void {
+  lines.push(
+    "",
+    `### Context from ${messageRoleLabel(message, conversationTranscript)}`,
+  );
+  addEventMeta(lines, conversationTranscript, message.timestamp);
+  lines.push("", redacted ? "<redacted>" : messageRawText(message));
+  if (!redacted) {
+    appendTurnContexts(lines, message.contexts);
+  }
 }
 
 function appendMessage(

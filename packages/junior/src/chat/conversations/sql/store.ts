@@ -4,7 +4,7 @@ import { and, asc, desc, eq, isNull, sql } from "drizzle-orm";
 import type { ConversationPrivacy } from "@/chat/conversation-privacy";
 import { parseDestination, sameDestination } from "@/chat/destination";
 import { upsertIdentity } from "@/chat/identities/sql";
-import type { IdentityUpsert } from "@/chat/identities/identity";
+import { recordConversationParticipant } from "./participants";
 import type { StoredSlackActor } from "@/chat/actor";
 import {
   normalizeSessionSource,
@@ -36,6 +36,11 @@ import {
   type ProviderConversationBinding,
   type ProviderConversationReference,
 } from "./bindings";
+import {
+  actorFromIdentityRow,
+  actorIdentityForConversation,
+  mergeActor,
+} from "./actor-identity";
 import { locationFromRow, privacyFromLocationRow } from "./location";
 type ConversationRow = typeof juniorConversations.$inferSelect;
 type DestinationRow = typeof juniorDestinations.$inferSelect;
@@ -108,68 +113,12 @@ function sourceFromValue(value: unknown): ConversationSource | undefined {
     value === "plugin" ||
     value === "resource_event" ||
     value === "scheduler" ||
-    value === "slack"
+    value === "slack" ||
+    value === "web"
   ) {
     return value;
   }
   return undefined;
-}
-
-function identityFromActor(
-  actor: StoredSlackActor | undefined,
-): IdentityUpsert | undefined {
-  if (!actor?.slackUserId) {
-    return undefined;
-  }
-  return {
-    kind: "user",
-    provider: "slack",
-    providerTenantId: actor.teamId,
-    providerSubjectId: actor.slackUserId,
-    ...(actor.fullName ? { displayName: actor.fullName } : {}),
-    ...(actor.slackUserName ? { handle: actor.slackUserName } : {}),
-    ...(actor.email ? { email: actor.email, emailVerified: true } : {}),
-    metadata: { platform: "slack" },
-  };
-}
-
-function systemIdentityFromSource(
-  source: ConversationSource | undefined,
-): IdentityUpsert | undefined {
-  if (source === "scheduler") {
-    return {
-      kind: "system",
-      provider: "junior",
-      providerSubjectId: "scheduler",
-      displayName: "Junior Scheduler",
-    };
-  }
-  if (source === "local") {
-    return {
-      kind: "system",
-      provider: "junior",
-      providerSubjectId: "local-cli",
-      displayName: "Local CLI",
-    };
-  }
-  if (source === "resource_event") {
-    return {
-      kind: "system",
-      provider: "junior",
-      providerSubjectId: "resource-event",
-      displayName: "Resource Event",
-    };
-  }
-  return undefined;
-}
-
-function actorIdentityForConversation(
-  conversation: Conversation,
-): IdentityUpsert | undefined {
-  return (
-    identityFromActor(conversation.actor) ??
-    systemIdentityFromSource(conversation.source)
-  );
 }
 
 function originTypeFromSource(
@@ -221,8 +170,10 @@ function destinationUpsertFromDestination(args: {
       localWorkspaceFromConversationId(destination.conversationId) ??
       localWorkspaceFromConversationId(args.conversationId ?? ""),
     providerDestinationId: destination.conversationId,
-    refreshVisibility: true,
-    visibility: "direct",
+    // Match Slack: only refresh when a live visibility signal is present so
+    // execution-metadata writes cannot clobber public dashboard roots.
+    refreshVisibility: args.visibility !== undefined,
+    visibility: args.visibility ?? "direct",
     metadata: { platform: "local" },
   };
 }
@@ -243,31 +194,6 @@ function executionStatusToSql(status: ConversationStatus): ConversationStatus {
   return (
     status === "paused" ? "awaiting_resume" : status
   ) as ConversationStatus;
-}
-
-/** Reconstruct a Slack actor with the linked user name and identity-scoped provider fields. */
-function actorFromIdentityRow(
-  identity: IdentityRow | null,
-  userDisplayName: string | null,
-): StoredSlackActor | undefined {
-  if (!identity || identity.provider !== "slack") {
-    return undefined;
-  }
-  const fullName = userDisplayName?.trim()
-    ? userDisplayName
-    : identity.displayName;
-  return {
-    ...(identity.emailNormalized
-      ? { email: identity.emailNormalized }
-      : identity.email
-        ? { email: identity.email }
-        : {}),
-    ...(fullName ? { fullName } : {}),
-    platform: "slack",
-    slackUserId: identity.providerSubjectId,
-    ...(identity.handle ? { slackUserName: identity.handle } : {}),
-    ...(identity.providerTenantId ? { teamId: identity.providerTenantId } : {}),
-  };
 }
 
 function destinationFromRow(
@@ -408,46 +334,6 @@ function assertSameConversationDestination(args: {
   throw new Error(
     `Conversation destination changed for ${args.conversationId}`,
   );
-}
-
-function mergeActor(
-  current: StoredSlackActor | undefined,
-  next: StoredSlackActor | undefined,
-): StoredSlackActor | undefined {
-  if (!current) {
-    return next;
-  }
-  if (!next) {
-    return current;
-  }
-  if (
-    current.slackUserId &&
-    next.slackUserId &&
-    current.slackUserId !== next.slackUserId
-  ) {
-    return current;
-  }
-  return {
-    ...current,
-    ...((current.email ?? next.email)
-      ? { email: current.email ?? next.email }
-      : {}),
-    ...((current.fullName ?? next.fullName)
-      ? { fullName: current.fullName ?? next.fullName }
-      : {}),
-    ...((current.platform ?? next.platform)
-      ? { platform: current.platform ?? next.platform }
-      : {}),
-    ...((current.slackUserId ?? next.slackUserId)
-      ? { slackUserId: current.slackUserId ?? next.slackUserId }
-      : {}),
-    ...((current.slackUserName ?? next.slackUserName)
-      ? { slackUserName: current.slackUserName ?? next.slackUserName }
-      : {}),
-    ...((current.teamId ?? next.teamId)
-      ? { teamId: current.teamId ?? next.teamId }
-      : {}),
-  };
 }
 
 function tokenTotal(usage: AgentTurnUsage | undefined): number {
@@ -802,6 +688,46 @@ export class SqlStore implements ConversationStore {
     return undefined;
   }
 
+  async findSlackDestinationByName(args: {
+    channelName: string;
+    teamId: string;
+  }): Promise<{ channelId: string; channelName?: string } | undefined> {
+    const normalized = args.channelName.trim().replace(/^#/, "").toLowerCase();
+    if (!normalized) {
+      return undefined;
+    }
+
+    // Limit 2 so an ambiguous exact name fails closed instead of guessing.
+    const rows = await this.executor
+      .db()
+      .select({
+        channelId: juniorDestinations.providerDestinationId,
+        channelName: juniorDestinations.displayName,
+      })
+      .from(juniorDestinations)
+      .where(
+        and(
+          eq(juniorDestinations.provider, "slack"),
+          eq(juniorDestinations.providerTenantId, tenantId(args.teamId)),
+          eq(juniorDestinations.kind, "channel"),
+          sql`lower(ltrim(${juniorDestinations.displayName}, '#')) = ${normalized}`,
+        ),
+      )
+      .limit(2);
+
+    if (rows.length !== 1) {
+      return undefined;
+    }
+    const row = rows[0];
+    if (!row?.channelId) {
+      return undefined;
+    }
+    return {
+      channelId: row.channelId,
+      ...(row.channelName ? { channelName: row.channelName } : {}),
+    };
+  }
+
   /** Serialize all durable mutations for one conversation inside a SQL transaction. */
   private async withConversationMutation<T>(
     conversationId: string,
@@ -916,7 +842,8 @@ export class SqlStore implements ConversationStore {
       .onConflictDoUpdate({
         target: juniorConversations.conversationId,
         set: {
-          source: sql`coalesce(excluded.source, ${juniorConversations.source})`,
+          // Origin source is set-once so dashboard continues cannot rewrite a Slack root.
+          source: sql`coalesce(${juniorConversations.source}, excluded.source)`,
           sessionSource: sql`coalesce(${juniorConversations.sessionSource}, excluded.source_json)`,
           originType: sql`coalesce(excluded.origin_type, ${juniorConversations.originType})`,
           originId: sql`coalesce(excluded.origin_id, ${juniorConversations.originId})`,
@@ -939,10 +866,21 @@ export class SqlStore implements ConversationStore {
         },
       })
       .returning({
+        actorIdentityId: juniorConversations.actorIdentityId,
+        parentConversationId: juniorConversations.parentConversationId,
         rootConversationId: juniorConversations.rootConversationId,
       });
-    if (!rows[0]?.rootConversationId) {
+    const row = rows[0];
+    if (!row?.rootConversationId) {
       throw new Error("Conversation parent is missing its persisted root");
+    }
+    // Root actors stay in the personal feed even before they author a message.
+    if (row.actorIdentityId && row.parentConversationId === null) {
+      await recordConversationParticipant(this.executor, {
+        actorIdentityId: row.actorIdentityId,
+        conversationId: conversation.conversationId,
+        atMs: conversation.lastActivityAtMs,
+      });
     }
   }
 

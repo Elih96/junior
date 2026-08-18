@@ -16,7 +16,7 @@ import { ChartHeader } from "../src/client/components/charts/ChartHeader";
 import { SystemMetricCharts } from "../src/client/components/charts/SystemMetricCharts";
 
 describe("ChartAxisLabel", () => {
-  it("defaults to the shared 12px screen-size contract", () => {
+  it("defaults to the shared 11px screen-size contract", () => {
     const html = renderToStaticMarkup(
       <svg>
         <ChartAxisLabel x={0} y={0}>
@@ -25,7 +25,7 @@ describe("ChartAxisLabel", () => {
       </svg>,
     );
 
-    expect(html).toContain('font-size="12"');
+    expect(html).toContain('font-size="11"');
     expect(html).toContain(">12</text>");
   });
 
@@ -174,32 +174,49 @@ describe("ActivityChartAverageLine", () => {
 });
 
 describe("SystemMetricCharts average line", () => {
+  const days = [
+    {
+      conversations: 2,
+      costUsd: 1.5,
+      date: "2026-05-01",
+      cachedInputTokens: 750_000_000,
+      durationMs: 120_000,
+      inputTokens: 250_000_000,
+      tokens: 1_000_000_000,
+    },
+    {
+      conversations: 4,
+      costUsd: 2.5,
+      date: "2026-05-02",
+      cachedInputTokens: 1_000_000_000,
+      durationMs: 180_000,
+      inputTokens: 400_000_000,
+      tokens: 1_400_000_000,
+    },
+  ];
+
   it("opts token usage into the shared average line", () => {
-    const html = renderToStaticMarkup(
-      <SystemMetricCharts
-        days={[
-          {
-            conversations: 2,
-            costUsd: 1.5,
-            date: "2026-05-01",
-            durationMs: 120_000,
-            tokens: 1_000_000_000,
-          },
-          {
-            conversations: 4,
-            costUsd: 2.5,
-            date: "2026-05-02",
-            durationMs: 180_000,
-            tokens: 1_400_000_000,
-          },
-        ]}
-      />,
-    );
+    const html = renderToStaticMarkup(<SystemMetricCharts days={days} />);
 
     expect(html).toContain("Token usage");
+    expect(html).not.toContain("Input token cache");
+    expect(html).not.toContain("Cached");
     expect(html).toContain('aria-label="average 1.2b / day"');
     expect(html).toContain(">1.2b / day</text>");
     expect(html).toContain("Model spend");
     expect(html).toContain("Runtime");
+  });
+
+  it("stacks cached and uncached input tokens only for cache breakdown", () => {
+    const html = renderToStaticMarkup(
+      <SystemMetricCharts cacheBreakdown days={days} />,
+    );
+
+    expect(html).toContain("Input token cache");
+    expect(html).toContain("Cached");
+    expect(html).toContain("Uncached");
+    expect(html).toContain("input tokens");
+    expect(html).toContain('aria-label="average 1.2b / day"');
+    expect(html).not.toContain("Token usage");
   });
 });

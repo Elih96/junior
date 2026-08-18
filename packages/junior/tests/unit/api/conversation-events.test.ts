@@ -230,6 +230,90 @@ describe("conversation report event projection", () => {
     ]);
   });
 
+  it("projects delivered attachments only when payload is visible", () => {
+    const delivered = event(1, {
+      type: "attachments_delivered",
+      attachments: [
+        {
+          id: "att-1",
+          filename: "chart.png",
+          contentType: "image/png",
+          bytes: 18211,
+        },
+      ],
+      toolCallId: "call-send-1",
+    });
+
+    expect(
+      projectConversationReportEventPage({
+        canExposePayload: true,
+        events: [delivered],
+      }),
+    ).toEqual([
+      {
+        seq: 1,
+        createdAt: "1970-01-01T00:00:01.000Z",
+        data: {
+          type: "attachments_delivered",
+          attachments: [
+            {
+              id: "att-1",
+              filename: "chart.png",
+              contentType: "image/png",
+              bytes: 18211,
+            },
+          ],
+        },
+      },
+    ]);
+
+    expect(
+      projectConversationReportEventPage({
+        canExposePayload: false,
+        events: [delivered],
+      }),
+    ).toEqual([]);
+  });
+
+  it("projects turn input message ids across report pages", () => {
+    const events = [
+      event(1, {
+        type: "message",
+        messageId: "context-1",
+        role: "user",
+        text: "can you clarify that?",
+        meta: { explicitMention: false },
+      }),
+      event(2, {
+        type: "turn_started",
+        turnId: "turn-1",
+        inputMessageIds: ["context-1", "earlier-page-input-id"],
+        surface: "slack",
+      }),
+    ];
+
+    expect(
+      projectConversationReportEventPage({
+        canExposePayload: true,
+        events,
+      }).map((entry) => entry.data),
+    ).toEqual([
+      {
+        type: "message",
+        messageId: "context-1",
+        role: "user",
+        text: "can you clarify that?",
+        explicitMention: false,
+      },
+      {
+        type: "turn_lifecycle",
+        turnId: "turn-1",
+        state: "started",
+        inputMessageIds: ["context-1", "earlier-page-input-id"],
+      },
+    ]);
+  });
+
   it("projects turn context only across the authorized payload boundary", () => {
     const context = event(1, {
       type: "turn_context",
@@ -597,7 +681,7 @@ describe("conversation report event projection", () => {
     expect(JSON.stringify(projected)).not.toContain("AAAA");
   });
 
-  it("projects only the resource event discriminator from message metadata", () => {
+  it("projects dashboard source with visible message metadata", () => {
     const [projected] = projectConversationReportEventPage({
       canExposePayload: true,
       events: [
@@ -609,6 +693,7 @@ describe("conversation report event projection", () => {
           meta: {
             eventType: "pull_request.merged",
             provider: "private-provider",
+            source: "web",
           },
         }),
       ],
@@ -618,8 +703,34 @@ describe("conversation report event projection", () => {
       type: "message",
       messageId: "event-1",
       role: "user",
+      source: "web",
       eventType: "pull_request.merged",
       text: "event details",
+    });
+  });
+
+  it("projects known Slack source with visible message metadata", () => {
+    const [projected] = projectConversationReportEventPage({
+      canExposePayload: true,
+      events: [
+        event(1, {
+          type: "message",
+          messageId: "event-1",
+          role: "user",
+          text: "from slack",
+          meta: {
+            source: "slack",
+          },
+        }),
+      ],
+    });
+
+    expect(projected?.data).toEqual({
+      type: "message",
+      messageId: "event-1",
+      role: "user",
+      source: "slack",
+      text: "from slack",
     });
   });
 
@@ -989,7 +1100,12 @@ describe("conversation report event projection", () => {
       1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 13,
     ]);
     expect(projected.map(({ data }) => data)).toEqual([
-      { type: "turn_lifecycle", turnId: "turn-1", state: "started" },
+      {
+        type: "turn_lifecycle",
+        turnId: "turn-1",
+        state: "started",
+        inputMessageIds: ["private-input-id"],
+      },
       {
         type: "turn_routed",
         turnId: "turn-1",
@@ -1080,7 +1196,6 @@ describe("conversation report event projection", () => {
     ]);
     const serialized = JSON.stringify(projected);
     for (const forbidden of [
-      "private-input-id",
       "subagent-invocation-1",
       "private-child-model-id",
       "private-reasoning-level",

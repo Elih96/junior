@@ -1,12 +1,13 @@
 import type {
-  PluginContext,
-  LocalInvocationContext,
-  PluginEmbedder,
-  Identity,
-  PluginModel,
   Actor,
+  Identity,
+  LocalInvocationContext,
+  PluginContext,
+  PluginEmbedder,
+  PluginModel,
   SlackInvocationContext,
   User,
+  WebInvocationContext,
 } from "./context";
 import type { PluginCredentialSubject } from "./credentials";
 import type { PluginAnnotations } from "./annotations";
@@ -137,6 +138,15 @@ export interface PluginMcp {
    * record pending work.
    */
   prepare(): Promise<"authorization_pending" | "ready">;
+}
+
+/** Provider-owned repository preparation for one Workspace snapshot build. */
+export interface WorkspacePrepareHookContext extends PluginContext {
+  repos: Array<{
+    path: string;
+    repo: string;
+  }>;
+  sandbox: PluginSandbox;
 }
 
 export interface SandboxPrepareHookContext extends PluginContext {
@@ -510,11 +520,19 @@ export interface PluginResourceEventToolContext {
   canSubscribe: boolean;
 }
 
+export interface PluginWorkspaceToolContext {
+  /** Find named Workspaces that include one provider repository. */
+  findByRepository(input: {
+    provider: string;
+    repo: string;
+  }): Promise<string[]>;
+}
+
 interface BaseToolRegistrationHookContext extends PluginContext {
   /**
    * Opaque Junior conversation/session identity for this turn.
    * Interactive Slack turns use `slack:{channelId}:{threadTs}`.
-   * Scheduled/API turns use an internal id such as `agent-dispatch:{id}`.
+   * Scheduled/web turns use an internal id such as `agent-dispatch:{id}`.
    * Do not parse as Slack unless the value starts with `slack:`.
    */
   conversationId?: string;
@@ -532,6 +550,7 @@ interface BaseToolRegistrationHookContext extends PluginContext {
     resolveActor(): Promise<{ identity: Identity; user?: User } | undefined>;
   };
   userText?: string;
+  workspaces: PluginWorkspaceToolContext;
 }
 
 interface SlackToolRegistrationContext
@@ -544,6 +563,12 @@ interface LocalToolRegistrationContext
   slack?: never;
 }
 
+interface WebToolRegistrationContext
+  extends BaseToolRegistrationHookContext, WebInvocationContext {
+  slack?: never;
+}
+
 export type ToolRegistrationHookContext =
   | LocalToolRegistrationContext
-  | SlackToolRegistrationContext;
+  | SlackToolRegistrationContext
+  | WebToolRegistrationContext;

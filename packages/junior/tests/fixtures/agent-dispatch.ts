@@ -11,7 +11,9 @@ import { createSlackRuntime } from "@/chat/app/factory";
 import { createJuniorSlackAdapter } from "@/chat/slack/adapter";
 import type { CredentialSubject } from "@/chat/credentials/context";
 import type { JuniorRuntimeServiceOverrides } from "@/chat/app/services";
+import type { StreamFn } from "@earendil-works/pi-agent-core";
 import { vi } from "vitest";
+import { createModelAgentRunner } from "./agent-runner";
 
 /** Build a rollout-compatible signed dispatch callback request. */
 export function createSignedDispatchCallbackRequest(
@@ -52,6 +54,15 @@ export function createAgentDispatchTestRuntime(
       }),
     services: { replyExecutor },
   });
+}
+
+/** Build a dispatch harness that fakes only model output. */
+export function createAgentDispatchModelHarness(streamFn: StreamFn) {
+  const agentRunner = createModelAgentRunner(streamFn);
+  return {
+    agentRunner,
+    runtime: createAgentDispatchTestRuntime({ agentRunner }),
+  };
 }
 
 /** Create a durable dispatch record for integration tests. */

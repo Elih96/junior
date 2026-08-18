@@ -1,4 +1,5 @@
-import { and, asc, desc, eq, isNull } from "drizzle-orm";
+import type { User } from "@sentry/junior-plugin-api";
+import { and, asc, desc, eq, isNull, type SQL } from "drizzle-orm";
 import { getDb } from "@/chat/db";
 import type { Conversation } from "@/chat/conversations/store";
 import { locationFromRow } from "@/chat/conversations/sql/location";
@@ -13,20 +14,47 @@ import {
 import { resolveSlackTeamDomains } from "@/chat/slack/team-domain";
 import { conversationSummaryFromStoredConversation } from "./projection";
 import { readConversationAccessFromSql } from "./access";
+import {
+  conversationHasParticipantEmail,
+  conversationHasParticipantUser,
+  viewerConversationMembership,
+} from "./membership";
 import { conversationFeedSchema } from "../schema/conversation";
 import type { ConversationFeed } from "../schema/conversation";
 import { readRootConversationMetricsFromSql } from "./usage";
 import { readConversationAuxiliaryCostsFromSql } from "./auxiliary-costs";
-import { defineApiRoute } from "../route";
-import { parseQuery } from "../http";
-import { conversationFeedQuerySchema } from "../schema/conversation";
+import { listConversationAnnotationsById } from "@/chat/plugins/annotations";
+import { listConversationSidebarAnnotations } from "@/chat/plugins/conversation-sidebar";
+import { listConversationWork } from "@/chat/plugins/unfinished-work";
+import { isConversationPriority } from "./priority";
+import { readLastUserMessageAtByConversation } from "./user-message-activity";
 
 const CONVERSATION_FEED_LIMIT = 50;
+
+type ConversationFeedMembership =
+  | { kind: "viewer"; userId: string }
+  | { kind: "actorEmail"; email: string };
+
+function conversationFeedMembershipFilter(
+  filter?: ConversationFeedMembership,
+): SQL | undefined {
+  if (!filter) return undefined;
+  if (filter.kind === "viewer") {
+    return viewerConversationMembership({
+      actorMatch: eq(juniorIdentities.userId, filter.userId),
+      participantMatch: conversationHasParticipantUser(filter.userId),
+    });
+  }
+  return viewerConversationMembership({
+    actorMatch: eq(juniorUsers.primaryEmailNormalized, filter.email),
+    participantMatch: conversationHasParticipantEmail(filter.email),
+  });
+}
 
 async function conversationRows(
   db: JuniorDatabase,
   limit: number,
-  actorEmail?: string,
+  filter?: ConversationFeedMembership,
 ) {
   return db
     .select({
@@ -54,12 +82,7 @@ async function conversationRows(
       and(
         isNull(juniorConversations.parentConversationId),
         isNull(juniorConversations.archivedAt),
-        actorEmail
-          ? and(
-              eq(juniorIdentities.emailNormalized, actorEmail),
-              eq(juniorIdentities.emailVerified, true),
-            )
-          : undefined,
+        conversationFeedMembershipFilter(filter),
       ),
     )
     .orderBy(
@@ -176,15 +199,36 @@ export async function readConversationRecordFromSql(
     : undefined;
 }
 
+/** Prefer the authenticated viewer; fall back to actor email membership. */
+function conversationFeedFilter(options: {
+  actorEmail?: string;
+  viewer?: User;
+}): ConversationFeedMembership | undefined {
+  if (options.viewer) {
+    return {
+      kind: "viewer",
+      userId: options.viewer.id,
+    };
+  }
+  if (options.actorEmail) {
+    return {
+      kind: "actorEmail",
+      email: options.actorEmail,
+    };
+  }
+  return undefined;
+}
+
 /**
- * Build a bounded dashboard feed, applying a normalized actor-email filter
- * before the limit when one is provided.
+ * Build a bounded dashboard feed. Prefer the viewer user when present; otherwise
+ * keep only roots linked to actorEmail before applying the limit. Membership is
+ * root-actor ownership or a materialized participant row for that person.
  */
 export async function readConversationFeedFromSql(
   options: {
     actorEmail?: string;
     limit?: number;
-    verifiedViewerEmail?: string;
+    viewer?: User;
   } = {},
 ): Promise<ConversationFeed> {
   const nowMs = Date.now();
@@ -192,7 +236,7 @@ export async function readConversationFeedFromSql(
   const rows = await conversationRows(
     db,
     options.limit ?? CONVERSATION_FEED_LIMIT,
-    options.actorEmail,
+    conversationFeedFilter(options),
   );
   const conversations = rows.map((row) => conversationFromRow(row));
   const conversationIds = conversations.map(
@@ -200,34 +244,52 @@ export async function readConversationFeedFromSql(
   );
   const [
     accessByConversation,
+    annotationsByConversation,
     auxiliaryCostsByRoot,
     metricsByRoot,
     teamDomainByTeamId,
+    conversationWork,
+    lastUserMessageAtByConversation,
   ] = await Promise.all([
-      readConversationAccessFromSql(
-        db,
-        conversationIds,
-        options.verifiedViewerEmail,
+    readConversationAccessFromSql(db, conversationIds, options.viewer),
+    listConversationAnnotationsById(db, conversationIds),
+    readConversationAuxiliaryCostsFromSql(db, conversationIds, {
+      includeDescendants: true,
+    }),
+    readRootConversationMetricsFromSql(db, conversationIds),
+    resolveSlackTeamDomains(
+      conversations.flatMap((conversation) =>
+        conversation.sessionSource?.platform === "slack"
+          ? [conversation.sessionSource.teamId]
+          : [],
       ),
-      readConversationAuxiliaryCostsFromSql(db, conversationIds, {
-        includeDescendants: true,
-      }),
-      readRootConversationMetricsFromSql(db, conversationIds),
-      resolveSlackTeamDomains(
-        conversations.flatMap((conversation) =>
-          conversation.sessionSource?.platform === "slack"
-            ? [conversation.sessionSource.teamId]
-            : [],
-        ),
-      ),
-    ]);
+    ),
+    listConversationWork(conversationIds),
+    readLastUserMessageAtByConversation(db, conversationIds),
+  ]);
+  const visibleAnnotationsByConversation = new Map(
+    conversationIds.map((conversationId) => [
+      conversationId,
+      accessByConversation.get(conversationId)?.canViewPrivateContent
+        ? (annotationsByConversation.get(conversationId) ?? [])
+        : [],
+    ]),
+  );
+  const sidebarAnnotationsByConversation =
+    await listConversationSidebarAnnotations(
+      conversationIds,
+      visibleAnnotationsByConversation,
+    );
+  const assignedWork = new Set(conversationWork.assignedIds);
+  const unfinishedWork = new Set(conversationWork.unfinishedIds);
   return {
     conversations: conversations.map((conversation, index) => {
       const row = rows[index]!;
+      const access = accessByConversation.get(conversation.conversationId);
       const metrics = metricsByRoot.get(conversation.conversationId);
-      return conversationSummaryFromStoredConversation({
+      const summary = conversationSummaryFromStoredConversation({
         conversation,
-        access: accessByConversation.get(conversation.conversationId),
+        access,
         auxiliaryCosts: auxiliaryCostsByRoot.get(conversation.conversationId),
         durationMs: metrics?.durationMs ?? row.conversation.durationMs,
         teamDomainByTeamId,
@@ -236,6 +298,44 @@ export async function readConversationFeedFromSql(
           : {}),
         usage: metrics?.usage ?? row.conversation.usage ?? undefined,
       });
+      const work = {
+        ...(assignedWork.has(conversation.conversationId)
+          ? { assignedWork: true as const }
+          : {}),
+        ...(conversationWork.finishedAtById[conversation.conversationId]
+          ? {
+              finishedWorkAt:
+                conversationWork.finishedAtById[conversation.conversationId],
+            }
+          : {}),
+        ...(unfinishedWork.has(conversation.conversationId)
+          ? { unfinishedWork: true as const }
+          : {}),
+      };
+      const annotations = access?.canViewPrivateContent
+        ? (annotationsByConversation.get(conversation.conversationId) ?? [])
+        : [];
+      return {
+        ...summary,
+        ...work,
+        ...(annotations.length > 0 ? { annotations } : {}),
+        ...(sidebarAnnotationsByConversation[conversation.conversationId]
+          ? {
+              sidebarAnnotations:
+                sidebarAnnotationsByConversation[conversation.conversationId],
+            }
+          : {}),
+        isPriority: isConversationPriority(
+          {
+            lastSeenAt: summary.lastSeenAt,
+            lastUserMessageAt: lastUserMessageAtByConversation.get(
+              conversation.conversationId,
+            ),
+            ...work,
+          },
+          nowMs,
+        ),
+      };
     }),
     generatedAt: new Date(nowMs).toISOString(),
     source: "conversation_index",
@@ -243,31 +343,13 @@ export async function readConversationFeedFromSql(
 }
 
 /**
- * Load a bounded feed with an optional normalized actor-email presentation
- * filter. This filter is not an authorization boundary.
+ * Load a bounded feed with an optional viewer-primary linked-user filter.
+ * This filter is not an authorization boundary.
  */
 export async function readConversationFeed(
-  options: { actorEmail?: string; verifiedViewerEmail?: string } = {},
+  options: { actorEmail?: string; viewer?: User } = {},
 ): Promise<ConversationFeed> {
   return conversationFeedSchema.parse(
     await readConversationFeedFromSql(options),
   );
 }
-
-/** Serve the conversation feed endpoint. */
-export default defineApiRoute({
-  method: "get",
-  path: "/",
-  responseSchema: conversationFeedSchema,
-  handler: async (c) => {
-    const { actorEmail } = parseQuery(
-      conversationFeedQuerySchema,
-      c.req.query(),
-    );
-    const verifiedViewerEmail = c.get("verifiedViewerEmail");
-    return readConversationFeed({
-      ...(actorEmail ? { actorEmail } : {}),
-      ...(verifiedViewerEmail ? { verifiedViewerEmail } : {}),
-    });
-  },
-});

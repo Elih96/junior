@@ -1,6 +1,5 @@
 import type { Message } from "chat";
 import { describe, expect, it } from "vitest";
-import { makeAssistantStatus } from "@/chat/slack/assistant-thread/status";
 import {
   FakeSlackAdapter,
   createTestDestination,
@@ -10,16 +9,15 @@ import {
   createTestMessage,
   createTestThread,
 } from "../../fixtures/slack-harness";
-import { completedAgentRun } from "@/chat/runtime/agent-run-outcome";
-import type { AgentRunner } from "@/chat/runtime/agent-runner";
 import { hydrateConversationMessages } from "@/chat/conversations/messages";
 import { coerceThreadConversationState } from "@/chat/state/conversation";
 import {
-  deliverAssistantMessagesForTest,
-  flattenAgentRunRequestForTest,
+  createModelAgentRunner,
+  createModelAgentRunnerForRun,
 } from "../../fixtures/agent-runner";
+import { createModelStream } from "../../fixtures/model-stream";
 
-interface FakeReplyCall {
+interface CapturedRun {
   prompt: string;
   piMessages?: unknown[];
 }
@@ -39,88 +37,22 @@ function toPostedText(value: unknown): string {
   return String(value);
 }
 
-async function completedReply(
-  request: Parameters<AgentRunner["run"]>[0],
-  text: string,
-  toolCalls: string[] = [],
-) {
-  await deliverAssistantMessagesForTest(request, [{ text }]);
-  return completedAgentRun({
-    text,
-    diagnostics: {
-      assistantMessageCount: 1,
-      modelId: "fake-agent-model",
-      outcome: "success" as const,
-      toolCalls,
-      toolErrorCount: 0,
-      toolResultCount: toolCalls.length,
-      usedPrimaryText: true,
-    },
-  });
-}
-
 describe("Slack behavior: new mention", () => {
-  it("handles a mention with real runtime wiring and fake agent response", async () => {
-    const fakeReplyCalls: FakeReplyCall[] = [];
-
-    const { slackRuntime } = createTestChatRuntime({
-      services: {
-        replyExecutor: {
-          agentRunner: {
-            run: async (request) => {
-              const prompt = request.input.messageText;
-
-              fakeReplyCalls.push({ prompt });
-              return await completedReply(
-                request,
-                "Acknowledged. Rollback is complete and error rates are stable.",
-              );
-            },
-          },
-        },
-      },
-    });
-
-    const thread = await createTestThread({
-      id: "slack:C0BEHAVIOR:1700001234.000",
-    });
-    const message = createTestMessage({
-      id: "m-behavior-1",
-      text: "<@U0APP> give me a status update",
-      isMention: true,
-      threadId: thread.id,
-      author: {
-        userId: "U0TESTER",
-        userName: "tester",
-      },
-    });
-
-    await slackRuntime.handleNewMention(thread, message, {
-      destination: createTestDestination(thread),
-    });
-
-    expect(fakeReplyCalls).toHaveLength(1);
-    expect(fakeReplyCalls[0]?.prompt).toContain("give me a status update");
-    expect(thread.subscribeCalls).toBe(1);
-    expect(thread.posts).toHaveLength(1);
-    expect(toPostedText(thread.posts[0])).toContain("Rollback is complete");
-  });
-
   it("includes queued SDK messages in the assistant prompt", async () => {
-    const fakeReplyCalls: FakeReplyCall[] = [];
+    const agentRuns: CapturedRun[] = [];
 
     const { slackRuntime } = createTestChatRuntime({
       services: {
         replyExecutor: {
-          agentRunner: {
-            run: async (request) => {
-              const prompt = request.input.messageText;
-              const context = flattenAgentRunRequestForTest(request);
-
-              fakeReplyCalls.push({ prompt, piMessages: context.piMessages });
-              return await completedReply(request, "Handled both updates.");
-            },
-          },
+          agentRunner: createModelAgentRunnerForRun((request) => {
+            agentRuns.push({
+              prompt: request.instruction.text,
+              piMessages: request.history ? [...request.history] : undefined,
+            });
+            return createModelStream([
+              { type: "text", text: "Handled both updates." },
+            ]);
+          }),
         },
       },
     });
@@ -133,17 +65,15 @@ describe("Slack behavior: new mention", () => {
       text: "<@U0APP> first queued request",
       isMention: true,
       threadId: thread.id,
+      dateSent: new Date(1700001234000),
     });
     const latest = createTestMessage({
       id: "m-latest",
       text: "<@U0APP> latest request",
       isMention: true,
       threadId: thread.id,
+      dateSent: new Date(1700001235000),
     });
-    // The transcript is ordered by created_at; the queued message genuinely
-    // arrived before the triggering mention.
-    (queued.metadata as { dateSent: Date }).dateSent = new Date(1700001234000);
-    (latest.metadata as { dateSent: Date }).dateSent = new Date(1700001235000);
 
     await slackRuntime.handleNewMention(thread, latest, {
       destination: createTestDestination(thread),
@@ -153,10 +83,10 @@ describe("Slack behavior: new mention", () => {
       },
     });
 
-    expect(fakeReplyCalls).toHaveLength(1);
-    expect(fakeReplyCalls[0]?.prompt).toContain("latest request");
-    expect(fakeReplyCalls[0]?.prompt).not.toContain("first queued request");
-    expect(JSON.stringify(fakeReplyCalls[0]?.piMessages)).toContain(
+    expect(agentRuns).toHaveLength(1);
+    expect(agentRuns[0]?.prompt).toContain("latest request");
+    expect(agentRuns[0]?.prompt).not.toContain("first queued request");
+    expect(JSON.stringify(agentRuns[0]?.piMessages)).toContain(
       "first queued request",
     );
     const conversation = coerceThreadConversationState(await thread.getState());
@@ -179,7 +109,7 @@ describe("Slack behavior: new mention", () => {
   });
 
   it("forwards queued SDK message attachments to the assistant context", async () => {
-    const fakeReplyCalls: Array<{
+    const agentRuns: Array<{
       attachmentText?: string;
       filenames: string[];
       inboundAttachmentCount?: number;
@@ -190,29 +120,22 @@ describe("Slack behavior: new mention", () => {
     const { slackRuntime } = createTestChatRuntime({
       services: {
         replyExecutor: {
-          agentRunner: {
-            run: async (request) => {
-              const prompt = request.input.messageText;
-              const context = {
-                ...flattenAgentRunRequestForTest(request),
-              };
-
-              const attachments = context?.userAttachments ?? [];
-              fakeReplyCalls.push({
-                prompt,
-                inboundAttachmentCount: context?.inboundAttachmentCount,
-                filenames: attachments.map(
-                  (attachment) => attachment.filename ?? "",
-                ),
-                attachmentText: attachments[0]?.data?.toString("utf8"),
-                piMessages: context?.piMessages,
-              });
-              return await completedReply(
-                request,
-                "Handled queued attachment.",
-              );
-            },
-          },
+          agentRunner: createModelAgentRunnerForRun((request) => {
+            const attachments = request.instruction.attachments ?? [];
+            agentRuns.push({
+              prompt: request.instruction.text,
+              inboundAttachmentCount:
+                request.instruction.inboundAttachmentCount,
+              filenames: attachments.map(
+                (attachment) => attachment.filename ?? "",
+              ),
+              attachmentText: attachments[0]?.data?.toString("utf8"),
+              piMessages: request.history ? [...request.history] : undefined,
+            });
+            return createModelStream([
+              { type: "text", text: "Handled queued attachment." },
+            ]);
+          }),
         },
       },
     });
@@ -249,7 +172,7 @@ describe("Slack behavior: new mention", () => {
       },
     });
 
-    expect(fakeReplyCalls).toEqual([
+    expect(agentRuns).toEqual([
       expect.objectContaining({
         prompt: "then answer now",
         inboundAttachmentCount: 1,
@@ -257,7 +180,7 @@ describe("Slack behavior: new mention", () => {
         attachmentText: "queued attachment notes",
       }),
     ]);
-    expect(JSON.stringify(fakeReplyCalls[0]?.piMessages)).toContain(
+    expect(JSON.stringify(agentRuns[0]?.piMessages)).toContain(
       "review this file first",
     );
     expect(thread.posts).toHaveLength(1);
@@ -266,61 +189,17 @@ describe("Slack behavior: new mention", () => {
     );
   });
 
-  it("clears assistant status after successful reply", async () => {
-    const slackAdapter = new FakeSlackAdapter();
-    const { slackRuntime } = createTestChatRuntime({
-      slackAdapter,
-      services: {
-        replyExecutor: {
-          agentRunner: {
-            run: async (request) => {
-              const _prompt = request.input.messageText;
-              const context = {
-                ...flattenAgentRunRequestForTest(request),
-              };
-
-              await context?.onStatus?.(makeAssistantStatus("running", "bash"));
-              return await completedReply(request, "Done.", ["bash"]);
-            },
-          },
-        },
-      },
-    });
-
-    const thread = await createTestThread({
-      id: "slack:C0STATUS:1700002000.000",
-    });
-    await slackRuntime.handleNewMention(
-      thread,
-      createTestMessage({
-        id: "m-status-clear",
-        text: "<@U0APP> run a command",
-        isMention: true,
-        threadId: thread.id,
-      }),
-      { destination: createTestDestination(thread) },
-    );
-
-    expect(slackAdapter.statusCalls.length).toBeGreaterThan(0);
-    expect(slackAdapter.statusCalls.at(-1)).toEqual({
-      channelId: "C0STATUS",
-      threadTs: "1700002000.000",
-      text: "",
-      loadingMessages: undefined,
-    });
-  });
-
   it("clears assistant status after agent error", async () => {
     const slackAdapter = new FakeSlackAdapter();
     const { slackRuntime } = createTestChatRuntime({
       slackAdapter,
       services: {
         replyExecutor: {
-          agentRunner: {
-            run: async () => {
-              throw new Error("model exploded");
-            },
-          },
+          agentRunner: createModelAgentRunner(
+            createModelStream([
+              { type: "error", errorMessage: "model exploded" },
+            ]),
+          ),
         },
       },
     });

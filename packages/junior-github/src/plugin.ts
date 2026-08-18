@@ -6,6 +6,7 @@
 import {
   defineJuniorPlugin,
   EgressPolicyDenied,
+  enforceEgressPolicy,
   type EgressHookContext,
   type EgressResponseHookContext,
   type PluginGrantAccess,
@@ -16,6 +17,7 @@ import {
   normalizePermissions,
   readGrantPermissions,
 } from "./permissions.js";
+import { assertGitHubPullRequestApprovalDenied } from "./pull-request-review-policy.js";
 import { createGitHubTools } from "./tools.js";
 import { createGitHubWebhookRoute } from "./webhooks/handler.js";
 import {
@@ -35,14 +37,23 @@ import {
   GITHUB_RELEASE_SUGGESTED_EVENTS,
 } from "./resource-events/release.js";
 import type { GitHubDb } from "./db/database.js";
+import { buildGitHubProfileReport } from "./outcomes/profile-report.js";
 import { buildGitHubOutcomeReport } from "./outcomes/report.js";
 import { classifyGitHubPullRequestCommitComposition } from "./pull-request-outcomes/commit-composition.js";
+import { githubSidebarAnnotations } from "./annotations.js";
+import {
+  listGitHubAssignedWork,
+  listGitHubFinishedWork,
+  listGitHubUnfinishedWork,
+} from "./pull-request-outcomes/store.js";
 import { loadFailingChecksForSuite } from "./webhooks/check-suite-enrichment.js";
 import {
   additionalActorCoauthorTrailers,
   configureGit,
   prepareCommitMsgHook,
 } from "./git-config.js";
+import { linkifyGitHubReferences } from "./reply-markdown.js";
+import { prepareWorkspace } from "./workspace-prepare.js";
 import {
   CREATE_TOOL_ROUTING_GUIDANCE,
   GITHUB_APP_ID_ENV,
@@ -326,6 +337,54 @@ function shouldInspectGitHubGraphqlResponse(
   return contentType ? /\bjson\b/i.test(contentType) : false;
 }
 
+/** GitHub body writes that must go through a typed tool. */
+type GitHubBodyWrite = {
+  denialMessage: string;
+  graphqlField:
+    | "createIssue"
+    | "createPullRequest"
+    | "updateIssue"
+    | "updatePullRequest";
+  method: "PATCH" | "POST";
+  operation:
+    | "github.issue.create"
+    | "github.issue.update"
+    | "github.pull.create"
+    | "github.pull.update";
+  restPath: RegExp;
+};
+
+const GITHUB_BODY_WRITES = [
+  {
+    denialMessage: `GitHub issue creation must use the github_createIssue tool so Junior can own idempotency and the conversation footer. ${CREATE_TOOL_ROUTING_GUIDANCE}`,
+    graphqlField: "createIssue",
+    method: "POST",
+    operation: "github.issue.create",
+    restPath: /^\/repos\/[^/]+\/[^/]+\/issues$/,
+  },
+  {
+    denialMessage: `GitHub pull request creation must use the github_createPullRequest tool so Junior can own idempotency and the conversation footer. ${CREATE_TOOL_ROUTING_GUIDANCE}`,
+    graphqlField: "createPullRequest",
+    method: "POST",
+    operation: "github.pull.create",
+    restPath: /^\/repos\/[^/]+\/[^/]+\/pulls$/,
+  },
+  {
+    denialMessage: `GitHub issue updates must use the github_updateIssue tool so Junior can own requester attribution and the conversation footer. ${CREATE_TOOL_ROUTING_GUIDANCE}`,
+    graphqlField: "updateIssue",
+    method: "PATCH",
+    operation: "github.issue.update",
+    restPath: /^\/repos\/[^/]+\/[^/]+\/issues\/[^/]+$/,
+  },
+  {
+    denialMessage: `GitHub pull request updates must use the github_updatePullRequest tool so Junior can own requester attribution and the conversation footer. ${CREATE_TOOL_ROUTING_GUIDANCE}`,
+    graphqlField: "updatePullRequest",
+    method: "PATCH",
+    operation: "github.pull.update",
+    restPath: /^\/repos\/[^/]+\/[^/]+\/pulls\/[^/]+$/,
+  },
+] as const satisfies readonly GitHubBodyWrite[];
+
 function githubApiWriteGrantName(
   method: string,
   upstreamUrl: URL,
@@ -352,7 +411,11 @@ function githubApiWriteGrantName(
     // Actions run control uses run-level cancel/rerun and job-level rerun endpoints.
     return "installation-write";
   }
-  if (method === "POST" && /^\/repos\/[^/]+\/[^/]+\/issues$/.test(pathname)) {
+  if (
+    GITHUB_BODY_WRITES.some(
+      (write) => write.method === method && write.restPath.test(pathname),
+    )
+  ) {
     return "installation-write";
   }
   if (
@@ -362,25 +425,10 @@ function githubApiWriteGrantName(
     return "installation-write";
   }
   if (
-    method === "PATCH" &&
-    /^\/repos\/[^/]+\/[^/]+\/issues\/[^/]+$/.test(pathname)
-  ) {
-    return "installation-write";
-  }
-  if (
     (method === "POST" || method === "DELETE") &&
     /^\/repos\/[^/]+\/[^/]+\/issues\/[^/]+\/(labels|assignees)(?:\/[^/]+)?$/.test(
       pathname,
     )
-  ) {
-    return "installation-write";
-  }
-  if (method === "POST" && /^\/repos\/[^/]+\/[^/]+\/pulls$/.test(pathname)) {
-    return "installation-write";
-  }
-  if (
-    method === "PATCH" &&
-    /^\/repos\/[^/]+\/[^/]+\/pulls\/[^/]+$/.test(pathname)
   ) {
     return "installation-write";
   }
@@ -425,110 +473,95 @@ function githubApiWriteGrantName(
   return undefined;
 }
 
-function isGitHubIssueCreateRestRequest(
-  method: string,
-  upstreamUrl: URL,
-): boolean {
-  return (
-    method === "POST" &&
-    isGitHubApiUrl(upstreamUrl) &&
-    /^\/repos\/[^/]+\/[^/]+\/issues$/.test(upstreamUrl.pathname.toLowerCase())
-  );
-}
-
-function isGitHubPullCreateRestRequest(
-  method: string,
-  upstreamUrl: URL,
-): boolean {
-  return (
-    method === "POST" &&
-    isGitHubApiUrl(upstreamUrl) &&
-    /^\/repos\/[^/]+\/[^/]+\/pulls$/.test(upstreamUrl.pathname.toLowerCase())
-  );
-}
-
-function isGitHubIssueCreateGraphqlMutation(
+function reviewThreadResolveRepository(
+  operation: string | undefined,
   method: string,
   upstreamUrl: URL,
   bodyText: string | undefined,
-): boolean {
-  if (method !== "POST" || !isGitHubGraphqlUrl(upstreamUrl)) {
-    return false;
+): string | undefined {
+  const prefix = "github.pull.review-thread.resolve:";
+  if (
+    method !== "POST" ||
+    !isGitHubGraphqlUrl(upstreamUrl) ||
+    !operation?.startsWith(prefix)
+  ) {
+    return undefined;
   }
+  const repository = operation.slice(prefix.length);
+  if (!/^[^/]+\/[^/]+$/.test(repository)) return undefined;
   const parsed = parseGitHubGraphqlRequest(bodyText);
-  if (!parsed) {
+  if (
+    parsed?.operationName !== "ResolveReviewThread" ||
+    !/\bmutation\s+ResolveReviewThread\b/.test(parsed.normalized) ||
+    !/\bresolveReviewThread\b/.test(parsed.normalized)
+  ) {
+    return undefined;
+  }
+  return repository;
+}
+
+function repositoryLeaseScopeFromRef(repository: string): string {
+  const [owner, name] = repository.split("/");
+  if (!owner || !name) {
+    throw new EgressPolicyDenied(
+      "GitHub review thread resolution does not identify a target repository.",
+    );
+  }
+  return githubRepositoryLeaseScope({ owner, name });
+}
+
+function isGitHubGraphqlMutation(
+  method: string,
+  upstreamUrl: URL,
+  bodyText: string | undefined,
+  field:
+    | "createIssue"
+    | "createPullRequest"
+    | "updateIssue"
+    | "updatePullRequest",
+): boolean {
+  if (method !== "POST" || !isGitHubGraphqlUrl(upstreamUrl)) return false;
+  const parsed = parseGitHubGraphqlRequest(bodyText);
+  if (!parsed || !new RegExp(`\\b${field}\\b`).test(parsed.normalized)) {
     return false;
   }
-  if (!/\bcreateIssue\b/.test(parsed.normalized)) {
-    return false;
-  }
-  if (!parsed.operationName) {
-    return /\bmutation\b/.test(parsed.normalized);
-  }
+  if (!parsed.operationName) return /\bmutation\b/.test(parsed.normalized);
   return new RegExp(
     `\\bmutation\\s+${escapeRegExp(parsed.operationName)}\\b`,
   ).test(parsed.normalized);
 }
 
-function isGitHubPullCreateGraphqlMutation(
-  method: string,
-  upstreamUrl: URL,
-  bodyText: string | undefined,
-): boolean {
-  if (method !== "POST" || !isGitHubGraphqlUrl(upstreamUrl)) {
-    return false;
-  }
-  const parsed = parseGitHubGraphqlRequest(bodyText);
-  if (!parsed) {
-    return false;
-  }
-  if (!/\bcreatePullRequest\b/.test(parsed.normalized)) {
-    return false;
-  }
-  if (!parsed.operationName) {
-    return /\bmutation\b/.test(parsed.normalized);
-  }
-  return new RegExp(
-    `\\bmutation\\s+${escapeRegExp(parsed.operationName)}\\b`,
-  ).test(parsed.normalized);
-}
-
-function assertGitHubWriteAllowed(input: {
+function applyGitHubEgressPolicy(input: {
   bodyText?: string;
   method: string;
   operation?: string;
   upstreamUrl: URL;
 }): void {
-  if (input.operation === "github.issue.create") {
-    return;
-  }
-  if (input.operation === "github.pull.create") {
-    return;
-  }
-  if (
-    isGitHubIssueCreateRestRequest(input.method, input.upstreamUrl) ||
-    isGitHubIssueCreateGraphqlMutation(
-      input.method,
-      input.upstreamUrl,
-      input.bodyText,
-    )
-  ) {
-    throw new EgressPolicyDenied(
-      `GitHub issue creation must use the github_createIssue tool so Junior can own idempotency and the conversation footer. ${CREATE_TOOL_ROUTING_GUIDANCE}`,
-    );
-  }
-  if (
-    isGitHubPullCreateRestRequest(input.method, input.upstreamUrl) ||
-    isGitHubPullCreateGraphqlMutation(
-      input.method,
-      input.upstreamUrl,
-      input.bodyText,
-    )
-  ) {
-    throw new EgressPolicyDenied(
-      `GitHub pull request creation must use the github_createPullRequest tool so Junior can own idempotency and the conversation footer. ${CREATE_TOOL_ROUTING_GUIDANCE}`,
-    );
-  }
+  assertGitHubPullRequestApprovalDenied({
+    ...(input.bodyText !== undefined ? { bodyText: input.bodyText } : {}),
+    method: input.method,
+    upstreamUrl: input.upstreamUrl,
+  });
+
+  const pathname = input.upstreamUrl.pathname.toLowerCase();
+  const write = GITHUB_BODY_WRITES.find(
+    (candidate) =>
+      (candidate.method === input.method &&
+        isGitHubApiUrl(input.upstreamUrl) &&
+        candidate.restPath.test(pathname)) ||
+      isGitHubGraphqlMutation(
+        input.method,
+        input.upstreamUrl,
+        input.bodyText,
+        candidate.graphqlField,
+      ),
+  );
+  if (!write) return;
+
+  enforceEgressPolicy({
+    allowed: input.operation === write.operation,
+    denialMessage: write.denialMessage,
+  });
 }
 
 function grantForAccess(
@@ -561,7 +594,7 @@ async function githubGrantForEgress(
 ): Promise<GitHubGrant> {
   const method = ctx.request.method.toUpperCase();
   const upstreamUrl = new URL(ctx.request.url);
-  assertGitHubWriteAllowed({
+  applyGitHubEgressPolicy({
     ...(ctx.request.bodyText !== undefined
       ? { bodyText: ctx.request.bodyText }
       : {}),
@@ -604,6 +637,21 @@ async function githubGrantForEgress(
         : "github.installation-write",
       writeGrantName,
       repositoryLeaseScope(upstreamUrl),
+    );
+  }
+
+  const reviewThreadRepository = reviewThreadResolveRepository(
+    ctx.request.operation,
+    method,
+    upstreamUrl,
+    ctx.request.bodyText,
+  );
+  if (reviewThreadRepository) {
+    return grantForAccess(
+      "write",
+      "github.installation-write",
+      "installation-write",
+      repositoryLeaseScopeFromRef(reviewThreadRepository),
     );
   }
 
@@ -743,9 +791,44 @@ export function githubPlugin(
       ],
     },
     hooks: {
+      conversationSidebar(ctx) {
+        return {
+          annotationsByConversationId: Object.fromEntries(
+            ctx.conversationIds.flatMap((conversationId) => {
+              const annotations = githubSidebarAnnotations(
+                ctx.annotationsByConversationId[conversationId] ?? [],
+              );
+              return annotations.length > 0
+                ? [[conversationId, annotations]]
+                : [];
+            }),
+          ),
+        };
+      },
+      formatMarkdown({ text }) {
+        return linkifyGitHubReferences(text);
+      },
+      async unfinishedWork(ctx) {
+        const db = ctx.db as GitHubDb;
+        const [
+          conversationIds,
+          assignedConversationIds,
+          finishedWorkAtByConversationId,
+        ] = await Promise.all([
+          listGitHubUnfinishedWork(db, ctx.conversationIds),
+          listGitHubAssignedWork(db, ctx.conversationIds),
+          listGitHubFinishedWork(db, ctx.conversationIds),
+        ]);
+        return {
+          conversationIds,
+          assignedConversationIds,
+          finishedWorkAtByConversationId,
+        };
+      },
       routes(ctx) {
         return [
           createGitHubWebhookRoute({
+            annotations: ctx.annotations,
             botEmail: () => readEnv(botEmailEnv),
             classifyPullRequestCommits: async ({
               number,
@@ -796,9 +879,17 @@ export function githubPlugin(
           nowMs: ctx.nowMs,
         });
       },
-      tools(ctx) {
-        return createGitHubTools(ctx);
+      async profileReport(ctx) {
+        return await buildGitHubProfileReport({
+          db: ctx.db as GitHubDb,
+          nowMs: ctx.nowMs,
+          userId: ctx.subject.id,
+        });
       },
+      tools(ctx) {
+        return createGitHubTools(ctx, readEnv(botEmailEnv));
+      },
+      workspacePrepare: prepareWorkspace,
       async sandboxPrepare(ctx) {
         const hooksPath = `${ctx.sandbox.juniorRoot}/git-hooks`;
         await ctx.sandbox.writeFile({
@@ -815,11 +906,8 @@ export function githubPlugin(
         if (ctx.tool.name !== "bash") {
           return;
         }
-        const botName = readEnv(botNameEnv);
-        const botEmail = readEnv(botEmailEnv);
-        if (!botName || !botEmail) {
-          return;
-        }
+        const botName = requireEnv(botNameEnv);
+        const botEmail = requireEnv(botEmailEnv);
         ctx.env.set("GIT_AUTHOR_NAME", botName);
         ctx.env.set("GIT_AUTHOR_EMAIL", botEmail);
         ctx.env.set("JUNIOR_GIT_AUTHOR_NAME", botName);

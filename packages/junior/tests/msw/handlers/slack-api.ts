@@ -12,6 +12,8 @@ import {
   conversationsCanvasesCreateOk,
   conversationsHistoryPage,
   conversationsInfoOk,
+  conversationsJoinOk,
+  conversationsListPage,
   conversationsOpenOk,
   conversationsRepliesPage,
   filesCompleteUploadOk,
@@ -47,6 +49,8 @@ export const SUPPORTED_SLACK_API_METHODS = [
   "reactions.remove",
   "conversations.history",
   "conversations.info",
+  "conversations.join",
+  "conversations.list",
   "conversations.open",
   "conversations.replies",
   "canvases.access.set",
@@ -71,6 +75,18 @@ export interface SlackMockHttpResponse {
   status?: number;
   headers?: Record<string, string>;
   body?: Record<string, unknown> | string;
+  /** Optional artificial latency before the HTTP response is returned. */
+  delayMs?: number;
+  /**
+   * Observe the outbound request before delay/wait. Use this to coordinate a
+   * race without wall-clock guessing that delivery has started.
+   */
+  onRequest?: () => void;
+  /**
+   * Hold the HTTP response until this promise settles. Prefer this over a long
+   * `delayMs` when the test must release accept at a specific production step.
+   */
+  waitFor?: Promise<unknown>;
 }
 
 export interface CapturedSlackApiCall {
@@ -216,6 +232,10 @@ function defaultSlackApiResponse(
       return { body: conversationsHistoryPage() };
     case "conversations.info":
       return { body: conversationsInfoOk() };
+    case "conversations.join":
+      return { body: conversationsJoinOk() };
+    case "conversations.list":
+      return { body: conversationsListPage() };
     case "conversations.open":
       return { body: conversationsOpenOk() };
     case "conversations.replies":
@@ -426,6 +446,13 @@ export const slackApiHandlers = [
 
     const response =
       dequeueResponse(rawMethod) ?? defaultSlackApiResponse(rawMethod);
+    response.onRequest?.();
+    if (response.waitFor) {
+      await response.waitFor;
+    }
+    if (response.delayMs !== undefined && response.delayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, response.delayMs));
+    }
     return toHttpResponse(response);
   }),
 

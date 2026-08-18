@@ -1,42 +1,16 @@
-import type { Context, Hono } from "hono";
-import { z } from "zod";
-import { jsonResponse } from "./http";
+import type { User } from "@sentry/junior-plugin-api";
 
 /** Authenticated viewer fields made available to Junior API route handlers. */
 export type JuniorApiVariables = {
-  verifiedViewerEmail?: string;
+  viewer?: User;
 };
 
-/** Carry authenticated viewer state through Junior REST route handlers. */
+/** Carry optional viewer state through Junior REST route handlers. */
 export type JuniorApiEnv = {
   Variables: JuniorApiVariables;
 };
 
-/** Describe one schema-owned REST endpoint. */
-export type ApiRoute<TResponseSchema extends z.ZodType = z.ZodType> = {
-  handler: (
-    context: Context<JuniorApiEnv>,
-  ) => Promise<z.input<TResponseSchema>> | z.input<TResponseSchema>;
-  method: "delete" | "get" | "patch" | "post";
-  path: string;
-  responseSchema: TResponseSchema;
+/** Give authenticated route handlers a required canonical viewer. */
+export type AuthenticatedApiEnv = {
+  Variables: Omit<JuniorApiVariables, "viewer"> & { viewer: User };
 };
-
-/** Define a REST endpoint while preserving its response-schema type. */
-export function defineApiRoute<TResponseSchema extends z.ZodType>(
-  route: ApiRoute<TResponseSchema>,
-): ApiRoute<TResponseSchema> {
-  return route;
-}
-
-/** Register schema-owned routes on one Hono application. */
-export function registerApiRoutes(
-  app: Hono<JuniorApiEnv>,
-  routes: readonly ApiRoute[],
-): void {
-  for (const route of routes) {
-    app.on(route.method, route.path, async (context) =>
-      jsonResponse(route.responseSchema, await route.handler(context)),
-    );
-  }
-}

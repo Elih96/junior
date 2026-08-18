@@ -63,6 +63,7 @@ function failingConversationStore(): ConversationStore {
     getConversationIdByProviderConversation: vi.fn(async () => undefined),
     bindProviderConversation: vi.fn(),
     getDestinationVisibility: vi.fn(async () => undefined),
+    findSlackDestinationByName: vi.fn(async () => undefined),
     recordActivity: vi.fn(async () => {
       throw new Error("conversation metadata unavailable");
     }),
@@ -440,14 +441,14 @@ describe("turn checkpoint", () => {
       });
       await appendInboundMessage({
         message: {
-          conversationId: "slack:C123:turn-activity",
-          createdAtMs: 9_000,
-          destination: SLACK_DESTINATION,
-          inboundMessageId: "turn-activity-message",
           input: {
             authorId: "U123",
             text: "start",
           },
+          conversationId: "slack:C123:turn-activity",
+          createdAtMs: 9_000,
+          destination: SLACK_DESTINATION,
+          inboundMessageId: "turn-activity-message",
           receivedAtMs: 9_000,
           publishExternally: true,
           delivery: "defer",
@@ -502,6 +503,7 @@ describe("turn checkpoint", () => {
       getConversationIdByProviderConversation: vi.fn(async () => undefined),
       bindProviderConversation: vi.fn(),
       getDestinationVisibility: vi.fn(async () => undefined),
+      findSlackDestinationByName: vi.fn(async () => undefined),
       recordActivity: vi.fn(async () => undefined),
       recordExecution: vi.fn(async () => undefined),
       listByActivity: vi.fn(),

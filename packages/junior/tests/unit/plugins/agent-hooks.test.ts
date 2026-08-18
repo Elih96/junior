@@ -1,6 +1,7 @@
 import {
   createLocalSource,
   createSlackSource,
+  createWebSource,
   definePromptContext,
   definePluginTool,
   defineJuniorPlugin,
@@ -29,11 +30,13 @@ vi.mock("@/chat/plugins/viewer", () => ({
   resolveViewerUser: resolveViewerUserMock,
 }));
 import {
+  applyPluginFormatMarkdown,
   createPluginHookRunner,
   getPluginApiRoutes,
   getPluginSystemPromptContributions,
   getPluginUserPromptContributions,
   getPluginOperationalReports,
+  getPluginProfileReports,
   getPluginRoutes,
   getPluginSlackConversationLink,
   getPluginTools,
@@ -41,7 +44,10 @@ import {
 } from "@/chat/plugins/agent-hooks";
 import { createTools } from "@/chat/tools";
 import type { ToolRuntimeContext } from "@/chat/tools/types";
-import type { SandboxSession } from "@/chat/sandbox/workspace";
+import type {
+  SandboxCommandInput,
+  SandboxSession,
+} from "@/chat/sandbox/workspace";
 
 const demoToolResultSchema = pluginToolOutputSchema.extend({
   message: z.string(),
@@ -211,6 +217,44 @@ describe("agent plugin hooks", () => {
     ).toBe("private");
   });
 
+  it("applies formatMarkdown transforms and fails open on plugin errors", () => {
+    const previous = setPlugins([
+      defineJuniorPlugin({
+        manifest: {
+          name: "a-demo",
+          displayName: "A Demo",
+          description: "A demo",
+        },
+        hooks: {
+          formatMarkdown({ text }) {
+            return text.replaceAll("alpha", "beta");
+          },
+        },
+      }),
+      defineJuniorPlugin({
+        manifest: {
+          name: "z-demo",
+          displayName: "Z Demo",
+          description: "Z demo",
+        },
+        hooks: {
+          formatMarkdown() {
+            throw new Error("boom");
+          },
+        },
+      }),
+    ]);
+    try {
+      expect(applyPluginFormatMarkdown("alpha one")).toBe("beta one");
+      expect(logWarnMock).toHaveBeenCalledWith(
+        "plugin.format_markdown.hook.failed",
+        expect.objectContaining({ "app.plugin.name": "z-demo" }),
+      );
+    } finally {
+      setPlugins(previous);
+    }
+  });
+
   it("collects system prompt contributions from configured plugins", async () => {
     const previous = setPlugins([
       defineJuniorPlugin({
@@ -311,6 +355,58 @@ describe("agent plugin hooks", () => {
           id: "userPrompt:0",
           pluginName: "agent-demo",
           text: "remembered context",
+        },
+      ]);
+    } finally {
+      setPlugins(previous);
+    }
+  });
+
+  it("keeps web actors and Slack destinations for dashboard continues", async () => {
+    const webActor = {
+      platform: "web" as const,
+      userId: "dashboard:alice",
+      email: "alice@example.com",
+    };
+    const slackDestination = {
+      platform: "slack" as const,
+      teamId: "T123",
+      channelId: "C123",
+    };
+    const webSource = createWebSource("slack:C123:1712345.0001", "public");
+    const previous = setPlugins([
+      defineJuniorPlugin({
+        manifest: {
+          name: "agent-demo",
+          displayName: "Agent Demo",
+          description: "Agent demo",
+        },
+        hooks: {
+          async userPrompt(ctx) {
+            expect(ctx.actor).toEqual(webActor);
+            expect(ctx.destination).toEqual(slackDestination);
+            expect(ctx.source).toEqual(webSource);
+            return [{ text: "web continue context" }];
+          },
+        },
+      }),
+    ]);
+    try {
+      await expect(
+        getPluginUserPromptContributions({
+          context: {
+            conversationId: "slack:C123:1712345.0001",
+            actor: webActor,
+            destination: slackDestination,
+            source: webSource,
+            userText: "continue from the dashboard",
+          },
+        }),
+      ).resolves.toEqual([
+        {
+          id: "userPrompt:0",
+          pluginName: "agent-demo",
+          text: "web continue context",
         },
       ]);
     } finally {
@@ -1439,6 +1535,77 @@ describe("agent plugin hooks", () => {
     }
   });
 
+  it("collects profile reports and skips plugin failures", async () => {
+    const subject = {
+      email: "subject@example.com",
+      id: "user-subject",
+      identities: [],
+    };
+    const viewer = {
+      email: "viewer@example.com",
+      id: "user-viewer",
+      identities: [],
+    };
+    const previous = setPlugins([
+      defineJuniorPlugin({
+        manifest: {
+          name: "agent-demo",
+          displayName: "Agent Demo",
+          description: "Agent demo",
+        },
+        hooks: {
+          async profileReport(ctx) {
+            expect(ctx.nowMs).toBe(123);
+            expect(ctx.subject).toEqual(subject);
+            expect(ctx.viewer).toEqual(viewer);
+            expect("set" in ctx.state).toBe(false);
+            return {
+              title: "Agent Demo",
+              metrics: [{ label: "prs", value: "2" }],
+            };
+          },
+        },
+      }),
+      defineJuniorPlugin({
+        manifest: {
+          name: "broken-demo",
+          displayName: "Broken Demo",
+          description: "Broken demo",
+        },
+        hooks: {
+          profileReport() {
+            throw new Error("database unavailable");
+          },
+        },
+      }),
+      defineJuniorPlugin({
+        manifest: {
+          name: "empty-demo",
+          displayName: "Empty Demo",
+          description: "Empty demo",
+        },
+        hooks: {
+          profileReport() {
+            return undefined;
+          },
+        },
+      }),
+    ]);
+    try {
+      await expect(
+        getPluginProfileReports({ nowMs: 123, subject, viewer }),
+      ).resolves.toEqual([
+        {
+          pluginName: "agent-demo",
+          title: "Agent Demo",
+          metrics: [{ label: "prs", value: "2" }],
+        },
+      ]);
+    } finally {
+      setPlugins(previous);
+    }
+  });
+
   it("runs sandbox and tool lifecycle hooks from configured plugins", async () => {
     const writes: Array<{ content: string | Uint8Array; path: string }> = [];
     const previous = setPlugins([
@@ -1517,6 +1684,129 @@ describe("agent plugin hooks", () => {
         env: { PUBLIC_MODE: "preview" },
       });
       expect(before.env).toEqual({ AGENT_PLUGIN: "U123" });
+    } finally {
+      setPlugins(previous);
+    }
+  });
+
+  it("runs Workspace preparation non-interactively with owner cancellation", async () => {
+    const runCommand = vi.fn(async (_input: SandboxCommandInput) => ({
+      exitCode: 0,
+      stdout: "",
+      stderr: "",
+    }));
+    const previous = setPlugins([
+      defineJuniorPlugin({
+        manifest: {
+          name: "agent-demo",
+          displayName: "Agent Demo",
+          description: "Agent demo",
+        },
+        hooks: {
+          async workspacePrepare(ctx) {
+            await ctx.sandbox.run({
+              cmd: "git",
+              args: ["clone", "https://example.com/demo.git", "demo"],
+              cwd: ctx.sandbox.root,
+            });
+          },
+        },
+      }),
+    ]);
+    try {
+      const controller = new AbortController();
+      const sandbox = {
+        ...fakeSandbox([]),
+        runCommand,
+      };
+
+      await createPluginHookRunner().prepareWorkspace(
+        sandbox,
+        [
+          {
+            provider: "agent-demo",
+            repo: "example/demo",
+          },
+        ],
+        controller.signal,
+      );
+
+      expect(runCommand).toHaveBeenCalledTimes(1);
+      const command = runCommand.mock.calls[0]?.[0];
+      expect(command).toMatchObject({
+        cmd: "bash",
+        cwd: "/vercel/sandbox",
+        signal: controller.signal,
+      });
+      expect(command?.args?.[0]).toBe("-c");
+      expect(command?.args?.[1]).toContain("GIT_TERMINAL_PROMPT");
+      expect(command?.args?.[1]).toContain(
+        "'git' 'clone' 'https://example.com/demo.git' 'demo'",
+      );
+    } finally {
+      setPlugins(previous);
+    }
+  });
+
+  it("rejects unhandled Workspace repository providers before preparation", async () => {
+    const workspacePrepare = vi.fn(async () => {});
+    const previous = setPlugins([
+      defineJuniorPlugin({
+        manifest: {
+          name: "agent-demo",
+          displayName: "Agent Demo",
+          description: "Agent demo",
+        },
+        hooks: { workspacePrepare },
+      }),
+    ]);
+    try {
+      await expect(
+        createPluginHookRunner().prepareWorkspace(fakeSandbox([]), [
+          {
+            provider: "agent-demo",
+            repo: "example/demo",
+          },
+          {
+            provider: "missing-provider",
+            repo: "example/missing",
+          },
+        ]),
+      ).rejects.toThrow(
+        "Workspace repository providers have no preparation hook: missing-provider",
+      );
+      expect(workspacePrepare).not.toHaveBeenCalled();
+    } finally {
+      setPlugins(previous);
+    }
+  });
+
+  it("rejects colliding Workspace checkout paths from short repository names", async () => {
+    const previous = setPlugins([
+      defineJuniorPlugin({
+        manifest: {
+          name: "github",
+          displayName: "GitHub",
+          description: "GitHub",
+        },
+        hooks: {
+          async workspacePrepare() {},
+        },
+      }),
+    ]);
+    try {
+      await expect(
+        createPluginHookRunner().prepareWorkspace(fakeSandbox([]), [
+          {
+            provider: "github",
+            repo: "getsentry/sentry",
+          },
+          {
+            provider: "github",
+            repo: "acme/sentry",
+          },
+        ]),
+      ).rejects.toThrow("Workspace checkout path collision: repos/sentry");
     } finally {
       setPlugins(previous);
     }

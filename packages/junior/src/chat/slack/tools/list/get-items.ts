@@ -1,12 +1,12 @@
-import { listItems } from "@/chat/slack/tools/list/api";
+import { listItems } from "@/chat/slack/tool-support/list/api";
+import { slackListIdParam } from "@/chat/slack/tool-support/list/params";
 import { z } from "zod";
 import { juniorToolOutputSchema } from "@/chat/tool-support/structured-result";
 import { zodTool } from "@/chat/tool-support/zod-tool";
 /** Create a tool that reads items from an explicit Slack list. */
 export function createSlackListGetItemsTool() {
   return zodTool({
-    description:
-      "Read items from a Slack list. Use the list_id from a prior tool result or conversation history.",
+    description: "Read items from a Slack list.",
     annotations: {
       destructiveHint: false,
       idempotentHint: true,
@@ -14,7 +14,7 @@ export function createSlackListGetItemsTool() {
       readOnlyHint: true,
     },
     inputSchema: z.object({
-      list_id: z.string().min(1).describe("ID of the Slack list to read."),
+      list_id: slackListIdParam,
       limit: z.coerce
         .number()
         .int()

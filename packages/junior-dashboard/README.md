@@ -2,7 +2,8 @@
 
 The dashboard is an authenticated reporting surface over Junior conversation
 read models. It does not participate in agent execution or mutate conversation
-state.
+state. Signed-in users may update their own profile fields, such as display
+name, through dashboard settings.
 
 ## Boundaries
 
@@ -10,6 +11,8 @@ state.
   configuration through `JuniorDashboardOptions`.
 - Better Auth owns authentication; dashboard routes fail closed when identity
   or required configuration is missing.
+- The installable shell is static only: a public web app manifest, theme color,
+  and install icon. There is no service worker and no offline app shell cache.
 - API schemas under `src/api/` define the client/server boundary.
 - Plugin user pages use the core `/api/user-pages` contract and render under
   `/plugins/:plugin/:page/*`. Plugins choose primary dashboard navigation or the
@@ -25,19 +28,32 @@ state.
   one row without interpreting Pi messages or host-only lifecycle shapes.
 - Private conversation access requires authenticated authorization at the
   server boundary. Client-side route hiding is not authorization.
-- The package remains stateless apart from normal auth/session infrastructure;
-  Junior conversation storage is the reporting authority.
+- The package remains stateless apart from normal auth/session infrastructure
+  and signed-in profile settings. Junior conversation storage is the reporting
+  authority; canonical user rows own profile fields such as display name.
 
 Mock reporting data exists for local UI development only and must not be
 reachable as a production fallback.
 
 Browser journeys live in `e2e/`, with one Playwright spec per user-facing page.
+Keep these journeys small. Use them for behavior that needs a real browser:
+navigation, interaction, accessibility state, request contracts, and realistic
+failure recovery. Use visual QA for layout, responsive rendering, styling, and
+copy-only changes. Do not add pixel geometry, element size, computed style,
+fixed-delay checks, or broad console and page error assertions to browser E2E.
+Assert the user-visible outcome or external contract named by the journey.
+
 Shared server and API setup belongs in `e2e/harness.ts`; page behavior does not
 belong in a cross-page aggregate spec. Tests under `tests/` cover modules and
 component integration without standing in for browser E2E.
 
 Run `JUNIOR_DASHBOARD_COMPONENT_GALLERY=true pnpm dev` from the repository root
 and open `/dev` to inspect the typed component fixtures.
+
+PR visual evidence lives in `visual/`. Capture runs in the standalone
+`Dashboard Visual` workflow; commenting runs from the default branch via
+`Dashboard Visual Comment`. Add the `trigger-visual` label to force every
+registered scenario. See `visual/README.md`.
 
 ## Type scale
 

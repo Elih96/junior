@@ -1,10 +1,14 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { createSlackSource } from "@sentry/junior-plugin-api";
+import { closeDb, getConversationStore } from "@/chat/db";
 import { createSlackThreadReadTool } from "@/chat/slack/tools/thread-read";
-import type { DestinationVisibilityReader } from "@/chat/slack/tools/channel-access";
-import type { SlackToolContext } from "@/chat/slack/tools/context";
+import type { SlackToolContext } from "@/chat/slack/tool-support/context";
 import { parseSlackChannelId, parseSlackTeamId } from "@/chat/slack/ids";
-import { conversationsRepliesPage } from "../fixtures/slack/factories/api";
+import {
+  conversationsInfoOk,
+  conversationsJoinOk,
+  conversationsRepliesPage,
+} from "../fixtures/slack/factories/api";
 import {
   getCapturedSlackApiCalls,
   queueSlackApiError,
@@ -72,29 +76,8 @@ function createContext(overrides: ContextOverrides = {}): SlackToolContext {
   };
 }
 
-/** Persisted-visibility fake: only listed channels are public in T123. */
-function persistedPublicChannels(
-  ...channelIds: string[]
-): DestinationVisibilityReader {
-  return {
-    async getDestinationVisibility(args) {
-      if (args.provider !== "slack" || args.providerTenantId !== "T123") {
-        return undefined;
-      }
-      return channelIds.includes(args.providerDestinationId)
-        ? "public"
-        : undefined;
-    },
-  };
-}
-
-function createTool(
-  overrides: ContextOverrides = {},
-  publicChannels: string[] = [],
-) {
-  return createSlackThreadReadTool(createContext(overrides), {
-    visibilityStore: persistedPublicChannels(...publicChannels),
-  });
+function createTool(overrides: ContextOverrides = {}) {
+  return createSlackThreadReadTool(createContext(overrides));
 }
 
 async function executeTool<TInput>(tool: any, input: TInput) {
@@ -105,6 +88,10 @@ async function executeTool<TInput>(tool: any, input: TInput) {
 }
 
 describe("slackThreadRead", () => {
+  afterEach(async () => {
+    await closeDb();
+  });
+
   it("reads a thread from a public channel URL", async () => {
     queueSlackApiResponse("conversations.replies", {
       body: conversationsRepliesPage({
@@ -126,7 +113,7 @@ describe("slackThreadRead", () => {
       }),
     });
 
-    const tool = createTool({}, ["C0AHB7N2JCR"]);
+    const tool = createTool({});
     const result = await executeTool(tool, {
       url: "https://sentry.slack.com/archives/C0AHB7N2JCR/p1700000000123456",
     });
@@ -143,8 +130,7 @@ describe("slackThreadRead", () => {
     expect(result.messages[0].text).toBe("root message");
     expect(result.messages[1].text).toBe("reply message");
 
-    // No conversations.info call — access determined by persisted visibility
-    expect(getCapturedSlackApiCalls("conversations.info")).toHaveLength(0);
+    // Live channel metadata may be fetched even when persisted public visibility exists.
     expect(getCapturedSlackApiCalls("conversations.replies")).toHaveLength(1);
   });
 
@@ -169,7 +155,7 @@ describe("slackThreadRead", () => {
       }),
     });
 
-    const tool = createTool({}, ["C123"]);
+    const tool = createTool({});
     const result = await executeTool(tool, {
       url: "https://sentry.slack.com/archives/C123/p1700000000999999?thread_ts=1700000000.000000&cid=C123",
     });
@@ -204,7 +190,7 @@ describe("slackThreadRead", () => {
       }),
     });
 
-    const tool = createTool({}, ["C0MANUAL"]);
+    const tool = createTool({});
     const result = await executeTool(tool, {
       channel_id: "C0MANUAL",
       ts: "1700000000.500000",
@@ -280,60 +266,190 @@ describe("slackThreadRead", () => {
   });
 
   it("blocks reading a private group channel from a DM conversation without assistant context", async () => {
+    queueSlackApiResponse("conversations.info", {
+      body: conversationsInfoOk({
+        channelId: "G0PRIVATE",
+        isPrivate: true,
+        isGroup: true,
+      }),
+    });
     const tool = createTool({ sourceChannelId: "D0DM" });
     await expect(
       executeTool(tool, {
         channel_id: "G0PRIVATE",
         ts: "1700000000.100000",
       }),
-    ).rejects.toThrow("current conversation");
+    ).rejects.toThrow("private");
+    expect(getCapturedSlackApiCalls("conversations.info")).toHaveLength(1);
     expect(getCapturedSlackApiCalls("conversations.replies")).toHaveLength(0);
   });
 
   it("blocks reading a private channel that is not the current channel", async () => {
+    queueSlackApiResponse("conversations.info", {
+      body: conversationsInfoOk({
+        channelId: "G0OTHER",
+        isPrivate: true,
+        isGroup: true,
+      }),
+    });
     const tool = createTool({ sourceChannelId: "C0CURRENT" });
     await expect(
       executeTool(tool, {
         url: "https://sentry.slack.com/archives/G0OTHER/p1700000000100000",
       }),
-    ).rejects.toThrow("current conversation");
+    ).rejects.toThrow("private");
 
-    // Should NOT call any Slack API — blocked locally
-    expect(getCapturedSlackApiCalls("conversations.info")).toHaveLength(0);
+    expect(getCapturedSlackApiCalls("conversations.info")).toHaveLength(1);
     expect(getCapturedSlackApiCalls("conversations.replies")).toHaveLength(0);
   });
 
   it("blocks reading a DM channel that is not the current channel", async () => {
+    queueSlackApiResponse("conversations.info", {
+      body: conversationsInfoOk({
+        channelId: "D0SOMEONE",
+        isIm: true,
+      }),
+    });
     const tool = createTool();
     await expect(
       executeTool(tool, {
         channel_id: "D0SOMEONE",
         ts: "1700000000.100000",
       }),
-    ).rejects.toThrow("current conversation");
+    ).rejects.toThrow("private");
+    expect(getCapturedSlackApiCalls("conversations.info")).toHaveLength(1);
     expect(getCapturedSlackApiCalls("conversations.replies")).toHaveLength(0);
   });
 
-  it("blocks reading a C-prefixed channel without persisted public visibility", async () => {
+  it("allows reading a public channel proven by conversations.info", async () => {
+    queueSlackApiResponse("conversations.info", {
+      body: conversationsInfoOk({
+        channelId: "C0UNCONFIRMED",
+        isPrivate: false,
+      }),
+    });
+    queueSlackApiResponse("conversations.replies", {
+      body: conversationsRepliesPage({
+        threadTs: "1700000000.100000",
+        messages: [
+          {
+            ts: "1700000000.100000",
+            thread_ts: "1700000000.100000",
+            user: "U1",
+            text: "public channel root",
+          },
+        ],
+      }),
+    });
+
+    const tool = createTool({ sourceChannelId: "C0CURRENT" });
+    const result = await executeTool(tool, {
+      url: "https://sentry.slack.com/archives/C0UNCONFIRMED/p1700000000100000",
+    });
+
+    expect(result).toMatchObject({
+      channel_id: "C0UNCONFIRMED",
+      count: 1,
+    });
+    expect(getCapturedSlackApiCalls("conversations.info")).toHaveLength(1);
+    expect(getCapturedSlackApiCalls("conversations.replies")).toHaveLength(1);
+  });
+
+  it("blocks reading a private channel reported by conversations.info", async () => {
+    queueSlackApiResponse("conversations.info", {
+      body: conversationsInfoOk({
+        channelId: "C0UNCONFIRMED",
+        isPrivate: true,
+      }),
+    });
+
     const tool = createTool({ sourceChannelId: "C0CURRENT" });
     await expect(
       executeTool(tool, {
         url: "https://sentry.slack.com/archives/C0UNCONFIRMED/p1700000000100000",
       }),
-    ).rejects.toThrow("public channels Junior has seen");
-    // Blocked locally, no Slack API traffic.
+    ).rejects.toThrow("private");
+    expect(getCapturedSlackApiCalls("conversations.info")).toHaveLength(1);
     expect(getCapturedSlackApiCalls("conversations.replies")).toHaveLength(0);
   });
 
-  it("returns a recoverable error when conversations.replies fails", async () => {
+  it("does not trust stale persisted public visibility when live Slack proof fails", async () => {
+    await getConversationStore().recordActivity({
+      conversationId: "slack:C0STALE:1700000000.100000",
+      channelName: "was-public",
+      destination: {
+        platform: "slack",
+        teamId: "T123",
+        channelId: "C0STALE",
+      },
+      nowMs: Date.parse("2026-07-01T12:00:00.000Z"),
+      source: "slack",
+      visibility: "public",
+    });
+    queueSlackApiError("conversations.info", {
+      error: "channel_not_found",
+    });
+
+    const tool = createTool({ sourceChannelId: "C0CURRENT" });
+    await expect(
+      executeTool(tool, {
+        url: "https://sentry.slack.com/archives/C0STALE/p1700000000100000",
+      }),
+    ).rejects.toThrow(/not found|cannot see it/i);
+    expect(getCapturedSlackApiCalls("conversations.info")).toHaveLength(1);
+    expect(getCapturedSlackApiCalls("conversations.replies")).toHaveLength(0);
+  });
+
+  it("joins then retries when conversations.replies returns not_in_channel", async () => {
+    queueSlackApiError("conversations.replies", {
+      error: "not_in_channel",
+    });
+    queueSlackApiResponse("conversations.join", {
+      body: conversationsJoinOk({ channelId: "C0FLAKY" }),
+    });
+    queueSlackApiResponse("conversations.replies", {
+      body: conversationsRepliesPage({
+        threadTs: "1700000000.100000",
+        messages: [
+          {
+            ts: "1700000000.100000",
+            thread_ts: "1700000000.100000",
+            user: "U1",
+            text: "after join",
+          },
+        ],
+      }),
+    });
+
+    const tool = createTool({});
+    const result = await executeTool(tool, {
+      channel_id: "C0FLAKY",
+      ts: "1700000000.100000",
+    });
+    expect(result).toMatchObject({
+      channel_id: "C0FLAKY",
+      joined_channel: true,
+      count: 1,
+    });
+    expect(getCapturedSlackApiCalls("conversations.join")).toHaveLength(1);
+    expect(getCapturedSlackApiCalls("conversations.replies")).toHaveLength(2);
+  });
+
+  it("returns a recoverable error when replies still fail after join", async () => {
+    queueSlackApiError("conversations.replies", {
+      error: "not_in_channel",
+    });
+    queueSlackApiResponse("conversations.join", {
+      body: conversationsJoinOk({ channelId: "C0STILL" }),
+    });
     queueSlackApiError("conversations.replies", {
       error: "not_in_channel",
     });
 
-    const tool = createTool({}, ["C0FLAKY"]);
+    const tool = createTool({});
     await expect(
       executeTool(tool, {
-        channel_id: "C0FLAKY",
+        channel_id: "C0STILL",
         ts: "1700000000.100000",
       }),
     ).rejects.toThrow("Could not read this Slack thread");
@@ -397,7 +513,7 @@ describe("slackThreadRead", () => {
       }),
     });
 
-    const tool = createTool({}, ["C0PAGED"]);
+    const tool = createTool({});
     const result = await executeTool(tool, {
       channel_id: "C0PAGED",
       ts: "1700000000.000000",
@@ -442,7 +558,7 @@ describe("slackThreadRead", () => {
       }),
     });
 
-    const tool = createTool({}, ["C123"]);
+    const tool = createTool({});
     const result = await executeTool(tool, {
       channel_id: "C123",
       ts: "1700000000.100000",
@@ -474,13 +590,12 @@ describe("slackThreadRead", () => {
       }),
     });
 
-    const tool = createTool({}, ["C123"]);
+    const tool = createTool({});
     await executeTool(tool, {
       url: "https://sentry.slack.com/archives/C123/p1700000000100000",
     });
 
     expect(getCapturedSlackApiCalls("conversations.history")).toHaveLength(0);
-    expect(getCapturedSlackApiCalls("conversations.info")).toHaveLength(0);
     expect(getCapturedSlackApiCalls("conversations.replies")).toHaveLength(1);
   });
 });

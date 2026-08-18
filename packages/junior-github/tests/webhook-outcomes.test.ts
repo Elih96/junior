@@ -2,7 +2,10 @@ import { createHmac, generateKeyPairSync } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ResourceEventInput } from "@sentry/junior-plugin-api";
+import type {
+  ConversationAnnotationInput,
+  ResourceEventInput,
+} from "@sentry/junior-plugin-api";
 import {
   createLocalPgliteFixture,
   type LocalPgliteFixture,
@@ -19,6 +22,11 @@ import {
 import type { GitHubDb } from "../src/db/database";
 import { githubPlugin } from "../src/index";
 import { buildGitHubOutcomeReport } from "../src/outcomes/report";
+import {
+  listGitHubAssignedWork,
+  listGitHubFinishedWork,
+  listGitHubUnfinishedWork,
+} from "../src/pull-request-outcomes/store";
 import { createGitHubWebhookRoute } from "../src/webhooks/handler";
 import {
   buildCheckSuiteUrl,
@@ -40,6 +48,7 @@ async function createGitHubFixture(): Promise<GitHubFixture> {
     "0004_marvelous_toad_men.sql",
     "0005_github_cost_associations.sql",
     "0006_fat_korvac.sql",
+    "0007_shallow_millenium_guard.sql",
   ]) {
     await fixture.execute(await migrationSql(migrationFile));
   }
@@ -49,6 +58,73 @@ async function createGitHubFixture(): Promise<GitHubFixture> {
 async function migrationSql(name: string): Promise<string> {
   return await readFile(resolve(__dirname, `../migrations/${name}`), "utf8");
 }
+
+it("returns only candidate conversations with unmerged pull requests", async () => {
+  const fixture = await createGitHubFixture();
+  const at = new Date("2026-07-01T12:00:00.000Z");
+  try {
+    await fixture
+      .db()
+      .insert(juniorGitHubPullRequests)
+      .values([
+        {
+          pullRequestId: "open-pr",
+          repositoryId: "repo-1",
+          repositoryFullName: "getsentry/junior",
+          number: 1,
+          state: "open",
+          conversationIds: ["conversation-open", "conversation-shared"],
+          openedAt: at,
+          updatedAt: at,
+        },
+        {
+          pullRequestId: "merged-pr",
+          repositoryId: "repo-1",
+          repositoryFullName: "getsentry/junior",
+          number: 2,
+          state: "merged",
+          conversationIds: ["conversation-merged", "conversation-shared"],
+          openedAt: at,
+          mergedAt: at,
+          updatedAt: at,
+        },
+      ]);
+
+    await expect(
+      listGitHubUnfinishedWork(fixture.db(), [
+        "conversation-open",
+        "conversation-merged",
+        "conversation-shared",
+        "conversation-unrelated",
+      ]),
+    ).resolves.toEqual(["conversation-open", "conversation-shared"]);
+    await expect(
+      listGitHubFinishedWork(fixture.db(), [
+        "conversation-open",
+        "conversation-merged",
+        "conversation-shared",
+        "conversation-unrelated",
+      ]),
+    ).resolves.toEqual({
+      "conversation-merged": "2026-07-01T12:00:00.000Z",
+      "conversation-shared": "2026-07-01T12:00:00.000Z",
+    });
+    await expect(
+      listGitHubAssignedWork(fixture.db(), [
+        "conversation-open",
+        "conversation-merged",
+        "conversation-shared",
+        "conversation-unrelated",
+      ]).then((ids) => [...ids].sort()),
+    ).resolves.toEqual([
+      "conversation-merged",
+      "conversation-open",
+      "conversation-shared",
+    ]);
+  } finally {
+    await fixture.close();
+  }
+});
 
 function pullRequestPayload(overrides: Record<string, unknown> = {}) {
   return {
@@ -163,8 +239,25 @@ function webhookRoute(
     message: string,
     metadata?: Record<string, unknown>,
   ) => void = () => {},
+  annotations: Array<{
+    annotation: ConversationAnnotationInput;
+    conversationId: string;
+  }> = [],
 ) {
   return createGitHubWebhookRoute({
+    annotations: {
+      forConversation(conversationId) {
+        return {
+          async upsert(annotation) {
+            annotations.push({ annotation, conversationId });
+          },
+          async remove() {},
+          async list() {
+            return [];
+          },
+        };
+      },
+    },
     botEmail,
     classifyPullRequestCommits,
     db: fixture.db(),
@@ -916,6 +1009,70 @@ describe("GitHub-owned issue outcomes", () => {
       await fixture.close();
     }
   });
+
+  it("marks associated conversation resource annotations closed", async () => {
+    const fixture = await createGitHubFixture();
+    try {
+      const annotations: Array<{
+        annotation: ConversationAnnotationInput;
+        conversationId: string;
+      }> = [];
+      const route = webhookRoute(
+        fixture,
+        [],
+        undefined,
+        undefined,
+        undefined,
+        annotations,
+      );
+      expect(
+        (
+          await route.handler(
+            signedRequest(
+              issueLifecyclePayload({
+                createdAt: "2026-07-01T12:00:00.000Z",
+                id: 3020,
+                number: 990,
+              }),
+              "issues",
+            ),
+          )
+        ).status,
+      ).toBe(202);
+      expect(
+        (
+          await route.handler(
+            signedRequest(
+              issueLifecyclePayload({
+                action: "closed",
+                closedAt: "2026-07-03T12:00:00.000Z",
+                createdAt: "2026-07-01T12:00:00.000Z",
+                id: 3020,
+                number: 990,
+                updatedAt: "2026-07-03T12:00:00.000Z",
+              }),
+              "issues",
+            ),
+          )
+        ).status,
+      ).toBe(202);
+
+      expect(annotations).toEqual([
+        {
+          annotation: {
+            kind: "resource_link",
+            key: "getsentry/junior#990",
+            label: "getsentry/junior#990",
+            status: "closed",
+            url: "https://github.com/getsentry/junior/issues/990",
+          },
+          conversationId: "slack:C123:1712345.0001",
+        },
+      ]);
+    } finally {
+      await fixture.close();
+    }
+  });
 });
 
 describe("GitHub-owned pull request outcomes", () => {
@@ -1071,6 +1228,17 @@ describe("GitHub-owned pull request outcomes", () => {
         botEmailEnv: "CUSTOM_GITHUB_BOT_EMAIL",
       });
       const [route] = plugin.hooks!.routes!({
+        annotations: {
+          forConversation() {
+            return {
+              async upsert() {},
+              async remove() {},
+              async list() {
+                return [];
+              },
+            };
+          },
+        },
         db: fixture.db(),
         log: { error() {}, info() {}, warn() {} },
         plugin: { name: "github" },
@@ -1133,6 +1301,17 @@ describe("GitHub-owned pull request outcomes", () => {
     try {
       const plugin = githubPlugin();
       const [route] = plugin.hooks!.routes!({
+        annotations: {
+          forConversation() {
+            return {
+              async upsert() {},
+              async remove() {},
+              async list() {
+                return [];
+              },
+            };
+          },
+        },
         db: fixture.db(),
         log: { error() {}, info() {}, warn() {} },
         plugin: { name: "github" },
@@ -1182,11 +1361,17 @@ describe("GitHub-owned pull request outcomes", () => {
     const fixture = await createGitHubFixture();
     const published: ResourceEventInput[] = [];
     try {
+      const annotations: Array<{
+        annotation: ConversationAnnotationInput;
+        conversationId: string;
+      }> = [];
       const route = webhookRoute(
         fixture,
         published,
         undefined,
         async () => "mixed",
+        undefined,
+        annotations,
       );
       const opened = pullRequestPayload();
       expect((await route.handler(signedRequest(opened))).status).toBe(202);
@@ -1251,6 +1436,30 @@ describe("GitHub-owned pull request outcomes", () => {
         state: "merged",
       });
       expect(rows[0]?.updatedAt.toISOString()).toBe("2026-07-03T12:00:00.000Z");
+      expect(annotations.slice(-2)).toEqual(
+        expect.arrayContaining([
+          {
+            annotation: {
+              kind: "resource_link",
+              key: "getsentry/junior#946",
+              label: "getsentry/junior#946",
+              status: "merged",
+              url: "https://github.com/getsentry/junior/pull/946",
+            },
+            conversationId: "slack:C123:1712345.0001",
+          },
+          {
+            annotation: {
+              kind: "resource_link",
+              key: "getsentry/junior#946",
+              label: "getsentry/junior#946",
+              status: "merged",
+              url: "https://github.com/getsentry/junior/pull/946",
+            },
+            conversationId: "slack:C456:1719999.0002",
+          },
+        ]),
+      );
       expect(published).toEqual([
         expect.objectContaining({
           eventType: "pull_request.opened",

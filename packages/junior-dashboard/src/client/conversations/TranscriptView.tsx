@@ -1,4 +1,3 @@
-import { useState, type ReactNode } from "react";
 import { ArrowDownToLine } from "lucide-react";
 
 import type {
@@ -6,11 +5,10 @@ import type {
   TranscriptViewSubagentPart,
 } from "../types";
 import { Button } from "../components/Button";
-import { SearchInput } from "../components/SearchInput";
-import { TranscriptHeader } from "./TranscriptHeader";
 import { ConversationTranscriptView } from "./ConversationTranscript";
 import {
   transcriptBottomVersion,
+  transcriptJuniorMessageVersion,
   usePinnedTranscriptBottom,
 } from "./transcriptBottomPinning";
 import type { TranscriptViewMode } from "./transcriptRenderModel";
@@ -19,28 +17,32 @@ import { TranscriptSearchProvider } from "./transcriptSearch";
 
 /** Render one conversation transcript as ordered message and tool events. */
 export function Transcript(props: {
-  actions?: ReactNode;
   hasPreviousPage?: boolean;
   historyError?: Error | null;
   historyVersion?: string;
   live?: boolean;
   loadingPreviousPage?: boolean;
+  pinRequestVersion?: number;
   onLoadPreviousPage?: () => void;
   responding?: boolean;
+  search?: string;
   onOpenSubagentTranscript?: (args: {
     part: TranscriptViewSubagentPart;
     conversation: ConversationTranscript;
   }) => void;
   transcript?: ConversationTranscript;
+  view?: TranscriptViewMode;
 }) {
-  const [view, setView] = useState<TranscriptViewMode>("rich");
-  const [search, setSearch] = useState("");
-
+  const view = props.view ?? "rich";
+  const search = props.search ?? "";
   const redacted = props.transcript?.eventHistory.status === "redacted";
   const bottomPinning = usePinnedTranscriptBottom({
+    conversationId: props.transcript?.conversationId,
     enabled: props.live ?? false,
     historyVersion: props.historyVersion ?? "empty",
+    juniorMessageVersion: transcriptJuniorMessageVersion(props.transcript),
     loadingPreviousPage: props.loadingPreviousPage ?? false,
+    pinRequestVersion: props.pinRequestVersion,
     version: transcriptBottomVersion(props.transcript),
   });
 
@@ -55,37 +57,36 @@ export function Transcript(props: {
   return (
     <TranscriptSearchProvider query={search}>
       <div className="grid min-w-0" ref={bottomPinning.contentRef}>
-        <TranscriptHeader
-          actions={props.actions}
-          redacted={redacted}
-          value={view}
-          onChange={setView}
-        />
-        <SearchInput
-          className="mb-3 mt-2 md:mb-5 md:mt-3"
-          label="Search transcript"
-          onChange={setSearch}
-          placeholder="Search transcript…"
-          size="default"
-          value={search}
-        />
+        {redacted ? (
+          <div className="mb-2 min-w-0 break-words text-sm leading-relaxed text-dashboard-text-muted">
+            Hidden because this conversation is not public.
+          </div>
+        ) : null}
         {props.hasPreviousPage || props.loadingPreviousPage ? (
-          <div className="mb-2 flex justify-center">
-            <Button
+          <div className="mb-3 flex items-center gap-3">
+            <span className="h-px min-w-4 flex-1 bg-white/[0.08]" />
+            <button
+              aria-label="Load earlier events"
+              className="shrink-0 cursor-pointer border-0 bg-transparent px-1 py-0.5 font-sans text-xs font-medium text-dashboard-text-muted transition-colors hover:text-dashboard-text focus-visible:outline focus-visible:outline-1 focus-visible:outline-cyan-300/55 disabled:cursor-not-allowed disabled:opacity-50"
               disabled={props.loadingPreviousPage}
               onClick={() => {
                 bottomPinning.preserveViewportForPrepend();
                 props.onLoadPreviousPage?.();
               }}
+              title="Load earlier events"
+              type="button"
             >
-              {props.loadingPreviousPage ? "Loading…" : "Load earlier events"}
-            </Button>
+              {props.loadingPreviousPage
+                ? "Loading earlier messages…"
+                : "Show earlier messages"}
+            </button>
+            <span className="h-px min-w-4 flex-1 bg-white/[0.08]" />
           </div>
         ) : null}
         {props.historyError ? (
           <div
             aria-live="polite"
-            className="mb-2 text-center font-mono text-xs text-amber-100/65"
+            className="mb-2 text-center font-sans text-xs text-amber-100/65"
           >
             Earlier events could not be loaded.
           </div>
@@ -123,10 +124,10 @@ function JumpToLatestButton(props: {
     : "Jump to latest";
 
   return (
-    <div className="pointer-events-none fixed inset-x-0 bottom-3 z-20 flex justify-center px-3 md:inset-x-auto md:bottom-6 md:right-8 md:justify-end md:px-0">
+    <div className="pointer-events-none sticky bottom-3 z-20 flex h-0 justify-center px-3 md:fixed md:inset-x-auto md:bottom-6 md:right-8 md:h-auto md:justify-end md:px-0">
       <Button
         aria-label={label}
-        className="pointer-events-auto relative rounded-lg border-cyan-300/30 bg-[#0b181a] shadow-[0_6px_24px_rgba(0,0,0,0.36)] hover:border-cyan-200/60"
+        className="pointer-events-auto relative -translate-y-full rounded-lg !border !border-cyan-300/30 !bg-[#0b181a] text-dashboard-text shadow-[0_6px_24px_rgba(0,0,0,0.36)] hover:!border-cyan-200/60 hover:!bg-[#102226] hover:!text-dashboard-text md:translate-y-0"
         onClick={props.onClick}
         size="icon"
         title={label}

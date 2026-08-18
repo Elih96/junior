@@ -1,13 +1,18 @@
 import { Hono } from "hono";
 import { afterEach, describe, expect, it } from "vitest";
 import { createJuniorApi, type JuniorApiVariables } from "@/api";
+import { resolveViewerUser } from "@/chat/plugins/viewer";
 import { apiErrorSchema, createdPersonalTokenSchema } from "@/api/schema";
 import { closeDb } from "@/chat/db";
 
 function authenticatedApi(email = "person@example.com") {
   const app = new Hono<{ Variables: JuniorApiVariables }>();
   app.use("*", async (c, next) => {
-    c.set("verifiedViewerEmail", email);
+    const viewer = await resolveViewerUser(email);
+    if (!viewer) {
+      throw new Error(`missing viewer for ${email}`);
+    }
+    c.set("viewer", viewer);
     await next();
   });
   app.route("/", createJuniorApi());
@@ -49,6 +54,22 @@ describe("personal token create API", () => {
     expect(response.status).toBe(400);
     expect(apiErrorSchema.parse(await response.json())).toEqual({
       error: "Invalid request body.",
+    });
+  });
+
+  it("rejects malformed JSON with the stable error contract", async () => {
+    const response = await authenticatedApi().request(
+      "http://localhost/api/personal-tokens",
+      {
+        body: "{not-json",
+        headers: { "content-type": "application/json" },
+        method: "POST",
+      },
+    );
+
+    expect(response.status).toBe(400);
+    expect(apiErrorSchema.parse(await response.json())).toEqual({
+      error: "Malformed JSON in request body",
     });
   });
 });

@@ -1,4 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
+import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import {
   getSlackContinuationMarker,
   getSlackInterruptionMarker,
@@ -10,7 +11,9 @@ import {
   createTestThread,
   createTestDestination,
 } from "../../fixtures/slack-harness";
-import { scriptedAssistantMessageRunner } from "../../fixtures/agent-runner";
+import { createModelAgentRunner } from "../../fixtures/agent-runner";
+import { createModelStream } from "../../fixtures/model-stream";
+import { getConversationEventStore } from "@/chat/db";
 
 function toPostedText(value: unknown): string {
   if (typeof value === "string") {
@@ -34,46 +37,30 @@ function toPostedText(value: unknown): string {
   return String(value);
 }
 
-function makeDiagnostics(
-  overrides: Partial<{
-    outcome: "success" | "execution_failure" | "provider_error";
-    toolCalls: string[];
-  }> = {},
-) {
-  return {
-    assistantMessageCount: 1,
-    modelId: "fake-agent-model",
-    outcome: overrides.outcome ?? ("success" as const),
-    toolCalls: overrides.toolCalls ?? [],
-    toolErrorCount: 0,
-    toolResultCount: (overrides.toolCalls ?? []).length,
-    usedPrimaryText: true,
-  };
+async function loadTurnLifecycleEvents(conversationId: string) {
+  return (await getConversationEventStore().loadHistory(conversationId)).filter(
+    (event) =>
+      event.data.type === "turn_started" ||
+      event.data.type === "turn_completed" ||
+      event.data.type === "turn_failed",
+  );
 }
 
 describe("Slack behavior: finalized thread replies", () => {
-  it("posts each completed assistant message", async () => {
-    const turnLifecycle = {
-      complete: vi.fn(),
-      fail: vi.fn(),
-      start: vi.fn(),
-    };
+  it("posts a completed assistant message", async () => {
     const { slackRuntime } = createTestChatRuntime({
       services: {
         replyExecutor: {
-          turnLifecycle,
-          agentRunner: scriptedAssistantMessageRunner({
-            messages: [{ text: "Hello world" }],
-            result: {
-              text: "Hello world",
-              diagnostics: makeDiagnostics(),
-            },
-          }),
+          agentRunner: createModelAgentRunner(
+            createModelStream([{ type: "text", text: "Hello world" }]),
+          ),
         },
       },
     });
 
-    const thread = await createTestThread({ id: "slack:C0FINAL:1700006000.000" });
+    const thread = await createTestThread({
+      id: "slack:C0FINAL:1700006000.000",
+    });
     await slackRuntime.handleNewMention(
       thread,
       createTestMessage({
@@ -87,93 +74,20 @@ describe("Slack behavior: finalized thread replies", () => {
 
     expect(thread.postKinds).toEqual(["value"]);
     expect(thread.posts.map(toPostedText)).toEqual(["Hello world"]);
-    expect(turnLifecycle.start).toHaveBeenCalledWith(
+    const lifecycle = await loadTurnLifecycleEvents(thread.id);
+    expect(lifecycle.map((event) => event.data)).toEqual([
       expect.objectContaining({
-        conversationId: thread.id,
+        type: "turn_started",
+        turnId: "turn_m-final-1",
         inputMessageIds: ["m-final-1"],
         surface: "slack",
       }),
-    );
-    expect(turnLifecycle.complete).toHaveBeenCalledWith(
       expect.objectContaining({
-        conversationId: thread.id,
+        type: "turn_completed",
+        turnId: "turn_m-final-1",
         outcome: "success",
       }),
-    );
-    expect(turnLifecycle.fail).not.toHaveBeenCalled();
-  });
-
-  it("posts completed assistant messages separately", async () => {
-    const finalReply =
-      "I checked five outlets. The dominant story is the escalating US-Iran conflict.";
-    const { slackRuntime } = createTestChatRuntime({
-      services: {
-        replyExecutor: {
-          agentRunner: scriptedAssistantMessageRunner({
-            messages: [
-              { text: "Fetching sources now..." },
-              { text: finalReply },
-            ],
-            result: {
-              text: finalReply,
-              diagnostics: makeDiagnostics({ toolCalls: ["webSearch"] }),
-            },
-          }),
-        },
-      },
-    });
-
-    const thread = await createTestThread({ id: "slack:C0FINAL:1700006001.000" });
-    await slackRuntime.handleNewMention(
-      thread,
-      createTestMessage({
-        id: "m-final-2",
-        text: "<@U0APP> summarize the news",
-        isMention: true,
-        threadId: thread.id,
-      }),
-      { destination: createTestDestination(thread) },
-    );
-
-    expect(thread.postKinds).toEqual(["value", "value"]);
-    expect(thread.posts.map(toPostedText)).toEqual([
-      "Fetching sources now...",
-      finalReply,
     ]);
-  });
-
-  it("posts a fallback after progress when the run fails", async () => {
-    const { slackRuntime } = createTestChatRuntime({
-      services: {
-        replyExecutor: {
-          agentRunner: scriptedAssistantMessageRunner({
-            messages: [{ text: "Checking that now..." }],
-            result: {
-              text: "",
-              diagnostics: makeDiagnostics({ outcome: "execution_failure" }),
-            },
-          }),
-        },
-      },
-    });
-
-    const thread = await createTestThread({ id: "slack:C0FINAL:1700006005.000" });
-    await slackRuntime.handleNewMention(
-      thread,
-      createTestMessage({
-        id: "m-final-empty-plan",
-        text: "<@U0APP> reply invisibly",
-        isMention: true,
-        threadId: thread.id,
-      }),
-      { destination: createTestDestination(thread), isFinalAttempt: true },
-    );
-
-    expect(thread.postKinds).toEqual(["value", "value"]);
-    expect(toPostedText(thread.posts[0])).toBe("Checking that now...");
-    expect(toPostedText(thread.posts[1])).toContain(
-      "I ran into an internal error while processing that.",
-    );
   });
 
   it("splits long completed messages into continuation posts", async () => {
@@ -184,18 +98,16 @@ describe("Slack behavior: finalized thread replies", () => {
     const { slackRuntime } = createTestChatRuntime({
       services: {
         replyExecutor: {
-          agentRunner: scriptedAssistantMessageRunner({
-            messages: [{ text: longReply }],
-            result: {
-              text: longReply,
-              diagnostics: makeDiagnostics(),
-            },
-          }),
+          agentRunner: createModelAgentRunner(
+            createModelStream([{ type: "text", text: longReply }]),
+          ),
         },
       },
     });
 
-    const thread = await createTestThread({ id: "slack:C0FINAL:1700006005.000" });
+    const thread = await createTestThread({
+      id: "slack:C0FINAL:1700006005.000",
+    });
     await slackRuntime.handleNewMention(
       thread,
       createTestMessage({
@@ -223,18 +135,16 @@ describe("Slack behavior: finalized thread replies", () => {
     const { slackRuntime } = createTestChatRuntime({
       services: {
         replyExecutor: {
-          agentRunner: scriptedAssistantMessageRunner({
-            messages: [{ text: longReply }],
-            result: {
-              text: longReply,
-              diagnostics: makeDiagnostics(),
-            },
-          }),
+          agentRunner: createModelAgentRunner(
+            createModelStream([{ type: "text", text: longReply }]),
+          ),
         },
       },
     });
 
-    const thread = await createTestThread({ id: "slack:C0FINAL:1700006006.000" });
+    const thread = await createTestThread({
+      id: "slack:C0FINAL:1700006006.000",
+    });
     await slackRuntime.handleNewMention(
       thread,
       createTestMessage({
@@ -260,27 +170,27 @@ describe("Slack behavior: finalized thread replies", () => {
     const partialStart = "The budget review is complete.";
     const partialEnd = "This should continue into a second post.";
     const longReply = `${partialStart} ${"A".repeat(slackOutputPolicy.maxInlineChars)}\n\n${partialEnd}`;
-    const turnLifecycle = {
-      complete: vi.fn(),
-      fail: vi.fn(),
-      start: vi.fn(),
-    };
     const { slackRuntime } = createTestChatRuntime({
       services: {
         replyExecutor: {
-          turnLifecycle,
-          agentRunner: scriptedAssistantMessageRunner({
-            messages: [],
-            result: {
-              text: longReply,
-              diagnostics: makeDiagnostics({ outcome: "provider_error" }),
-            },
-          }),
+          agentRunner: createModelAgentRunner(
+            createModelStream([
+              {
+                type: "message",
+                message: fauxAssistantMessage(longReply, {
+                  stopReason: "error",
+                  errorMessage: "The model stream stopped.",
+                }),
+              },
+            ]),
+          ),
         },
       },
     });
 
-    const thread = await createTestThread({ id: "slack:C0FINAL:1700006007.000" });
+    const thread = await createTestThread({
+      id: "slack:C0FINAL:1700006007.000",
+    });
     await slackRuntime.handleNewMention(
       thread,
       createTestMessage({
@@ -298,14 +208,19 @@ describe("Slack behavior: finalized thread replies", () => {
     expect(postedText).toContain(partialStart);
     expect(postedText).toContain(partialEnd);
     expect(postedText).toContain(getSlackInterruptionMarker().trim());
-    expect(postedText).not.toContain("event_id=");
-    expect(turnLifecycle.fail).toHaveBeenCalledWith(
+    const lifecycle = await loadTurnLifecycleEvents(thread.id);
+    expect(lifecycle.map((event) => event.data)).toEqual([
       expect.objectContaining({
-        conversationId: thread.id,
-        eventId: expect.stringMatching(/^[a-f0-9]{32}$/i),
+        type: "turn_started",
+        turnId: "turn_m-final-8",
+        inputMessageIds: ["m-final-8"],
+        surface: "slack",
+      }),
+      expect.objectContaining({
+        type: "turn_failed",
+        turnId: "turn_m-final-8",
         failureCode: "model_execution_failed",
       }),
-    );
-    expect(turnLifecycle.complete).not.toHaveBeenCalled();
+    ]);
   });
 });

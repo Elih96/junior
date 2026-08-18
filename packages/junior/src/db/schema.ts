@@ -1,7 +1,10 @@
+import { juniorArtifacts } from "./schema/artifacts";
+import { juniorAttachments } from "./schema/attachments";
 import { juniorConversationAnnotations } from "./schema/conversation-annotations";
 import { juniorApiTokens } from "./schema/api-tokens";
 import { juniorConversationEvents } from "./schema/conversation-events";
 import { juniorConversationBindings } from "./schema/conversation-bindings";
+import { juniorConversationParticipants } from "./schema/conversation-participants";
 import { juniorConversations } from "./schema/conversations";
 import {
   juniorAgentBindings,
@@ -17,42 +20,56 @@ import {
   juniorSchedulerRuns,
   juniorSchedulerTasks,
 } from "./schema/scheduled-tasks";
+import { juniorSnapshots } from "./schema/snapshots";
 import { juniorUsers } from "./schema/users";
+import { juniorWorkspaceRepos, juniorWorkspaces } from "./schema/workspaces";
 
 export {
+  juniorArtifacts,
+  juniorAttachments,
   juniorConversationAnnotations,
   juniorApiTokens,
   juniorAgentBindings,
   juniorAgentInvocations,
   juniorConversationEvents,
   juniorConversationBindings,
+  juniorConversationParticipants,
   juniorConversations,
   juniorLocationConfigurations,
   juniorDestinations,
   juniorEventTasks,
   juniorIdentities,
+  juniorSnapshots,
   juniorStats,
   juniorTaskExecutions,
   juniorSchedulerRuns,
   juniorSchedulerTasks,
   juniorUsers,
+  juniorWorkspaceRepos,
+  juniorWorkspaces,
 };
 
 export const juniorSqlSchema = {
+  juniorArtifacts,
+  juniorAttachments,
   juniorConversationAnnotations,
   juniorApiTokens,
   juniorAgentBindings,
   juniorAgentInvocations,
   juniorConversationEvents,
   juniorConversationBindings,
+  juniorConversationParticipants,
   juniorConversations,
   juniorLocationConfigurations,
   juniorDestinations,
   juniorEventTasks,
   juniorIdentities,
+  juniorSnapshots,
   juniorStats,
   juniorTaskExecutions,
   juniorSchedulerRuns,
   juniorSchedulerTasks,
   juniorUsers,
+  juniorWorkspaceRepos,
+  juniorWorkspaces,
 };

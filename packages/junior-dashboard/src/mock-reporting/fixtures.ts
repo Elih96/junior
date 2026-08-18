@@ -8,6 +8,7 @@ import type {
   ConversationDetailReport,
   ConversationEventPage,
   ConversationFeed,
+  ConversationPendingMessagesReport,
   ConversationReportEvent,
   ConversationReportEventData,
   ConversationStatsItem,
@@ -20,6 +21,7 @@ import type {
   LocationSummaryReport,
   PeopleActivityDayReport,
   PersonalSpendReport,
+  PluginOperationalReportFeed,
   TaskExecutionList,
   TaskList,
   TaskSummary,
@@ -118,6 +120,8 @@ function activeConversation(nowMs: number): ConversationDetailReport {
   return detail(nowMs, {
     conversationId: ACTIVE_CONVERSATION_ID,
     displayTitle: "Investigate checkout latency",
+    // Visual QA needs the composer + pending mailbox stack attached above it.
+    isParticipant: true,
     startedAt,
     lastProgressAt: iso(nowMs, -20_000),
     lastSeenAt: iso(nowMs, -10_000),
@@ -125,7 +129,29 @@ function activeConversation(nowMs: number): ConversationDetailReport {
     surface: "slack",
     channel: "CQA123",
     channelName: "proj-checkout",
-    actorIdentity: actor("morgan@sentry.io", "Morgan Lee", "morgan"),
+    actorIdentity: actor("dev@example.com", "Morgan Lee", "morgan"),
+    assignedWork: true,
+    unfinishedWork: true,
+    isPriority: true,
+    sidebarAnnotations: [
+      {
+        icon: "git-pull-request",
+        key: "getsentry/payments#42",
+        label: "payments",
+      },
+    ],
+    annotations: [
+      {
+        kind: "resource_link",
+        key: "getsentry/payments#42",
+        label: "getsentry/payments#42",
+        plugin: "github",
+        status: "open",
+        url: "https://github.com/getsentry/payments/pull/42",
+        createdAt: startedAt,
+        updatedAt: iso(Date.parse(startedAt), 12_000),
+      },
+    ],
     auxiliaryCosts: {
       costUsd: 0.0021,
       operations: [
@@ -221,29 +247,160 @@ function activeConversation(nowMs: number): ConversationDetailReport {
           },
         ],
       }),
+      reportEvent(5, iso(Date.parse(startedAt), 14_000), {
+        type: "tool_calls",
+        calls: [
+          {
+            toolCallId: "active-search",
+            name: "webSearch",
+            status: "completed",
+            startedSeq: 4,
+            startedAt: iso(Date.parse(startedAt), 10_000),
+            input: { query: "checkout latency last deployment" },
+            output: {
+              results: [
+                {
+                  title: "payments-v42 deploy notes",
+                  url: "https://docs.sentry.io",
+                },
+              ],
+            },
+          },
+        ],
+      }),
+      // Mixed markdown keeps font/legibility QA honest for long assistant replies.
+      reportEvent(6, iso(Date.parse(startedAt), 22_000), {
+        type: "message",
+        messageId: "active-assistant",
+        role: "assistant",
+        text: [
+          "Checkout p95 jumped after **payments-v42** landed.",
+          "",
+          "What I checked:",
+          "- deploy marker `payments-v42` correlates with the spike",
+          "- canary hosts show the same `checkout.latency` shape",
+          "- error volume is flat, so this looks like slow path not hard fail",
+          "",
+          "Useful query:",
+          "```sql",
+          "SELECT percentile(duration, 0.95) AS p95",
+          "FROM transactions",
+          "WHERE transaction = 'checkout.complete'",
+          "  AND timestamp > now() - interval '2 hours'",
+          "GROUP BY 1",
+          "ORDER BY p95 DESC;",
+          "```",
+          "",
+          "Next step: compare the pre/post deploy spans, then decide whether to",
+          "roll back or patch the slow serializer path.",
+        ].join("\n"),
+      }),
+      reportEvent(7, iso(Date.parse(startedAt), 40_000), {
+        type: "message",
+        messageId: "active-user-followup",
+        role: "user",
+        text: "Compare the pre/post deploy spans next.",
+      }),
+      reportEvent(8, iso(Date.parse(startedAt), 42_000), {
+        type: "turn_lifecycle",
+        turnId: "active-followup-turn",
+        state: "started",
+      }),
+      reportEvent(9, iso(Date.parse(startedAt), 45_000), {
+        type: "tool_calls",
+        calls: [
+          {
+            toolCallId: "active-span-compare",
+            name: "executeTool",
+            status: "running",
+            input: {
+              tool_name: "github_getPullRequest",
+              arguments: { repo: "getsentry/payments", number: 42 },
+            },
+          },
+        ],
+      }),
     ],
   });
 }
 
 function dashboardQaConversation(nowMs: number): ConversationDetailReport {
-  const startedAt = iso(nowMs, -11 * 60_000);
+  // Finished work stays in Today even when it was active in the last 24 hours.
+  const startedAt = iso(nowMs, -5 * 60 * 60_000);
   return detail(nowMs, {
     conversationId: DASHBOARD_QA_CONVERSATION_ID,
     displayTitle: "Dashboard QA edge cases",
     startedAt,
-    lastSeenAt: iso(nowMs, -8 * 60_000),
-    lastProgressAt: iso(nowMs, -8 * 60_000),
-    actorIdentity: actor("morgan@sentry.io", "Morgan Lee", "morgan"),
+    lastSeenAt: iso(nowMs, -4 * 60 * 60_000),
+    lastProgressAt: iso(nowMs, -4 * 60 * 60_000),
+    actorIdentity: actor("dev@example.com", "Morgan Lee", "morgan"),
+    assignedWork: true,
+    unfinishedWork: true,
+    isPriority: true,
+    // Newest-first GitHub sidebar order with mixed finished/unfinished work for
+    // the same repo label. Collapse must prefer unfinished over merged.
+    sidebarAnnotations: [
+      {
+        icon: "git-merge",
+        key: "getsentry/getsentry#21571",
+        label: "getsentry",
+      },
+      {
+        icon: "git-pull-request",
+        key: "getsentry/getsentry#21572",
+        label: "getsentry",
+      },
+      {
+        icon: "circle-dashed",
+        key: "getsentry/getsentry#21569",
+        label: "getsentry",
+      },
+      {
+        icon: "git-merge",
+        key: "getsentry/sentry#121727",
+        label: "sentry",
+      },
+    ],
     annotations: [
       {
         kind: "resource_link",
-        key: "getsentry/junior#1081",
-        label: "getsentry/junior#1081",
+        key: "getsentry/getsentry#21571",
+        label: "getsentry/getsentry#21571",
         plugin: "github",
-        status: "open",
-        url: "https://github.com/getsentry/junior/pull/1081",
+        status: "merged",
+        url: "https://github.com/getsentry/getsentry/pull/21571",
         createdAt: startedAt,
         updatedAt: iso(Date.parse(startedAt), 52_000),
+      },
+      {
+        kind: "resource_link",
+        key: "getsentry/getsentry#21572",
+        label: "getsentry/getsentry#21572",
+        plugin: "github",
+        status: "open",
+        url: "https://github.com/getsentry/getsentry/pull/21572",
+        createdAt: startedAt,
+        updatedAt: iso(Date.parse(startedAt), 40_000),
+      },
+      {
+        kind: "resource_link",
+        key: "getsentry/getsentry#21569",
+        label: "getsentry/getsentry#21569",
+        plugin: "github",
+        status: "draft",
+        url: "https://github.com/getsentry/getsentry/pull/21569",
+        createdAt: startedAt,
+        updatedAt: iso(Date.parse(startedAt), 30_000),
+      },
+      {
+        kind: "resource_link",
+        key: "getsentry/sentry#121727",
+        label: "getsentry/sentry#121727",
+        plugin: "github",
+        status: "merged",
+        url: "https://github.com/getsentry/sentry/pull/121727",
+        createdAt: startedAt,
+        updatedAt: iso(Date.parse(startedAt), 20_000),
       },
     ],
     cumulativeDurationMs: 98_000,
@@ -475,6 +632,51 @@ Run targeted tests before broad suites, and keep durable explanations beside the
           ],
         },
       }),
+      reportEvent(15, iso(Date.parse(startedAt), 63_000), {
+        type: "attachments_delivered",
+        attachments: [
+          {
+            id: "qa-chart-png",
+            filename: "chart.png",
+            contentType: "image/png",
+            bytes: 18211,
+          },
+          {
+            id: "qa-notes-txt",
+            filename: "notes.txt",
+            contentType: "text/plain",
+            bytes: 42,
+          },
+        ],
+      }),
+      reportEvent(16, iso(Date.parse(startedAt), 64_000), {
+        type: "message",
+        messageId: "qa-unused-context",
+        role: "user",
+        text: "This ambient message must not appear in the transcript.",
+        explicitMention: false,
+        actorIdentity: actor(undefined, "Alex Rivera", "alex"),
+      }),
+      reportEvent(17, iso(Date.parse(startedAt), 66_000), {
+        type: "message",
+        messageId: "qa-used-context",
+        role: "user",
+        text: "Can you clarify which dashboard state you mean?",
+        explicitMention: false,
+        actorIdentity: actor(undefined, "Alex Rivera", "alex"),
+      }),
+      reportEvent(18, iso(Date.parse(startedAt), 67_000), {
+        type: "turn_lifecycle",
+        turnId: "qa-context-turn",
+        state: "started",
+        inputMessageIds: ["qa-used-context"],
+      }),
+      reportEvent(19, iso(Date.parse(startedAt), 69_000), {
+        type: "message",
+        messageId: "qa-context-answer",
+        role: "assistant",
+        text: "I mean the empty, loading, and failed transcript states.",
+      }),
     ],
   });
 }
@@ -523,26 +725,43 @@ function longConversation(nowMs: number): ConversationDetailReport {
       text: "Release the package, update the example app, and open a PR.",
     }),
   ];
+  let nextSeq = 2;
   for (let index = 0; index < 12; index += 1) {
+    const startedAtMs = Date.parse(startedAt) + 2_000 + index * 4_000;
+    const startedSeq = nextSeq;
+    nextSeq += 1;
     events.push(
-      reportEvent(
-        index + 2,
-        iso(Date.parse(startedAt), 2_000 + index * 4_000),
-        {
-          type: "tool_calls",
-          calls: [
-            {
-              toolCallId: `release-bash-${index}`,
-              name: "bash",
-              status: "running",
-            },
-          ],
-        },
-      ),
+      reportEvent(startedSeq, iso(startedAtMs), {
+        type: "tool_calls",
+        calls: [
+          {
+            toolCallId: `release-bash-${index}`,
+            name: "bash",
+            status: "running",
+          },
+        ],
+      }),
     );
+    events.push(
+      reportEvent(nextSeq, iso(startedAtMs, 1_500), {
+        type: "tool_calls",
+        calls: [
+          {
+            toolCallId: `release-bash-${index}`,
+            name: "bash",
+            status: "completed",
+            startedSeq,
+            startedAt: iso(startedAtMs),
+            input: { command: `step-${index}` },
+            output: { exitCode: 0 },
+          },
+        ],
+      }),
+    );
+    nextSeq += 1;
   }
   events.push(
-    reportEvent(14, iso(Date.parse(startedAt), 53_000), {
+    reportEvent(nextSeq, iso(Date.parse(startedAt), 53_000), {
       type: "compaction",
       modelProfile: "standard",
       modelId: "openai/gpt-5.4",
@@ -559,7 +778,10 @@ function longConversation(nowMs: number): ConversationDetailReport {
         summaryChars: 980,
       },
     }),
-    reportEvent(15, iso(Date.parse(startedAt), 90_000), {
+  );
+  nextSeq += 1;
+  events.push(
+    reportEvent(nextSeq, iso(Date.parse(startedAt), 90_000), {
       type: "handoff",
       modelProfile: "fast",
       modelId: "openai/gpt-5-mini",
@@ -567,7 +789,10 @@ function longConversation(nowMs: number): ConversationDetailReport {
       summary:
         "Investigate the remaining deployment checks and report any actionable failure.",
     }),
-    reportEvent(16, iso(Date.parse(startedAt), 166_000), {
+  );
+  nextSeq += 1;
+  events.push(
+    reportEvent(nextSeq, iso(Date.parse(startedAt), 166_000), {
       type: "message",
       messageId: "release-assistant",
       role: "assistant",
@@ -584,6 +809,58 @@ function longConversation(nowMs: number): ConversationDetailReport {
     channel: "CQA456",
     channelName: "proj-release",
     actorIdentity: actor(undefined, "Jordan Blake", "jordan"),
+    assignedWork: true,
+    unfinishedWork: true,
+    isPriority: true,
+    sidebarAnnotations: [
+      {
+        icon: "circle-dashed",
+        key: "getsentry/junior#2201",
+        label: "junior",
+      },
+      {
+        icon: "git-pull-request",
+        key: "getsentry/payments#91",
+        label: "payments",
+      },
+      {
+        icon: "git-merge",
+        key: "getsentry/relay#44",
+        label: "relay",
+      },
+    ],
+    annotations: [
+      {
+        kind: "resource_link",
+        key: "getsentry/junior#2201",
+        label: "getsentry/junior#2201",
+        plugin: "github",
+        status: "draft",
+        url: "https://github.com/getsentry/junior/pull/2201",
+        createdAt: startedAt,
+        updatedAt: iso(Date.parse(startedAt), 80_000),
+      },
+      {
+        kind: "resource_link",
+        key: "getsentry/payments#91",
+        label: "getsentry/payments#91",
+        plugin: "github",
+        status: "open",
+        url: "https://github.com/getsentry/payments/pull/91",
+        createdAt: startedAt,
+        updatedAt: iso(Date.parse(startedAt), 75_000),
+      },
+      {
+        kind: "resource_link",
+        key: "getsentry/relay#44",
+        label: "getsentry/relay#44",
+        plugin: "github",
+        status: "merged",
+        url: "https://github.com/getsentry/relay/pull/44",
+        createdAt: startedAt,
+        updatedAt: iso(Date.parse(startedAt), 70_000),
+      },
+    ],
     cumulativeDurationMs: 552_761,
     cumulativeUsage: usage(0.18),
     previousCursor: `mock:before:${LONG_CONVERSATION_ID}`,
@@ -623,7 +900,44 @@ function incidentConversation(nowMs: number): ConversationDetailReport {
     visibility: "public",
     channel: "CQA123",
     channelName: "proj-checkout",
-    actorIdentity: actor("morgan@sentry.io", "Morgan Lee", "morgan"),
+    actorIdentity: actor("dev@example.com", "Morgan Lee", "morgan"),
+    // Finished links show the final annotation state in the sidebar.
+    assignedWork: true,
+    finishedWorkAt: iso(nowMs, -42 * 60_000),
+    sidebarAnnotations: [
+      {
+        icon: "git-merge",
+        key: "getsentry/payments#77",
+        label: "payments",
+      },
+      {
+        icon: "circle-x",
+        key: "getsentry/payments#61",
+        label: "payments",
+      },
+    ],
+    annotations: [
+      {
+        kind: "resource_link",
+        key: "getsentry/payments#77",
+        label: "getsentry/payments#77",
+        plugin: "github",
+        status: "merged",
+        url: "https://github.com/getsentry/payments/pull/77",
+        createdAt: startedAt,
+        updatedAt: iso(Date.parse(startedAt), 30_000),
+      },
+      {
+        kind: "resource_link",
+        key: "getsentry/payments#61",
+        label: "getsentry/payments#61",
+        plugin: "github",
+        status: "closed",
+        url: "https://github.com/getsentry/payments/issues/61",
+        createdAt: startedAt,
+        updatedAt: iso(Date.parse(startedAt), 28_000),
+      },
+    ],
     cumulativeDurationMs: 206_000,
     cumulativeUsage: usage(0.0332),
     events: [
@@ -795,12 +1109,13 @@ function simpleConversation(
     sourceTask?: ConversationDetailReport["sourceTask"];
   },
 ): ConversationDetailReport {
-  const startedAt = iso(nowMs, -2 * 60 * 60_000);
+  // Finished work stays in Today even when it was active in the last 24 hours.
+  const startedAt = iso(nowMs, -5 * 60 * 60_000);
   return detail(nowMs, {
     ...options,
     startedAt,
-    lastSeenAt: iso(nowMs, -110 * 60_000),
-    lastProgressAt: iso(nowMs, -110 * 60_000),
+    lastSeenAt: iso(nowMs, -4 * 60 * 60_000),
+    lastProgressAt: iso(nowMs, -4 * 60 * 60_000),
     actorIdentity: actor("ops@sentry.io", "Ops Bot", "ops"),
     cumulativeDurationMs: 12_000,
     events: [
@@ -874,7 +1189,6 @@ function summaryFromConversation(
   conversation: MockConversation,
 ): ConversationSummaryReport {
   const {
-    annotations: _annotations,
     eventHistory: _eventHistory,
     events: _events,
     generatedAt: _generatedAt,
@@ -978,6 +1292,14 @@ function conversationMetricDays(
     day.durationMs += summary.cumulativeDurationMs;
     const tokens = summaryTokenTotal(summary);
     if (tokens) day.tokens = (day.tokens ?? 0) + tokens;
+    const inputTokens = summary.cumulativeUsage?.inputTokens;
+    if (inputTokens !== undefined) {
+      day.inputTokens = (day.inputTokens ?? 0) + inputTokens;
+    }
+    const cachedInputTokens = summary.cumulativeUsage?.cachedInputTokens;
+    if (cachedInputTokens !== undefined) {
+      day.cachedInputTokens = (day.cachedInputTokens ?? 0) + cachedInputTokens;
+    }
     const costUsd = summary.cumulativeUsage?.cost?.total;
     if (costUsd !== undefined) {
       day.costUsd = (day.costUsd ?? 0) + costUsd;
@@ -1031,6 +1353,84 @@ export function readMockConversationFeed(
         conversation.actorIdentity?.email?.toLowerCase() ===
         actorEmail.toLowerCase(),
     ),
+  };
+}
+
+/** Return accepted mailbox rows for local dashboard visual QA. */
+export function readMockConversationPendingMessages(
+  conversationId: string,
+): ConversationPendingMessagesReport | undefined {
+  const conversation = mockConversations(Date.now()).find(
+    (candidate) => candidate.conversationId === conversationId,
+  );
+  if (!conversation) return undefined;
+
+  const nowMs = Date.now();
+  const messages =
+    conversationId === ACTIVE_CONVERSATION_ID
+      ? [
+          {
+            actorIdentity: actor("dev@example.com", "Morgan Lee", "morgan"),
+            createdAt: iso(nowMs, -8_000),
+            delivery: "interrupt" as const,
+            inboundMessageId: `${conversationId}:pending-interrupt`,
+            messageId: `${conversationId}:pending-interrupt`,
+            receivedAt: iso(nowMs, -7_500),
+            role: "user" as const,
+            source: "slack" as const,
+            text: "Also check the canary traffic from the last deploy.",
+          },
+          {
+            actorIdentity: actor("dev@example.com", "Morgan Lee", "morgan"),
+            createdAt: iso(nowMs, -4_000),
+            delivery: "defer" as const,
+            inboundMessageId: `${conversationId}:pending-defer`,
+            messageId: `${conversationId}:pending-defer`,
+            receivedAt: iso(nowMs, -3_500),
+            role: "user" as const,
+            source: "web" as const,
+            text: "Keep the reply in Junior. I will paste the dashboard link next.",
+          },
+          {
+            actorIdentity: actor("dev@example.com", "Morgan Lee", "morgan"),
+            createdAt: iso(nowMs, -3_000),
+            delivery: "defer" as const,
+            inboundMessageId: `${conversationId}:pending-third`,
+            messageId: `${conversationId}:pending-third`,
+            receivedAt: iso(nowMs, -2_500),
+            role: "user" as const,
+            source: "web" as const,
+            text: "Third queued message.",
+          },
+          {
+            actorIdentity: actor("dev@example.com", "Morgan Lee", "morgan"),
+            createdAt: iso(nowMs, -2_000),
+            delivery: "defer" as const,
+            inboundMessageId: `${conversationId}:pending-fourth`,
+            messageId: `${conversationId}:pending-fourth`,
+            receivedAt: iso(nowMs, -1_500),
+            role: "user" as const,
+            source: "web" as const,
+            text: "Fourth queued message.",
+          },
+          {
+            actorIdentity: actor("dev@example.com", "Morgan Lee", "morgan"),
+            createdAt: iso(nowMs, -1_000),
+            delivery: "defer" as const,
+            inboundMessageId: `${conversationId}:pending-fifth`,
+            messageId: `${conversationId}:pending-fifth`,
+            receivedAt: iso(nowMs, -500),
+            role: "user" as const,
+            source: "web" as const,
+            text: "Fifth queued message.",
+          },
+        ]
+      : [];
+
+  return {
+    conversationId,
+    generatedAt: iso(nowMs),
+    messages,
   };
 }
 
@@ -1140,15 +1540,25 @@ export function readMockConversationStats(): ConversationStatsReport {
     addSummary(locationItem, summary);
     locationItems.set(place, locationItem);
   }
+  const inputTokens = summaries.reduce(
+    (sum, summary) => sum + (summary.cumulativeUsage?.inputTokens ?? 0),
+    0,
+  );
+  const cachedInputTokens = summaries.reduce(
+    (sum, summary) => sum + (summary.cumulativeUsage?.cachedInputTokens ?? 0),
+    0,
+  );
   return {
     active: total.active,
     actors: [...actorItems.values()],
+    ...(cachedInputTokens ? { cachedInputTokens } : {}),
     conversations: total.conversations,
     costUsd: total.costUsd,
     durationMs: total.durationMs,
     failed: total.failed,
     generatedAt: iso(nowMs),
     guardian: mockGuardianStats(nowMs),
+    ...(inputTokens ? { inputTokens } : {}),
     locations: [...locationItems.values()],
     metricDays: conversationMetricDays(nowMs, summaries),
     source: "conversation_index",
@@ -1347,6 +1757,82 @@ export function readMockPeopleProfile(
     totals,
     windowEnd: `${activityDays.at(-1)!.date}T00:00:00.000Z`,
     windowStart: `${activityDays[0]!.date}T00:00:00.000Z`,
+  };
+}
+
+/** Build mock person-scoped plugin reports for local profile QA. */
+export function readMockPeoplePluginReports(
+  email: string,
+): PluginOperationalReportFeed {
+  const nowMs = Date.now();
+  const directory = readMockPeopleDirectory();
+  const person = directory.people.find(
+    (entry) => entry.actor.email.toLowerCase() === email.trim().toLowerCase(),
+  );
+  if (!person) {
+    return {
+      generatedAt: new Date(nowMs).toISOString(),
+      reports: [],
+      source: "plugins",
+    };
+  }
+
+  const end = new Date(nowMs);
+  end.setUTCHours(0, 0, 0, 0);
+  const days = Array.from({ length: 90 }, (_, index) => {
+    const date = new Date(end);
+    date.setUTCDate(date.getUTCDate() - (89 - index));
+    const key = date.toISOString().slice(0, 10);
+    const wave = (index % 7) + (index % 3);
+    return {
+      id: key,
+      label: key,
+      values: {
+        created: wave === 0 ? 0 : wave % 4,
+      },
+    };
+  });
+
+  return {
+    generatedAt: new Date(nowMs).toISOString(),
+    source: "plugins",
+    reports: [
+      {
+        pluginName: "github",
+        title: "GitHub",
+        generatedAt: new Date(nowMs).toISOString(),
+        metrics: [
+          { label: "PRs opened · 30d", value: "12" },
+          { label: "PRs merged · 30d", value: "9" },
+          { label: "Issues opened · 30d", value: "4" },
+          { label: "PR merge rate · 30d", value: "75%" },
+        ],
+        widgets: [
+          {
+            id: "pull-requests-created",
+            type: "bar_chart",
+            title: "Pull requests opened",
+            description:
+              "Junior-owned pull requests opened for this person per day",
+            timeRangeDays: [7, 30, 90],
+            series: [{ key: "created", label: "Opened" }],
+            categories: days,
+          },
+          {
+            id: "issues-created",
+            type: "bar_chart",
+            title: "Issues opened",
+            description: "Junior-owned issues opened for this person per day",
+            timeRangeDays: [7, 30, 90],
+            series: [{ key: "created", label: "Opened" }],
+            categories: days.map((day, index) => ({
+              ...day,
+              values: { created: index % 5 === 0 ? 1 : 0 },
+            })),
+          },
+        ],
+      },
+    ],
   };
 }
 
@@ -1556,7 +2042,7 @@ function mockTasks(): TaskSummary[] {
     {
       createdAt: "2026-07-28T16:00:00.000Z",
       createdBy: "Morgan",
-      createdByEmail: "morgan@sentry.io",
+      createdByEmail: "dev@example.com",
       destination: {
         channelId: "C123",
         label: "#project-updates",
@@ -1579,7 +2065,7 @@ function mockTasks(): TaskSummary[] {
     {
       createdAt: "2026-07-29T16:00:00.000Z",
       createdBy: "Morgan",
-      createdByEmail: "morgan@sentry.io",
+      createdByEmail: "dev@example.com",
       destination: {
         channelId: "C123",
         label: "#project-updates",

@@ -46,16 +46,18 @@ async function writeResponse(res: ServerResponse, response: Response) {
 }
 
 /** Starts the built dashboard with mock conversations for a browser spec. */
-export async function startDashboardE2eServer(): Promise<DashboardE2eServer> {
+export async function startDashboardE2eServer(
+  options: { componentGallery?: boolean } = {},
+): Promise<DashboardE2eServer> {
   process.env.DATABASE_URL ??= "postgres://localhost/junior-dashboard-e2e";
   const { createDashboardApp } = await import("../dist/app.js");
   const app = createDashboardApp({
-    allowedEmails: ["morgan@sentry.io"],
+    allowedEmails: ["dev@example.com"],
     auth: {
       async getSession() {
         return {
           user: {
-            email: "morgan@sentry.io",
+            email: "dev@example.com",
             emailVerified: true,
             name: "Dashboard User",
           },
@@ -68,6 +70,7 @@ export async function startDashboardE2eServer(): Promise<DashboardE2eServer> {
         return Response.redirect("https://accounts.google.com", 302);
       },
     },
+    componentGallery: options.componentGallery === true,
     mockConversations: true,
   });
 
@@ -342,7 +345,7 @@ export async function mockDashboardApis(page: Page) {
           {
             createdAt: "2026-07-28T16:00:00.000Z",
             createdBy: "Morgan",
-            createdByEmail: "morgan@sentry.io",
+            createdByEmail: "dev@example.com",
             destination: {
               channelId: "C123",
               label: "#project-updates",
@@ -365,7 +368,7 @@ export async function mockDashboardApis(page: Page) {
           {
             createdAt: "2026-07-29T16:00:00.000Z",
             createdBy: "Morgan",
-            createdByEmail: "morgan@sentry.io",
+            createdByEmail: "dev@example.com",
             destination: {
               channelId: "C123",
               label: "#project-updates",
@@ -423,7 +426,7 @@ export async function mockDashboardApis(page: Page) {
     const task = {
       createdAt: "2026-07-28T16:00:00.000Z",
       createdBy: "Morgan",
-      createdByEmail: "morgan@sentry.io",
+      createdByEmail: "dev@example.com",
       destination: {
         channelId: "C123",
         label: "#project-updates",
@@ -537,6 +540,75 @@ export async function mockDashboardApis(page: Page) {
       },
     });
   });
+  await page.route("**/api/stats", async (route) => {
+    const end = new Date();
+    end.setUTCHours(0, 0, 0, 0);
+    const start = new Date(end);
+    start.setUTCDate(end.getUTCDate() - 89);
+    const stats = Array.from({ length: 90 }, (_, index) => {
+      const day = new Date(start);
+      day.setUTCDate(start.getUTCDate() + index);
+      const date = day.toISOString().slice(0, 10);
+      // Sparse, readable bars for the Workspace detail chart fixture.
+      const count =
+        index % 11 === 0 ? 5 : index % 7 === 0 ? 3 : index % 4 === 0 ? 1 : 0;
+      return {
+        count,
+        date,
+        metric: "workspace_switch",
+        name: "11111111-1111-4111-8111-111111111111",
+        namespace: "junior",
+      };
+    }).filter((stat) => stat.count > 0);
+    await route.fulfill({
+      json: {
+        generatedAt: end.toISOString(),
+        stats,
+        windowEnd: end.toISOString().slice(0, 10),
+        windowStart: start.toISOString().slice(0, 10),
+      },
+    });
+  });
+  await page.route("**/api/workspaces**", async (route) => {
+    const workspace = {
+      id: "11111111-1111-4111-8111-111111111111",
+      name: "sentry",
+      repos: [
+        {
+          checkoutPath: "repos/sentry",
+          provider: "github",
+          repo: "getsentry/sentry",
+        },
+        {
+          checkoutPath: "repos/getsentry",
+          provider: "github",
+          repo: "getsentry/getsentry",
+        },
+      ],
+      setupScript: "pnpm install",
+      snapshot: {
+        buildDurationMs: 45_000,
+        generatedAt: "2026-08-15T05:40:21.000Z",
+        id: "snap_workspace_123",
+      },
+    };
+    const url = new URL(route.request().url());
+    if (url.pathname.endsWith(`/${workspace.id}`)) {
+      await route.fulfill({ json: workspace });
+      return;
+    }
+    await route.fulfill({
+      json: {
+        baselineSnapshot: {
+          buildDurationMs: 102_799,
+          dependencyCount: 38,
+          generatedAt: "2026-08-15T05:30:21.000Z",
+          id: "snap_baseline_Sj16Uz0PH1P3AKI6LgNoTvnqZ46h",
+        },
+        workspaces: [{ ...workspace, snapshot: null }],
+      },
+    });
+  });
   await page.route("**/api/plugins", async (route) => {
     await route.fulfill({
       json: [
@@ -599,18 +671,4 @@ export async function mockDashboardApis(page: Page) {
       },
     });
   });
-}
-
-/** Collects uncaught browser and console errors for a page assertion. */
-export function collectBrowserErrors(page: Page): string[] {
-  const errors: string[] = [];
-  page.on("pageerror", (error) => {
-    errors.push(error.stack ?? error.message);
-  });
-  page.on("console", (message) => {
-    if (message.type() === "error") {
-      errors.push(message.text());
-    }
-  });
-  return errors;
 }

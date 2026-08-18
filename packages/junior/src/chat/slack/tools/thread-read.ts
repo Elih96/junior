@@ -2,17 +2,17 @@ import { SlackActionError } from "@/chat/slack/client";
 import { listThreadReplies } from "@/chat/slack/channel";
 import {
   checkSlackChannelReadAccess,
-  type DestinationVisibilityReader,
-} from "@/chat/slack/tools/channel-access";
+  joinPublicChannelForRead,
+} from "@/chat/slack/tool-support/channel-access";
 import {
-  parseRequiredSlackChannelIdParam,
-  slackChannelIdParam,
-} from "@/chat/slack/id-param";
+  resolveSlackChannelRef,
+  slackChannelRefParam,
+} from "@/chat/slack/tool-support/channel-target";
 import { z } from "zod";
 import { juniorToolOutputSchema } from "@/chat/tool-support/structured-result";
 import { zodTool } from "@/chat/tool-support/zod-tool";
-import { parseSlackMessageReference } from "@/chat/slack/tools/slack-message-url";
-import type { SlackToolContext } from "@/chat/slack/tools/context";
+import { parseSlackMessageReference } from "@/chat/slack/tool-support/slack-message-url";
+import type { SlackToolContext } from "@/chat/slack/tool-support/context";
 import {
   parseRequiredSlackTimestampParam,
   slackTimestampParam,
@@ -78,13 +78,10 @@ function truncateMessages(
 }
 
 /** Create a tool that reads a Slack thread from a shared message URL or explicit coordinates. */
-export function createSlackThreadReadTool(
-  context: SlackToolContext,
-  deps: { visibilityStore?: DestinationVisibilityReader } = {},
-) {
+export function createSlackThreadReadTool(context: SlackToolContext) {
   return zodTool({
     description:
-      "Read a Slack thread from a shared Slack message archive URL or explicit channel + timestamp. Use when the user shares a Slack message link (https://*.slack.com/archives/...) and you need the referenced message and its thread context. Only the current conversation and public channels Junior has seen in this workspace are readable.",
+      "Read a Slack thread from a shared archive URL or explicit channel + timestamp. Works for the current conversation and public channels.",
     annotations: {
       destructiveHint: false,
       idempotentHint: true,
@@ -95,15 +92,11 @@ export function createSlackThreadReadTool(
       url: z
         .string()
         .min(1)
-        .describe(
-          "Slack message archive URL, e.g. https://workspace.slack.com/archives/C123/p1700000000123456",
-        )
+        .describe("Slack message archive URL.")
         .optional(),
-      channel_id: slackChannelIdParam(
-        "Slack channel/conversation ID (e.g. C123). Use with `ts` as an alternative to `url`.",
-      ).optional(),
+      channel_id: slackChannelRefParam.optional(),
       ts: slackTimestampParam(
-        "Slack message timestamp (e.g. 1700000000.123456). May be the thread root or any message in the thread.",
+        "Slack message timestamp. May be the thread root or any message in the thread.",
       ).optional(),
       limit: z.coerce
         .number()
@@ -139,14 +132,12 @@ export function createSlackThreadReadTool(
         if (!parsedTs.ok) {
           throw new ToolInputError(parsedTs.error);
         }
-        const parsedChannelId = parseRequiredSlackChannelIdParam(
-          "channel_id",
-          channel_id,
-        );
-        if (!parsedChannelId.ok) {
-          throw new ToolInputError(parsedChannelId.error);
-        }
-        channelId = parsedChannelId.value;
+        const target = await resolveSlackChannelRef({
+          field: "channel_id",
+          value: channel_id,
+          teamId: context.teamId,
+        });
+        channelId = target.channelId;
         messageTs = parsedTs.value;
       } else {
         throw new ToolInputError(
@@ -154,14 +145,11 @@ export function createSlackThreadReadTool(
         );
       }
 
-      // Cross-conversation reads require persisted public visibility in the
-      // current workspace; the active delivery context is always readable.
       const access = await checkSlackChannelReadAccess({
         currentChannelIds: [
           context.destinationChannelId,
           context.sourceChannelId,
         ],
-        store: deps.visibilityStore,
         targetChannelId: channelId,
         teamId: context.teamId,
       });
@@ -170,21 +158,63 @@ export function createSlackThreadReadTool(
       }
 
       const lookupTs = threadTs ?? messageTs;
-
-      let replies: SlackThreadReply[];
-      try {
-        replies = await listThreadReplies({
+      const readReplies = async () =>
+        listThreadReplies({
           channelId,
           threadTs: lookupTs,
           limit: limit ?? 1000,
           maxPages: max_pages,
         });
+
+      let replies: SlackThreadReply[] | undefined;
+      let joined = false;
+      let channelName = access.channelName;
+      let readError: unknown;
+      try {
+        replies = await readReplies();
       } catch (error) {
+        readError = error;
+        const canJoin =
+          error instanceof SlackActionError &&
+          error.code === "not_in_channel" &&
+          access.isMember !== true;
+        if (canJoin) {
+          const joinResult = await joinPublicChannelForRead({
+            channelName,
+            targetChannelId: channelId,
+          });
+          if (!joinResult.ok) {
+            throw new ToolInputError(joinResult.error);
+          }
+          joined = true;
+          channelName = joinResult.channelName ?? channelName;
+          try {
+            replies = await readReplies();
+            readError = undefined;
+          } catch (retryError) {
+            readError = retryError;
+          }
+        }
+      }
+
+      if (!replies) {
+        const error = readError;
         if (error instanceof SlackActionError) {
-          throw new ToolInputError(
-            "Could not read this Slack thread. The bot may not be in the channel or may lack history scopes.",
-            { cause: error },
-          );
+          if (error.code === "not_in_channel") {
+            throw new ToolInputError(
+              "Could not read this Slack thread because the bot is not in the channel.",
+              { cause: error },
+            );
+          }
+          if (error.code === "missing_scope") {
+            throw new ToolInputError(
+              "Could not read this Slack thread because this installation is missing history scopes.",
+              { cause: error },
+            );
+          }
+          throw new ToolInputError("Could not read this Slack thread.", {
+            cause: error,
+          });
         }
         throw error;
       }
@@ -205,6 +235,8 @@ export function createSlackThreadReadTool(
 
       return {
         channel_id: channelId,
+        ...(channelName ? { channel_name: channelName } : {}),
+        ...(joined ? { joined_channel: true } : {}),
         target_message_ts: messageTs,
         thread_ts: resolvedThreadTs,
         count: messages.length,

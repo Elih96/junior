@@ -1,58 +1,63 @@
-import { useState } from "react";
 import {
-  CircleDashed,
-  CircleDot,
-  CircleX,
-  GitMerge,
-  Globe2,
-  LockKeyhole,
-  TriangleAlert,
-} from "lucide-react";
-import { Link } from "react-router";
-import type { ConversationDetailReport } from "@sentry/junior/api/schema";
-import type { ConversationFeed } from "@sentry/junior/api/schema";
+  memo,
+  useCallback,
+  useDeferredValue,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import type {
+  ConversationDetailReport,
+  ConversationFeed,
+  ConversationPendingMessagesReport,
+} from "@sentry/junior/api/schema";
 
 import {
+  useAppendConversationMessage,
   useArchiveConversation,
+  useCancelConversationPendingMessages,
   useConversationData,
   type PendingArchiveConversationUpdate,
 } from "./queries";
+import type { ConversationMailboxMessage } from "./conversationOutbox";
 import { buildConversationMarkdown } from "../markdownExport";
 import { CopyMarkdownButton } from "./CopyMarkdownButton";
+import { ConversationComposer } from "./ConversationComposer";
+import { ConversationHeader } from "./ConversationHeader";
+import { ConversationHeaderMeta } from "./ConversationHeaderMeta";
+import {
+  ConversationAnnotations,
+  ConversationIdentity,
+  ConversationPrivacyChip,
+  ConversationStats,
+  hasConversationAnnotations,
+  hasConversationIdentity,
+  hasConversationStats,
+  PendingAuthorization,
+} from "./ConversationMeta";
+import { PendingMailboxStack } from "./PendingMailboxStack";
 import {
   buildConversations,
   conversationDisplayTitle,
   conversationFromDetail,
-  conversationActorLabel,
-  formatConversationDuration,
-  formatRelativeTime,
-  peoplePath,
-  slackLocationLabel,
-  summarizeCost,
-  summarizeTurns,
-  summarizeToolCalls,
-  summarizeUsage,
-  taskPath,
   visualStatusForConversation,
 } from "../format";
-import { Button } from "../components/Button";
-import { Tooltip } from "../components/Tooltip";
 import { Card } from "../components/layout/Card";
-import { MetricList, type MetricListItem } from "../components/Metric";
-import {
-  CostMetric,
-  DurationMetric,
-  TurnsMetric,
-  TokenMetric,
-  ToolCallsMetric,
-} from "./TelemetryMetrics";
 import { Transcript } from "./TranscriptView";
 import { TranscriptLoading } from "./TranscriptLoading";
+import type { TranscriptViewMode } from "./transcriptRenderModel";
 import {
   SubagentTranscriptDrawer,
   type SubagentTranscriptTarget,
 } from "./SubagentTranscriptDrawer";
-import type { Conversation } from "../types";
+import type {
+  Conversation,
+  ConversationTranscript,
+  TranscriptViewSubagentPart,
+} from "../types";
+
+export { liveModelId } from "./ConversationMeta";
 
 /** Render the selected conversation transcript inside the workspace. */
 export function ConversationPage(props: {
@@ -62,6 +67,9 @@ export function ConversationPage(props: {
 }) {
   const [subagentTarget, setSubagentTarget] =
     useState<SubagentTranscriptTarget>();
+  const [view, setView] = useState<TranscriptViewMode>("rich");
+  const [search, setSearch] = useState("");
+  const [pinRequestVersion, setPinRequestVersion] = useState(0);
   const conversationId = props.conversationId;
   const summaries = props.data?.conversations.conversations ?? [];
   const conversations = buildConversations(summaries);
@@ -75,113 +83,197 @@ export function ConversationPage(props: {
     props.pendingArchiveUpdate,
   );
   const conversationDetail = detail.data;
+  // Live polls can rebuild a large transcript tree every 2s. Defer that paint so
+  // composer keystrokes stay urgent without changing visible transcript content.
+  // Fall back to the latest detail on first load so the body is never blank while
+  // the deferred value catches up from undefined.
+  const deferredTranscript = useDeferredValue(detail.data);
+  const transcript = deferredTranscript ?? detail.data;
   const visualStatus = conversation
     ? visualStatusForConversation(conversation)
     : undefined;
+  // Keep live flags and mailbox chrome urgent. Only the heavy transcript body is deferred.
+  const live = conversationIsLive(visualStatus, detail.data);
+  // Key on the event array, not the whole detail object. Metadata-only polls
+  // reuse events via structural sharing, so the footer keeps a stable id list.
+  const mailboxCommittedIds = useMemo(
+    () => committedMessageIds(detail.data?.events),
+    [detail.data?.events],
+  );
+  // Cancel needs the latest mailbox watermark, but not as a render prop. Live
+  // polls refresh generatedAt every 2s even when the queue is unchanged.
+  const pendingGeneratedAtRef = useRef(detail.pendingGeneratedAt);
+  pendingGeneratedAtRef.current = detail.pendingGeneratedAt;
+  const requestPin = useCallback(() => {
+    setPinRequestVersion((version) => version + 1);
+  }, []);
+  const onOpenSubagentTranscript = useCallback(
+    ({
+      part,
+    }: {
+      part: TranscriptViewSubagentPart;
+      conversation: ConversationTranscript;
+    }) => {
+      setSubagentTarget({
+        conversationId: part.childConversationId,
+        part,
+      });
+    },
+    [],
+  );
 
   return (
-    <div className="w-full min-w-0 px-3 py-3 md:px-7 md:py-6">
-      <section className="min-w-0">
-        <Card className="relative mb-3 grid gap-2 border-white/[0.07] bg-white/[0.025] p-3 md:mb-5 md:grid-cols-[minmax(0,1fr)_auto] md:gap-3 md:p-5">
-          <div className="min-w-0">
-            <div className="min-w-0">
-              <h2 className="m-0 line-clamp-2 font-display text-xl font-medium leading-tight tracking-[-0.03em] md:line-clamp-none md:truncate md:text-3xl">
-                {conversationDisplayTitle(conversation)}
-              </h2>
-            </div>
-            <div className="mt-1.5 min-w-0 font-mono text-xs leading-snug text-dashboard-text-muted md:mt-2">
-              <ConversationIdentity
-                conversation={conversation}
-                conversationId={conversationId}
-                detail={detail.data}
+    <div className="grid min-h-0 min-w-0 grid-rows-[minmax(7rem,1fr)_minmax(0,auto)]">
+      <div
+        aria-label="Conversation transcript"
+        className="min-h-0 overflow-y-auto overscroll-contain px-3 pb-1.5 md:px-7 md:pb-2"
+        tabIndex={0}
+      >
+        <section className="min-w-0">
+          <ConversationHeader
+            conversationId={conversationId}
+            copyAction={
+              <CopyMarkdownButton
+                key={conversationDetail?.conversationId ?? "loading"}
+                getMarkdown={
+                  conversationDetail
+                    ? async () =>
+                        buildConversationMarkdown(
+                          await detail.loadCompleteTranscript(),
+                          conversation,
+                        )
+                    : undefined
+                }
               />
-            </div>
-          </div>
-          <div className="flex min-w-0 flex-row flex-wrap items-center gap-x-3 gap-y-2 self-start font-mono text-xs leading-snug text-dashboard-text-muted md:flex-col md:items-end md:text-right">
-            <div className="break-words">
-              updated{" "}
-              {formatRelativeTime(
-                conversation?.lastSeenAt ?? detail.data?.generatedAt,
-              )}
-            </div>
-            <Button
-              className="h-auto px-2.5 py-1 text-xs font-normal text-dashboard-text-muted"
-              disabled={!conversation || archive.isPending}
-              onClick={() =>
+            }
+            annotations={
+              hasConversationAnnotations(detail.data?.annotations) ? (
+                <ConversationAnnotations detail={detail.data} />
+              ) : null
+            }
+            archive={{
+              archived: Boolean(conversation?.archivedAt),
+              disabled: !conversation || archive.isPending,
+              error: Boolean(archive.error),
+              onClick: () =>
                 archive.mutate({
                   archived: !conversation?.archivedAt,
                   lastSeenAt: conversation!.lastSeenAt,
-                })
-              }
-              type="button"
-            >
-              {archive.isPending
-                ? "Saving…"
-                : conversation?.archivedAt
-                  ? "Unarchive"
-                  : "Archive"}
-            </Button>
-            {archive.error ? (
-              <div className="basis-full text-red-300/80 md:basis-auto">
-                Could not update archive state.
-              </div>
-            ) : null}
-          </div>
-          <ConversationStats conversation={conversation} detail={detail.data} />
-          <ConversationAnnotations detail={detail.data} />
-        </Card>
-
-        {detail.isPending ? (
-          <TranscriptLoading />
-        ) : detail.error && !detail.data ? (
-          <Card className="border-white/[0.07] bg-white/[0.025] p-4 font-mono text-xs leading-relaxed text-dashboard-text-muted">
-            {detail.error.message}
-          </Card>
-        ) : (
-          <>
-            {detail.error ? (
-              <div className="mb-3 rounded-lg border border-amber-300/15 bg-amber-300/[0.045] px-4 py-2 font-mono text-xs text-amber-100/65">
-                Transcript refresh failed. Showing the latest available data.
-              </div>
-            ) : null}
-            <ConversationPrivacyNotice
-              visibility={conversation?.visibility}
-            />
-            <Transcript
-              actions={
-                <CopyMarkdownButton
-                  key={conversationDetail?.conversationId ?? "loading"}
-                  getMarkdown={
-                    conversationDetail
-                      ? async () =>
-                          buildConversationMarkdown(
-                            await detail.loadCompleteTranscript(),
-                            conversation,
-                          )
-                      : undefined
-                  }
+                }),
+              pending: archive.isPending,
+            }}
+            identity={
+              hasConversationIdentity({
+                conversation,
+                conversationId,
+                detail: detail.data,
+              }) ? (
+                <ConversationIdentity
+                  conversation={conversation}
+                  conversationId={conversationId}
+                  detail={detail.data}
                 />
-              }
-              hasPreviousPage={detail.hasPreviousPage}
-              historyError={detail.historyError}
-              historyVersion={detail.historyVersion}
-              live={conversationIsLive(visualStatus, detail.data)}
-              loadingPreviousPage={detail.isLoadingPreviousPage}
-              onLoadPreviousPage={detail.loadPreviousPage}
-              responding={
-                !detail.error && conversationIsLive(visualStatus, detail.data)
-              }
-              onOpenSubagentTranscript={({ part }) => {
-                setSubagentTarget({
-                  conversationId: part.childConversationId,
-                  part,
-                });
-              }}
-              transcript={detail.data}
-            />
-          </>
-        )}
-      </section>
+              ) : null
+            }
+            live={live}
+            meta={
+              <ConversationHeaderMeta
+                identity={
+                  hasConversationIdentity({
+                    conversation,
+                    conversationId,
+                    detail: detail.data,
+                    variant: "compact",
+                  }) ? (
+                    <ConversationIdentity
+                      conversation={conversation}
+                      conversationId={conversationId}
+                      detail={detail.data}
+                      variant="compact"
+                    />
+                  ) : null
+                }
+                stats={
+                  hasConversationStats({
+                    conversation,
+                    detail: detail.data,
+                    variant: "compact",
+                  }) ? (
+                    <ConversationStats
+                      conversation={conversation}
+                      detail={detail.data}
+                      variant="compact"
+                    />
+                  ) : null
+                }
+              />
+            }
+            onSearchChange={setSearch}
+            onViewChange={setView}
+            privacy={
+              <ConversationPrivacyChip visibility={conversation?.visibility} />
+            }
+            search={search}
+            stats={
+              hasConversationStats({
+                conversation,
+                detail: detail.data,
+              }) ? (
+                <ConversationStats
+                  conversation={conversation}
+                  detail={detail.data}
+                />
+              ) : null
+            }
+            title={conversationDisplayTitle(conversation)}
+            view={view}
+          />
+
+          {detail.isPending ? (
+            <TranscriptLoading />
+          ) : detail.error && !detail.data ? (
+            <Card className="border-white/[0.07] bg-white/[0.025] p-4 font-sans text-xs leading-relaxed text-dashboard-text-muted">
+              {detail.error.message}
+            </Card>
+          ) : (
+            <>
+              {detail.error ? (
+                <div className="mb-3 rounded-lg border border-amber-300/15 bg-amber-300/[0.045] px-3 py-2 font-sans text-xs text-amber-100/65">
+                  Transcript refresh failed. Showing the latest available data.
+                </div>
+              ) : null}
+              <Transcript
+                hasPreviousPage={detail.hasPreviousPage}
+                historyError={detail.historyError}
+                historyVersion={detail.historyVersion}
+                live={live}
+                loadingPreviousPage={detail.isLoadingPreviousPage}
+                onLoadPreviousPage={detail.loadPreviousPage}
+                pinRequestVersion={pinRequestVersion}
+                responding={!detail.error && live}
+                onOpenSubagentTranscript={onOpenSubagentTranscript}
+                search={search}
+                transcript={transcript}
+                view={view}
+              />
+            </>
+          )}
+        </section>
+      </div>
+      {detail.data?.isParticipant ? (
+        <ConversationReplyFooter
+          conversationId={conversationId}
+          // Only pass committed ids for mailbox de-dupe. The full transcript is
+          // too large to re-enter the footer on every live poll while typing.
+          committedMessageIds={mailboxCommittedIds}
+          onPinRequest={requestPin}
+          pendingAuthorization={detail.pendingAuthorization}
+          // Keep the cancel watermark off props. Live polls refresh generatedAt
+          // every 2s; a prop would bust footer memo while the reader types.
+          pendingGeneratedAtRef={pendingGeneratedAtRef}
+          pendingMessages={detail.pendingMessages}
+        />
+      ) : null}
       <SubagentTranscriptDrawer
         onClose={() => setSubagentTarget(undefined)}
         target={subagentTarget}
@@ -190,32 +282,132 @@ export function ConversationPage(props: {
   );
 }
 
-function ConversationPrivacyNotice(props: {
-  visibility: Conversation["visibility"];
+/**
+ * Own mutation state and mailbox chrome outside the page tree that re-renders
+ * on every live transcript poll. Keeps composer props stable while typing.
+ *
+ * Memoized so metadata-only polls that keep mailbox identity stable skip the
+ * footer tree. Fast chat UIs isolate the composer the same way.
+ */
+const ConversationReplyFooter = memo(function ConversationReplyFooter(props: {
+  committedMessageIds: readonly string[];
+  conversationId: string;
+  onPinRequest: () => void;
+  pendingAuthorization?: ConversationPendingMessagesReport["authorization"];
+  pendingGeneratedAtRef: { current: string | undefined };
+  pendingMessages: readonly ConversationMailboxMessage[];
 }) {
-  const isPublic = props.visibility === "public";
-  const Icon = isPublic ? Globe2 : LockKeyhole;
+  const appendMessage = useAppendConversationMessage(props.conversationId);
+  const cancelPendingMessages = useCancelConversationPendingMessages(
+    props.conversationId,
+  );
+  // Keep submit identity stable across mutation status flips so the memoized
+  // composer does not re-render while the reader is still typing.
+  const appendMessageRef = useRef(appendMessage);
+  appendMessageRef.current = appendMessage;
+  const cancelPendingMessagesRef = useRef(cancelPendingMessages);
+  cancelPendingMessagesRef.current = cancelPendingMessages;
+  const onPinRequestRef = useRef(props.onPinRequest);
+  onPinRequestRef.current = props.onPinRequest;
+  const pendingMessageVersion = props.pendingMessages
+    .map((message) =>
+      [
+        message.inboundMessageId,
+        message.messageId,
+        message.clientStatus,
+        message.delivery,
+      ].join(":"),
+    )
+    .join("|");
+  const pendingMessageVersionRef = useRef(pendingMessageVersion);
+  useEffect(() => {
+    if (pendingMessageVersionRef.current === pendingMessageVersion) return;
+    pendingMessageVersionRef.current = pendingMessageVersion;
+    if (!window.matchMedia("(max-width: 767px)").matches) return;
+    onPinRequestRef.current();
+  }, [pendingMessageVersion]);
+  const onSubmit = useCallback(
+    async (message: string, idempotencyKey: string) => {
+      await appendMessageRef.current.mutateAsync({
+        idempotencyKey,
+        message,
+      });
+    },
+    [],
+  );
+  const onRetry = useCallback((message: ConversationMailboxMessage) => {
+    if (!message.idempotencyKey || !message.text) return;
+    void appendMessageRef.current.mutateAsync({
+      idempotencyKey: message.idempotencyKey,
+      message: message.text,
+    });
+  }, []);
+  const onFocus = useCallback(() => {
+    onPinRequestRef.current();
+  }, []);
+  const onSubmitStart = useCallback(() => {
+    // Keep an in-flight remove intact so optimistic cache rollback stays coherent.
+    if (!cancelPendingMessagesRef.current.isPending) {
+      cancelPendingMessagesRef.current.reset();
+    }
+    onPinRequestRef.current();
+  }, []);
+  const cancellableMessageIds = props.pendingMessages
+    .filter((message) => message.clientStatus === undefined)
+    .map((message) => message.inboundMessageId);
+  const onCancelMessage = useCallback((message: ConversationMailboxMessage) => {
+    const receivedBefore = props.pendingGeneratedAtRef.current;
+    if (!receivedBefore) return;
+    cancelPendingMessagesRef.current.mutate({
+      inboundMessageIds: [message.inboundMessageId],
+      receivedBefore,
+    });
+  }, [props.pendingGeneratedAtRef]);
+  const cancelTargetInboundMessageId =
+    cancelPendingMessages.variables?.inboundMessageIds[0];
+  const cancelError = Boolean(
+    cancelPendingMessages.error &&
+    cancelPendingMessages.variables?.inboundMessageIds.some((id) =>
+      cancellableMessageIds.includes(id),
+    ),
+  );
+
+  const onMailboxLayoutChange = useCallback(() => {
+    if (!window.matchMedia("(max-width: 767px)").matches) return;
+    onPinRequestRef.current();
+  }, []);
+
   return (
-    <div
-      className={
-        isPublic
-          ? "mb-3 flex items-start gap-2.5 rounded-lg border border-emerald-300/15 bg-emerald-300/[0.045] px-3 py-2.5 text-emerald-50/75 md:mb-4 md:px-4"
-          : "mb-3 flex items-start gap-2.5 rounded-lg border border-white/[0.08] bg-white/[0.025] px-3 py-2.5 text-dashboard-text-muted md:mb-4 md:px-4"
-      }
-      role="note"
-    >
-      <Icon aria-hidden="true" className="mt-0.5 size-3.5 shrink-0" />
-      <p className="m-0 font-mono text-xs leading-relaxed">
-        <span className="font-semibold text-dashboard-text">
-          {isPublic ? "Public conversation." : "Private conversation."}
-        </span>{" "}
-        {isPublic
-          ? "Anyone in this workspace can see this transcript."
-          : "Only members of this conversation can see this transcript."}
-      </p>
+    <div className="flex w-full min-h-0 max-h-[min(calc(var(--dashboard-viewport-height,100dvh)*0.55),24rem)] flex-col overflow-hidden self-end px-2 pt-1.5 pb-[max(0.375rem,env(safe-area-inset-bottom))] md:max-h-none md:overflow-visible md:self-auto md:px-7 md:pt-2 md:pb-3">
+      {/* Queue chrome may scroll; keep the composer pinned below it on mobile. */}
+      <div className="min-h-0 min-w-0 shrink overflow-y-auto overscroll-contain md:overflow-visible">
+        {props.pendingAuthorization ? (
+          <PendingAuthorization authorization={props.pendingAuthorization} />
+        ) : null}
+        <PendingMailboxStack
+          cancelError={cancelError}
+          cancelPending={cancelPendingMessages.isPending}
+          cancelTargetInboundMessageId={cancelTargetInboundMessageId}
+          committedMessageIds={props.committedMessageIds}
+          messages={props.pendingMessages}
+          onCancelMessage={onCancelMessage}
+          onLayoutChange={onMailboxLayoutChange}
+          onRetry={onRetry}
+        />
+      </div>
+      <div className="min-w-0 shrink-0">
+        <ConversationComposer
+          draftId={props.conversationId}
+          label="Continue this conversation"
+          submitLabel="Send"
+          onFocus={onFocus}
+          onSubmitStart={onSubmitStart}
+          onSubmit={onSubmit}
+        />
+      </div>
     </div>
   );
-}
+});
 
 function applyPendingArchiveUpdate(
   conversation: Conversation | undefined,
@@ -235,72 +427,6 @@ function applyPendingArchiveUpdate(
   };
 }
 
-function ConversationAnnotations(props: {
-  detail: ConversationDetailReport | undefined;
-}) {
-  const links = props.detail?.annotations?.filter(
-    (annotation) => annotation.kind === "resource_link",
-  );
-  if (!links?.length) return null;
-  return (
-    <div className="md:col-span-2">
-      <div className="flex flex-wrap gap-2">
-        {links.map((link) => (
-          <a
-            className="inline-flex items-center gap-1.5 rounded border border-cyan-300/15 bg-cyan-300/[0.055] px-2 py-1 font-mono text-xs leading-snug text-cyan-50 no-underline"
-            href={link.url}
-            key={`${link.plugin}:${link.key}`}
-            rel="noreferrer"
-            target="_blank"
-          >
-            {link.status ? <ResourceStatus status={link.status} /> : null}
-            <span>{link.label}</span>
-          </a>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function ResourceStatus(props: {
-  status: "open" | "draft" | "closed" | "merged" | "warning";
-}) {
-  const status = {
-    open: {
-      className: "text-[#3fb950]",
-      Icon: CircleDot,
-      label: "Open",
-    },
-    draft: {
-      className: "text-[#8c959f]",
-      Icon: CircleDashed,
-      label: "Draft",
-    },
-    closed: {
-      className: "text-[#f85149]",
-      Icon: CircleX,
-      label: "Closed",
-    },
-    merged: {
-      className: "text-[#a371f7]",
-      Icon: GitMerge,
-      label: "Merged",
-    },
-    warning: {
-      className: "text-[#d29922]",
-      Icon: TriangleAlert,
-      label: "Needs attention",
-    },
-  }[props.status];
-
-  return (
-    <span className={status.className} title={status.label}>
-      <status.Icon aria-hidden="true" size={12} strokeWidth={2.25} />
-      <span className="sr-only">{status.label}</span>
-    </span>
-  );
-}
-
 function conversationIsLive(
   visualStatus: ReturnType<typeof visualStatusForConversation> | undefined,
   detail: ConversationDetailReport | undefined,
@@ -309,284 +435,15 @@ function conversationIsLive(
   return visualStatus === "active";
 }
 
-function ConversationIdentity(props: {
-  conversation: Conversation | undefined;
-  conversationId: string | undefined;
-  detail: ConversationDetailReport | undefined;
-}) {
-  const email = props.conversation?.actorIdentity?.email?.trim();
-  const owner = conversationActorLabel(props.conversation);
-  const id = props.conversationId ?? props.conversation?.id;
-  const ownerNode = owner ? (
-    email ? (
-      <Link
-        className="font-semibold text-dashboard-text underline decoration-white/20 underline-offset-2 transition-colors hover:text-dashboard-text hover:decoration-white/60"
-        to={peoplePath(email)}
-      >
-        {owner}
-      </Link>
-    ) : (
-      owner
-    )
-  ) : null;
-  const sentryLink = props.detail?.sentryConversationUrl ? (
-    <a
-      className="text-dashboard-text no-underline hover:underline"
-      href={props.detail.sentryConversationUrl}
-      rel="noreferrer"
-      target="_blank"
-    >
-      View in Sentry
-    </a>
-  ) : null;
-
-  return (
-    <>
-      <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 md:hidden">
-        {ownerNode ? (
-          <span className="min-w-0 max-w-full truncate">{ownerNode}</span>
-        ) : null}
-        {sentryLink ? (
-          <>
-            {ownerNode ? (
-              <span className="text-dashboard-text-muted">·</span>
-            ) : null}
-            {sentryLink}
-          </>
-        ) : null}
-      </div>
-      <div className="hidden min-w-0 break-words md:block">
-        {ownerNode}
-        {ownerNode && id ? <>{" · "}</> : null}
-        {id ? (
-          <span className="break-all" title={id}>
-            {id}
-          </span>
-        ) : null}
-        {sentryLink ? (
-          <>
-            {" · "}
-            {sentryLink}
-          </>
-        ) : null}
-      </div>
-    </>
-  );
-}
-
-function SourceLocation(props: { label: string; sourceUrl?: string }) {
-  return props.sourceUrl ? (
-    <a
-      className="text-dashboard-text underline decoration-white/20 underline-offset-2 transition-colors hover:decoration-white/60"
-      href={props.sourceUrl}
-      rel="noreferrer"
-      target="_blank"
-    >
-      {props.label}
-    </a>
-  ) : (
-    props.label
-  );
-}
-
-function SourceTask(props: {
-  sourceTask: NonNullable<ConversationDetailReport["sourceTask"]>;
-}) {
-  const kindLabel =
-    props.sourceTask.kind === "scheduled" ? "Scheduled Task" : "Event Task";
-  const label = props.sourceTask.label?.trim();
-  const taskId = props.sourceTask.id?.trim();
-  const title = props.sourceTask.title?.trim();
-  const link = taskId ? (
-    <Link
-      className="text-dashboard-text underline decoration-white/20 underline-offset-2 transition-colors hover:decoration-white/60"
-      to={taskPath(taskId)}
-    >
-      Triggered by {kindLabel}
-    </Link>
-  ) : (
-    <span>Triggered by {kindLabel}</span>
-  );
-  if (!label && !title) return link;
-  return (
-    <Tooltip
-      align="left"
-      content={
-        <span className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1">
-          {title ? (
-            <>
-              <span>Title</span>
-              <span className="text-dashboard-text">{title}</span>
-            </>
-          ) : null}
-          {label ? (
-            <>
-              <span>Instruction</span>
-              <span className="text-dashboard-text">{label}</span>
-            </>
-          ) : null}
-          {taskId ? (
-            <>
-              <span>ID</span>
-              <span className="break-all text-dashboard-text">{taskId}</span>
-            </>
-          ) : null}
-        </span>
-      }
-    >
-      {link}
-    </Tooltip>
-  );
-}
-
-/** Resolve the model still running an open turn, including mid-turn handoffs. */
-export function liveModelId(
-  detail: ConversationDetailReport | undefined,
-): string | undefined {
-  if (!detail) return undefined;
-  const openTurns = new Set<string>();
-  let modelId: string | undefined;
-  for (const event of detail.events) {
-    const data = event.data;
-    if (data.type === "turn_lifecycle") {
-      if (data.state === "started") openTurns.add(data.turnId);
-      else openTurns.delete(data.turnId);
-      if (openTurns.size === 0) modelId = undefined;
-      continue;
-    }
-    if (openTurns.size === 0) continue;
-    if (data.type === "turn_routed" && openTurns.has(data.turnId)) {
-      modelId = data.modelId;
-      continue;
-    }
-    if (data.type === "handoff") modelId = data.modelId;
+function committedMessageIds(
+  events: ConversationDetailReport["events"] | undefined,
+): readonly string[] {
+  if (!events) return EMPTY_MESSAGE_IDS;
+  const ids: string[] = [];
+  for (const event of events) {
+    if (event.data.type === "message") ids.push(event.data.messageId);
   }
-  return openTurns.size > 0 ? modelId : undefined;
+  return ids;
 }
 
-function ConversationStats(props: {
-  conversation: Conversation | undefined;
-  detail?: ConversationDetailReport;
-}) {
-  if (!props.conversation) return null;
-  const completeDetail = props.detail?.previousCursor
-    ? undefined
-    : props.detail;
-  const turnSummary = completeDetail
-    ? summarizeTurns(completeDetail)
-    : undefined;
-  const toolSummary = completeDetail
-    ? summarizeToolCalls(completeDetail)
-    : undefined;
-  const usage =
-    props.detail?.cumulativeUsage ?? props.conversation.cumulativeUsage;
-  const tokenSummary = summarizeUsage(usage);
-  const costSummary = summarizeCost(usage);
-  const location = slackLocationLabel(props.conversation, {
-    includeId: false,
-  });
-  const sourceUrl = props.detail?.sourceUrl ?? props.conversation.sourceUrl;
-  const durationLabel = formatConversationDuration(props.conversation);
-  const live =
-    (props.detail?.status ?? props.conversation.status) === "active";
-  const activeModelId = liveModelId(props.detail);
-  const sourceTask = props.detail?.sourceTask;
-  const rawStats: Array<MetricListItem | undefined> = [
-    location
-      ? {
-          content: <SourceLocation label={location} sourceUrl={sourceUrl} />,
-          key: "location",
-        }
-      : undefined,
-    sourceTask
-      ? {
-          content: <SourceTask sourceTask={sourceTask} />,
-          key: "source-task",
-        }
-      : undefined,
-    durationLabel !== "none"
-      ? {
-          content: (
-            <DurationMetric
-              endedAt={props.conversation.lastSeenAt}
-              label={durationLabel}
-              startedAt={props.conversation.startedAt}
-            />
-          ),
-          key: "duration",
-        }
-      : undefined,
-    tokenSummary
-      ? {
-          content: (
-            <TokenMetric
-              compactionCount={
-                completeDetail
-                  ? completeDetail.events.filter(
-                      (event) => event.data.type === "compaction",
-                    ).length
-                  : undefined
-              }
-              live={live}
-              liveModelId={activeModelId}
-              modelUsage={props.detail?.modelUsage}
-              summary={tokenSummary}
-            />
-          ),
-          key: "tokens",
-        }
-      : undefined,
-    costSummary ||
-    props.detail?.auxiliaryCosts ||
-    props.conversation.auxiliaryCosts ||
-    live
-      ? {
-          content: (
-            <CostMetric
-              auxiliaryCosts={
-                props.detail?.auxiliaryCosts ??
-                props.conversation.auxiliaryCosts
-              }
-              live={live}
-              liveModelId={activeModelId}
-              modelUsage={props.detail?.modelUsage}
-              summary={costSummary}
-            />
-          ),
-          key: "cost",
-        }
-      : undefined,
-    !props.detail || turnSummary
-      ? {
-          content: (
-            <TurnsMetric loading={!props.detail} summary={turnSummary} />
-          ),
-          key: "turns",
-        }
-      : undefined,
-    !props.detail || (toolSummary && toolSummary.total > 0)
-      ? {
-          content: (
-            <ToolCallsMetric
-              live={live}
-              loading={!props.detail}
-              summary={toolSummary}
-            />
-          ),
-          key: "tools",
-        }
-      : undefined,
-  ];
-  const stats = rawStats.filter(
-    (item): item is MetricListItem => item !== undefined,
-  );
-
-  return (
-    <div className="col-span-full mt-1 border-t border-white/[0.07] pt-3">
-      <MetricList
-        className="break-words text-xs leading-[1.5] text-dashboard-text-muted"
-        items={stats}
-      />
-    </div>
-  );
-}
+const EMPTY_MESSAGE_IDS: readonly string[] = [];

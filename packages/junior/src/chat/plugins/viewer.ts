@@ -91,6 +91,53 @@ export async function resolveViewerUser(
   return await resolveViewerUserFromSql(getDb(), email);
 }
 
+/** Read one existing canonical user by verified email without creating a row. */
+export async function findUserByEmailFromSql(
+  db: JuniorDatabase,
+  email: string,
+): Promise<User | undefined> {
+  const normalizedEmail = normalizeIdentityEmail(email);
+  if (!normalizedEmail) return undefined;
+  const userRow = (
+    await db
+      .select()
+      .from(juniorUsers)
+      .where(eq(juniorUsers.primaryEmailNormalized, normalizedEmail))
+      .limit(1)
+  )[0];
+  return userRow ? await readUserById(db, userRow) : undefined;
+}
+
+/** Read one existing canonical user by verified email without creating a row. */
+export async function findUserByEmail(
+  email: string,
+): Promise<User | undefined> {
+  return await findUserByEmailFromSql(getDb(), email);
+}
+
+/** Update one canonical user's display name in SQL. */
+export async function updateViewerDisplayNameFromSql(
+  db: JuniorDatabase,
+  userId: string,
+  displayName: string,
+): Promise<User | undefined> {
+  const rows = await db
+    .update(juniorUsers)
+    .set({ displayName, updatedAt: new Date() })
+    .where(eq(juniorUsers.id, userId))
+    .returning();
+  const userRow = rows[0];
+  return userRow ? await readUserById(db, userRow) : undefined;
+}
+
+/** Update one canonical user's display name. */
+export async function updateViewerDisplayName(
+  userId: string,
+  displayName: string,
+): Promise<User | undefined> {
+  return await updateViewerDisplayNameFromSql(getDb(), userId, displayName);
+}
+
 /** Resolve the stored identity and linked user for one runtime actor. */
 export async function readActorIdentityFromSql(
   db: JuniorDatabase,

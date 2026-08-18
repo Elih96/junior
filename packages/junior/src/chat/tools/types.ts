@@ -1,5 +1,6 @@
 import type { FileUpload } from "chat";
 import type {
+  WebSource,
   Destination,
   Identity,
   LocalDestination,
@@ -14,13 +15,14 @@ import type { McpToolManager } from "@/chat/mcp/tool-manager";
 import type { SandboxWorkspace } from "@/chat/sandbox/workspace";
 import type { AgentTurnSurface } from "@/chat/task-execution/checkpoint";
 import type { Skill } from "@/chat/skills";
-import type { LoadSkillMetadata } from "@/chat/tools/skill/load-skill";
 import type { JuniorToolOutput } from "@/chat/tool-support/structured-result";
-import type { LocalActor, Actor, SlackActor } from "@/chat/actor";
+import type { WebActor, LocalActor, Actor, SlackActor } from "@/chat/actor";
 import type { SlackActionToken } from "@/chat/slack/action-token";
 import type { ModelProfile } from "@/chat/model-profile";
 import type { GeneratedArtifactFileRef } from "@/chat/tools/sandbox/file-uploads";
-import type { SpawnAgent } from "@/chat/agent/request";
+import type { SpawnAgent } from "@/chat/agent/types";
+import type { AttachmentStorage } from "@/chat/attachments/storage";
+import type { Workspace } from "@/chat/workspaces/types";
 
 interface HandoffControl {
   /** Non-empty catalog of configured targets. */
@@ -62,9 +64,7 @@ export interface ToolHooks {
   writeGeneratedArtifacts?: (
     files: FileUpload[],
   ) => GeneratedArtifactFileRef[] | Promise<GeneratedArtifactFileRef[]>;
-  onSkillLoaded?: (
-    skill: Skill,
-  ) => void | LoadSkillMetadata | Promise<void | LoadSkillMetadata>;
+  onSkillLoaded?: (skill: Skill) => void | Promise<void>;
   toolOverrides?: {
     imageGenerate?: ImageGenerateToolDeps;
     viewImage?: ViewImageToolDeps;
@@ -74,12 +74,13 @@ export interface ToolHooks {
 }
 
 interface BaseToolRuntimeContext {
+  attachmentStorage?: AttachmentStorage;
   handoff?: HandoffControl;
   spawnAgent?: SpawnAgent;
   /**
    * Opaque Junior conversation/session identity for this turn.
    * Interactive Slack turns use `slack:{channelId}:{threadTs}`.
-   * Scheduled/API turns use an internal id such as `agent-dispatch:{id}`.
+   * Scheduled/web turns use an internal id such as `agent-dispatch:{id}`.
    * Do not parse as Slack unless the value starts with `slack:`.
    */
   conversationId?: string;
@@ -100,6 +101,10 @@ interface BaseToolRuntimeContext {
   egress: PluginEgress;
   mcpToolManager?: McpToolManager;
   workspace: SandboxWorkspace;
+  workspaces?: {
+    activeWorkspaceId(): string | undefined;
+    switch(workspace: Workspace, signal?: AbortSignal): Promise<void>;
+  };
   /** Report whether the model currently executing the turn accepts images. */
   supportsImageInput?: () => boolean;
 }
@@ -119,9 +124,18 @@ interface LocalToolRuntimeContext extends BaseToolRuntimeContext {
   slackActionToken?: never;
 }
 
+interface WebToolRuntimeContext extends BaseToolRuntimeContext {
+  destination: Destination;
+  actor?: WebActor;
+  source: WebSource;
+  slack?: never;
+  slackActionToken?: never;
+}
+
 export type ToolRuntimeContext =
   | LocalToolRuntimeContext
-  | SlackToolRuntimeContext;
+  | SlackToolRuntimeContext
+  | WebToolRuntimeContext;
 
 export interface ToolState {
   getOperationResult: <T>(operationKey: string) => T | undefined;

@@ -1,4 +1,7 @@
-import type { ConversationReportEvent } from "@sentry/junior/api/schema";
+import type {
+  ConversationPendingMessage,
+  ConversationReportEvent,
+} from "@sentry/junior/api/schema";
 
 import type {
   ConversationTranscript,
@@ -50,11 +53,83 @@ function specialToolIds(events: ConversationReportEvent[]): Set<string> {
   return ids;
 }
 
+function historyMessageIds(
+  messages: readonly TranscriptViewMessage[],
+): Set<string> {
+  const ids = new Set<string>();
+  for (const message of messages) {
+    if (message.messageId) ids.add(message.messageId);
+  }
+  return ids;
+}
+
+/** Project one accepted mailbox row into a pending transcript message. */
+export function pendingTranscriptMessage(
+  message: ConversationPendingMessage,
+  index: number,
+): TranscriptViewMessage {
+  return {
+    delivery: message.delivery,
+    messageId: message.messageId,
+    parts: message.redacted
+      ? [{ type: "text", redacted: true }]
+      : [{ type: "text", text: message.text ?? "" }],
+    pending: true,
+    role: "user",
+    source: message.source,
+    // Keep pending rows after history without colliding with real event seqs.
+    sourceSeq: Number.MAX_SAFE_INTEGER - 1_000_000 + index,
+    timestamp: Date.parse(message.createdAt),
+    ...(message.actorIdentity ? { actorIdentity: message.actorIdentity } : {}),
+  };
+}
+
+/**
+ * Append mailbox-pending rows that are not already present in committed history.
+ *
+ * History wins on `messageId`. Pending rows keep mailbox order after the latest
+ * committed transcript content.
+ */
+export function mergePendingTranscriptMessages(
+  messages: TranscriptViewMessage[],
+  pending: readonly ConversationPendingMessage[] | undefined,
+): TranscriptViewMessage[] {
+  if (!pending?.length) return messages;
+  const extras = unresolvedPendingTranscriptMessages(messages, pending);
+  return extras.length === 0 ? messages : [...messages, ...extras];
+}
+
+/**
+ * Project mailbox rows that are not already committed in history.
+ *
+ * History wins on `messageId`. Use this for the composer-attached stack so a
+ * send does not appear twice once workers persist the user message.
+ */
+export function unresolvedPendingTranscriptMessages(
+  messages: readonly TranscriptViewMessage[],
+  pending: readonly ConversationPendingMessage[] | undefined,
+): TranscriptViewMessage[] {
+  if (!pending?.length) return [];
+  const committedIds = historyMessageIds(messages);
+  return pending
+    .filter((message) => !committedIds.has(message.messageId))
+    .map((message, index) => pendingTranscriptMessage(message, index));
+}
+
 /** Reduce the ordered reporting event API into dashboard-only transcript rows. */
 export function conversationTranscriptMessages(
   conversation: ConversationTranscript,
+  pendingMessages?: readonly ConversationPendingMessage[],
 ): TranscriptViewMessage[] {
-  const replacedToolIds = specialToolIds(conversation.events);
+  return transcriptMessagesFromEvents(conversation.events, pendingMessages);
+}
+
+/** Reduce ordered reporting events without subscribing to detail metadata. */
+export function transcriptMessagesFromEvents(
+  events: ConversationReportEvent[],
+  pendingMessages?: readonly ConversationPendingMessage[],
+): TranscriptViewMessage[] {
+  const replacedToolIds = specialToolIds(events);
   const tools = new Map<
     string,
     Extract<TranscriptViewPart, { type: "tool_call" }>
@@ -65,6 +140,7 @@ export function conversationTranscriptMessages(
     Extract<TranscriptViewPart, { type: "subagent" }>
   >();
   const messages: TranscriptViewMessage[] = [];
+  const messagesById = new Map<string, TranscriptViewMessage>();
   const latestUserMessageByTurn = new Map<string, TranscriptViewMessage>();
   let latestUserMessage: TranscriptViewMessage | undefined;
 
@@ -111,7 +187,7 @@ export function conversationTranscriptMessages(
 
   // API sequence is the only ordering authority. Do not sort by timestamps:
   // producers may preserve ingestion order while clocks are skewed.
-  for (const event of conversation.events) {
+  for (const event of events) {
     const data = event.data;
     if (data.type === "message") {
       const message = {
@@ -120,11 +196,29 @@ export function conversationTranscriptMessages(
             ? { type: "text", redacted: true }
             : { type: "text", text: data.text! },
         ]),
+        messageId: data.messageId,
         ...(data.actorIdentity ? { actorIdentity: data.actorIdentity } : {}),
         ...(data.eventType ? { eventType: data.eventType } : {}),
+        ...(data.explicitMention !== undefined
+          ? { explicitMention: data.explicitMention }
+          : {}),
+        ...(data.source ? { source: data.source } : {}),
       };
       messages.push(message);
+      messagesById.set(message.messageId, message);
       if (message.role === "user") latestUserMessage = message;
+      continue;
+    }
+
+    if (data.type === "message_handled") {
+      const message = messagesById.get(data.messageId);
+      if (
+        message?.role === "user" &&
+        message.explicitMention === false &&
+        !message.eventType
+      ) {
+        message.context = true;
+      }
       continue;
     }
 
@@ -144,8 +238,26 @@ export function conversationTranscriptMessages(
     }
 
     if (data.type === "turn_lifecycle" && data.state === "started") {
-      if (latestUserMessage) {
+      const inputMessages = data.inputMessageIds
+        ?.map((messageId) => messagesById.get(messageId))
+        .filter((message) => message !== undefined);
+      const turnUserMessage = inputMessages
+        ?.slice()
+        .reverse()
+        .find((message) => message.role === "user");
+      if (turnUserMessage) {
+        latestUserMessageByTurn.set(data.turnId, turnUserMessage);
+      } else if (latestUserMessage) {
         latestUserMessageByTurn.set(data.turnId, latestUserMessage);
+      }
+      for (const message of inputMessages ?? []) {
+        if (
+          message.role === "user" &&
+          message.explicitMention === false &&
+          !message.eventType
+        ) {
+          message.context = true;
+        }
       }
       continue;
     }
@@ -254,6 +366,18 @@ export function conversationTranscriptMessages(
       continue;
     }
 
+    if (data.type === "attachments_delivered") {
+      messages.push(
+        eventMessage(event, "system", [
+          {
+            type: "attachments_delivered",
+            attachments: data.attachments,
+          },
+        ]),
+      );
+      continue;
+    }
+
     if (data.type === "compaction" || data.type === "handoff") {
       messages.push(
         eventMessage(event, "system", [
@@ -299,5 +423,14 @@ export function conversationTranscriptMessages(
     }
   }
 
-  return messages.sort((left, right) => left.sourceSeq - right.sourceSeq);
+  const ordered = messages
+    .filter(
+      (message) =>
+        message.role !== "user" ||
+        message.eventType !== undefined ||
+        message.explicitMention !== false ||
+        message.context === true,
+    )
+    .sort((left, right) => left.sourceSeq - right.sourceSeq);
+  return mergePendingTranscriptMessages(ordered, pendingMessages);
 }

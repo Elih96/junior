@@ -4,10 +4,13 @@ Canonical words used across Junior's code and documentation.
 
 ## Terms
 
+- **Workspace**: a named recipe that selects repositories and setup
+  instructions for a Sandbox snapshot.
+- **Sandbox**: an isolated execution environment for a run or snapshot build.
 - **Conversation**: the durable container for visible history and execution
   state, identified by a globally unique `conversationId`.
-- **Source**: where an inbound event came from, such as Slack, local CLI,
-  scheduler, or plugin dispatch.
+- **Source**: where an inbound event came from, such as Slack, local CLI, web
+  (dashboard), scheduler, or plugin dispatch.
 - **Destination**: where Junior sends output or side effects.
 - **Location**: the optional provider container associated with a conversation,
   identified by Junior and provider ids. Conversation visibility is separate.
@@ -64,6 +67,10 @@ Canonical words used across Junior's code and documentation.
 - **Turn checkpoint**: the Redis resume cursor for one turn (status + boundary into SQL history).
 - **Conversation execution**: mutable operational state for a conversation,
   such as mailbox state, worker lease, checkpoints, and activity status.
+- **Unfinished work**: plugin-owned work associated with a conversation that
+  is not complete.
+- **Assigned work**: plugin-owned work associated with a conversation, whether
+  finished or unfinished.
 - **Agent binding**: a named reference, scoped to one parent agent
   conversation, that reuses one child conversation and its history.
 - **Agent invocation**: one retry-safe delegated task sent from a parent agent

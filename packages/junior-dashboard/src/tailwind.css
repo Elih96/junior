@@ -1,15 +1,17 @@
-@import url("https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@300;400;500;600;700&display=swap");
 @import "tailwindcss";
 
 @theme {
   --font-display:
     "Outfit", "Avenir Next", Avenir, "Segoe UI", -apple-system,
     BlinkMacSystemFont, sans-serif;
+  /* Primary UI/body face. Prefer Inter over the previous mono-first shell. */
   --font-sans:
-    -apple-system, "system-ui", "Segoe UI", Roboto, Oxygen, Ubuntu, sans-serif;
+    "Inter", -apple-system, "system-ui", "Segoe UI", Roboto, Oxygen, Ubuntu,
+    sans-serif;
   --font-mono:
-    "Geist Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
-    "Liberation Mono", monospace;
+    ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
+    monospace;
 
   /*
    * Dashboard type scale.
@@ -105,5 +107,18 @@
     box-shadow:
       0 0 0 4px rgba(110, 231, 183, 0.18),
       0 0 14px rgba(110, 231, 183, 0.65);
+  }
+}
+
+@media (max-width: 767px) {
+  /* Keep long mobile feeds cheap while preserving their full scroll range. */
+  .mobile-conversation-row {
+    content-visibility: auto;
+    contain-intrinsic-size: auto 3.5rem;
+  }
+
+  .mobile-transcript-row {
+    content-visibility: auto;
+    contain-intrinsic-size: auto 12rem;
   }
 }

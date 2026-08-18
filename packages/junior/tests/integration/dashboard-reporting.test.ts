@@ -1,5 +1,6 @@
 import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { testViewer } from "../fixtures/user";
 import { readConversationDetail } from "@/api/conversations/detail";
 import { readConversationFeedFromSql } from "@/api/conversations/list";
 import { createSqlConversationEventStore } from "@/chat/conversations/sql/history";
@@ -13,300 +14,23 @@ import {
   juniorDestinations,
   juniorIdentities,
 } from "@/db/schema";
-import { slackIdFromText } from "../fixtures/slack/factories/ids";
+import { deferred } from "../fixtures/conversation-work";
+import {
+  appendVisibleHistory,
+  createChild,
+  recordRoot,
+  replacement,
+  requireDetail,
+  waitUntilApplicationWaitsOnLock,
+} from "../fixtures/dashboard-reporting";
 
 const ORIGINAL_ENV = { ...process.env };
 const TEST_DATABASE_URL = ORIGINAL_ENV.DATABASE_URL;
-
-function replacement(message: PiMessage) {
-  return {
-    item: historyItemFromPiMessage(message, { authority: "context" }),
-  };
-}
 
 if (!TEST_DATABASE_URL) {
   throw new Error(
     "DATABASE_URL is required for dashboard reporting integration tests",
   );
-}
-
-async function recordRoot(
-  conversationId: string,
-  visibility: "private" | "public",
-  actor?: {
-    email: string;
-    slackUserId: string;
-    teamId: string;
-  },
-): Promise<void> {
-  const { getConversationStore } = await import("@/chat/db");
-  await getConversationStore().recordActivity({
-    conversationId,
-    destination: {
-      platform: "slack",
-      teamId: "TREPORTING",
-      channelId: slackIdFromText("C", conversationId),
-    },
-    nowMs: 1,
-    ...(actor ? { actor: { platform: "slack" as const, ...actor } } : {}),
-    source: "slack",
-    title: "Canonical event report",
-    visibility,
-  });
-}
-
-async function appendVisibleHistory(
-  conversationId: string,
-  text = "Visible answer",
-): Promise<void> {
-  const { getConversationEventStore } = await import("@/chat/db");
-  const modelMessage = {
-    role: "assistant",
-    content: [{ type: "text", text: "private model-only duplicate" }],
-    api: "responses",
-    provider: "openai",
-    model: "gpt-5",
-    stopReason: "stop",
-    timestamp: 11,
-    usage: {
-      input: 10,
-      output: 2,
-      cacheRead: 3,
-      cacheWrite: 0,
-      totalTokens: 15,
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-    },
-  } as PiMessage;
-  await getConversationEventStore().append(conversationId, [
-    {
-      data: {
-        type: "message",
-        messageId: `${conversationId}:visible`,
-        role: "assistant",
-        text,
-      },
-      createdAtMs: 10,
-    },
-    {
-      data: historyItemFromPiMessage(modelMessage, { authority: "context" }),
-      createdAtMs: 11,
-    },
-    {
-      data: {
-        type: "tool_execution_started",
-        toolCallId: `${conversationId}:tool-call`,
-        toolName: "search",
-      },
-      createdAtMs: 12,
-    },
-    {
-      data: historyItemFromPiMessage(
-        {
-          role: "assistant",
-          api: "responses",
-          provider: "openai",
-          model: "gpt-5",
-          usage: {
-            input: 0,
-            output: 0,
-            cacheRead: 0,
-            cacheWrite: 0,
-            totalTokens: 0,
-            cost: {
-              input: 0,
-              output: 0,
-              cacheRead: 0,
-              cacheWrite: 0,
-              total: 0,
-            },
-          },
-          stopReason: "toolUse",
-          content: [
-            { type: "thinking", thinking: "Inspect the tool request." },
-            {
-              type: "toolCall",
-              id: `${conversationId}:tool-call`,
-              name: "search",
-              arguments: { query: "visible tool query" },
-            },
-          ],
-          timestamp: 12,
-        } as PiMessage,
-        { authority: "context" },
-      ),
-      createdAtMs: 12,
-    },
-    {
-      data: historyItemFromPiMessage(
-        {
-          role: "toolResult",
-          toolCallId: `${conversationId}:tool-call`,
-          toolName: "search",
-          content: [{ type: "text", text: "model-visible result" }],
-          details: {
-            matches: 2,
-          },
-          isError: false,
-          timestamp: 13,
-        } as PiMessage,
-        { authority: "context" },
-      ),
-      createdAtMs: 13,
-    },
-    {
-      data: {
-        type: "turn_started",
-        turnId: `${conversationId}:turn`,
-        inputMessageIds: [`${conversationId}:visible`],
-        surface: "internal",
-      },
-      createdAtMs: 13,
-    },
-    {
-      data: {
-        type: "turn_completed",
-        turnId: `${conversationId}:turn`,
-        outcome: "success",
-      },
-      createdAtMs: 14,
-    },
-    {
-      data: {
-        type: "subagent_started",
-        subagentInvocationId: `${conversationId}:subagent-call`,
-        subagentKind: "review",
-        childConversationId: `${conversationId}:child`,
-      },
-      createdAtMs: 17,
-    },
-    {
-      data: {
-        type: "subagent_ended",
-        subagentInvocationId: `${conversationId}:subagent-call`,
-        outcome: "success",
-      },
-      createdAtMs: 18,
-    },
-  ]);
-  await getConversationEventStore().replaceHistory(conversationId, {
-    createdAtMs: 15,
-    data: {
-      type: "compaction",
-      modelProfile: "standard",
-      modelId: "private-model-id",
-      summary: "Continue monitoring CI.",
-      replacementHistory: [
-        replacement(modelMessage),
-        replacement({
-          role: "user",
-          content: "Private replacement context.",
-          timestamp: 15,
-        } as PiMessage),
-      ],
-    },
-  });
-  await getConversationEventStore().replaceHistory(conversationId, {
-    createdAtMs: 16,
-    data: {
-      type: "handoff",
-      modelProfile: "fast",
-      modelId: "private-handoff-model-id",
-      reasoningLevel: "high",
-      triggeringToolCallId: `${conversationId}:handoff-tool-call`,
-      summary: "Fix the remaining test.",
-      replacementHistory: [
-        replacement({
-          role: "user",
-          content: [
-            {
-              type: "text",
-              text: "More private replacement context.",
-            },
-          ],
-          timestamp: 16,
-        } as PiMessage),
-      ],
-    },
-  });
-}
-
-async function createChild(args: {
-  childConversationId: string;
-  parentConversationId: string;
-}): Promise<void> {
-  const { getConversationEventStore, getDb } = await import("@/chat/db");
-  const at = new Date(3);
-  const [parent] = await getDb()
-    .select({ rootConversationId: juniorConversations.rootConversationId })
-    .from(juniorConversations)
-    .where(eq(juniorConversations.conversationId, args.parentConversationId));
-  if (!parent?.rootConversationId) throw new Error("Missing conversation root");
-  await getDb().insert(juniorConversations).values({
-    conversationId: args.childConversationId,
-    parentConversationId: args.parentConversationId,
-    rootConversationId: parent.rootConversationId,
-    createdAt: at,
-    lastActivityAt: at,
-    updatedAt: at,
-    executionStatus: "idle",
-  });
-  await getConversationEventStore().append(args.parentConversationId, [
-    {
-      data: {
-        type: "subagent_started",
-        childConversationId: args.childConversationId,
-        subagentInvocationId: `${args.childConversationId}:call`,
-        subagentKind: "advisor",
-      },
-      createdAtMs: 2,
-    },
-    {
-      data: {
-        type: "subagent_ended",
-        subagentInvocationId: `${args.childConversationId}:call`,
-        outcome: "success",
-      },
-      createdAtMs: 3,
-    },
-  ]);
-  await appendVisibleHistory(args.childConversationId, "Child answer");
-}
-
-async function requireDetail(conversationId: string) {
-  const detail = await readConversationDetail(conversationId);
-  if (!detail) throw new Error(`Missing detail for ${conversationId}`);
-  return detail;
-}
-
-function deferred(): { promise: Promise<void>; resolve: () => void } {
-  let resolve!: () => void;
-  const promise = new Promise<void>((done) => {
-    resolve = done;
-  });
-  return { promise, resolve };
-}
-
-async function waitUntilApplicationWaitsOnLock(
-  observer: ReturnType<typeof createPostgresJuniorSqlExecutor>,
-  applicationName: string,
-  queryFragment: string,
-): Promise<void> {
-  for (let attempt = 0; attempt < 200; attempt += 1) {
-    const [row] = await observer.query<{ count: number }>(
-      `
-        select count(*)::integer as count
-        from pg_stat_activity
-        where datname = current_database()
-          and pid <> pg_backend_pid()
-          and wait_event_type = 'Lock'
-          and query ilike $1
-      `,
-      [`%${queryFragment}%`],
-    );
-    if ((row?.count ?? 0) > 0) return;
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  throw new Error(`${applicationName} did not reach the expected lock wait`);
 }
 
 describe("dashboard canonical event reporting", () => {
@@ -405,6 +129,7 @@ describe("dashboard canonical event reporting", () => {
         type: "turn_lifecycle",
         turnId: `${conversationId}:turn`,
         state: "started",
+        inputMessageIds: [`${conversationId}:visible`],
       },
       {
         type: "turn_lifecycle",
@@ -547,6 +272,46 @@ describe("dashboard canonical event reporting", () => {
     ]);
   });
 
+  it("keys gateway assistant usage by the vendor model id", async () => {
+    const conversationId = "slack:C-reporting:gateway-model-usage";
+    await recordRoot(conversationId, "public");
+    const gatewayUsageMessage = {
+      role: "assistant",
+      api: "responses",
+      provider: "vercel-ai-gateway",
+      model: "openai/gpt-5.6-sol",
+      content: [],
+      stopReason: "stop",
+      timestamp: 10,
+      usage: {
+        input: 12,
+        output: 4,
+        totalTokens: 16,
+        cost: { total: 0.03 },
+      },
+    } as unknown as PiMessage;
+    const { getConversationEventStore } = await import("@/chat/db");
+    await getConversationEventStore().append(conversationId, [
+      {
+        data: historyItemFromPiMessage(gatewayUsageMessage, {
+          authority: "context",
+        }),
+        createdAtMs: 10,
+      },
+    ]);
+
+    expect((await requireDetail(conversationId)).modelUsage).toEqual([
+      {
+        modelId: "openai/gpt-5.6-sol",
+        usage: expect.objectContaining({
+          inputTokens: 12,
+          outputTokens: 4,
+          totalTokens: 16,
+        }),
+      },
+    ]);
+  });
+
   it("rolls unprojected child usage into a root conversation", async () => {
     const rootConversationId = "slack:C-reporting:tree-usage";
     const childConversationId = "child:reporting-unprojected-usage";
@@ -667,19 +432,21 @@ describe("dashboard canonical event reporting", () => {
       email: "Owner@Example.com",
     });
     const { getDb } = await import("@/chat/db");
+    const { resolveViewerUser } = await import("@/chat/plugins/viewer");
+    const rootViewer = await resolveViewerUser("owner@example.com");
+    expect(rootViewer).toBeDefined();
     await appendVisibleHistory(rootConversationId, "Private owner answer");
     await createChild({
       childConversationId,
       parentConversationId: rootConversationId,
     });
-
     await expect(requireDetail(rootConversationId)).resolves.toMatchObject({
       eventHistory: { status: "redacted" },
       isParticipant: false,
     });
     expect(
       await readConversationDetail(rootConversationId, {
-        verifiedViewerEmail: "other@example.com",
+        viewer: testViewer("other@example.com"),
       }),
     ).toMatchObject({
       eventHistory: { status: "redacted" },
@@ -687,7 +454,7 @@ describe("dashboard canonical event reporting", () => {
     });
     const rootParticipantDetail = await readConversationDetail(
       rootConversationId,
-      { verifiedViewerEmail: " owner@example.COM " },
+      { viewer: testViewer(" owner@example.COM ") },
     );
     expect(rootParticipantDetail).toMatchObject({
       displayTitle: "Canonical event report",
@@ -698,16 +465,28 @@ describe("dashboard canonical event reporting", () => {
     });
     const rootParticipantSummary = (
       await readConversationFeedFromSql({
-        verifiedViewerEmail: "owner@example.com",
+        viewer: rootViewer!,
       })
     ).conversations.find(
       (conversation) => conversation.conversationId === rootConversationId,
     );
     expect(rootParticipantSummary).toBeDefined();
-    expect(rootParticipantDetail).toMatchObject(rootParticipantSummary ?? {});
+    expect(rootParticipantSummary).toMatchObject({ isPriority: expect.any(Boolean) });
+    // Feed-only Priority/work fields are absent on detail reports.
+    expect(rootParticipantDetail).toMatchObject({
+      conversationId: rootParticipantSummary!.conversationId,
+      cumulativeDurationMs: rootParticipantSummary!.cumulativeDurationMs,
+      displayTitle: rootParticipantSummary!.displayTitle,
+      isParticipant: rootParticipantSummary!.isParticipant,
+      lastProgressAt: rootParticipantSummary!.lastProgressAt,
+      lastSeenAt: rootParticipantSummary!.lastSeenAt,
+      startedAt: rootParticipantSummary!.startedAt,
+      status: rootParticipantSummary!.status,
+      surface: rootParticipantSummary!.surface,
+    });
     const childParticipantDetail = await readConversationDetail(
       childConversationId,
-      { verifiedViewerEmail: "owner@example.com" },
+      { viewer: rootViewer! },
     );
     expect(childParticipantDetail).toMatchObject({ isParticipant: true });
     expect(childParticipantDetail?.events[0]?.data).toMatchObject({
@@ -719,12 +498,10 @@ describe("dashboard canonical event reporting", () => {
       .set({ emailVerified: false })
       .where(eq(juniorIdentities.providerSubjectId, "U-owner"));
     expect(
-      await readConversationDetail(rootConversationId, {
-        verifiedViewerEmail: "owner@example.com",
-      }),
+      await readConversationDetail(rootConversationId, { viewer: rootViewer! }),
     ).toMatchObject({
-      eventHistory: { status: "redacted" },
-      isParticipant: false,
+      eventHistory: { status: "available" },
+      isParticipant: true,
     });
   });
 
@@ -740,6 +517,7 @@ describe("dashboard canonical event reporting", () => {
       status: "available",
     });
     const { getConversationStore, getDb } = await import("@/chat/db");
+    const { resolveViewerUser } = await import("@/chat/plugins/viewer");
     const [rootRow] = await getDb()
       .select({ destinationId: juniorConversations.destinationId })
       .from(juniorConversations)
@@ -806,7 +584,7 @@ describe("dashboard canonical event reporting", () => {
 
     await expect(
       readConversationDetail(cyclicRoot, {
-        verifiedViewerEmail: "cyclic-owner@example.com",
+        viewer: testViewer("cyclic-owner@example.com"),
       }),
     ).resolves.toMatchObject({
       eventHistory: { status: "redacted" },
@@ -828,9 +606,13 @@ describe("dashboard canonical event reporting", () => {
       .set({ destinationId: null })
       .where(eq(juniorConversations.conversationId, destinationlessRoot));
 
+    const destinationlessViewer = await resolveViewerUser(
+      "destinationless-owner@example.com",
+    );
+    expect(destinationlessViewer).toBeDefined();
     await expect(
       readConversationDetail(destinationlessRoot, {
-        verifiedViewerEmail: "destinationless-owner@example.com",
+        viewer: destinationlessViewer!,
       }),
     ).resolves.toMatchObject({
       eventHistory: { status: "available" },
@@ -838,7 +620,7 @@ describe("dashboard canonical event reporting", () => {
     });
     const destinationlessSummary = (
       await readConversationFeedFromSql({
-        verifiedViewerEmail: "destinationless-owner@example.com",
+        viewer: destinationlessViewer!,
       })
     ).conversations.find(
       (conversation) => conversation.conversationId === destinationlessRoot,
@@ -862,9 +644,11 @@ describe("dashboard canonical event reporting", () => {
       .set({ rootConversationId: foreignRoot })
       .where(eq(juniorConversations.conversationId, malformedTopLevel));
 
+    const foreignViewer = await resolveViewerUser("foreign-owner@example.com");
+    expect(foreignViewer).toBeDefined();
     await expect(
       readConversationDetail(malformedTopLevel, {
-        verifiedViewerEmail: "foreign-owner@example.com",
+        viewer: foreignViewer!,
       }),
     ).resolves.toMatchObject({
       eventHistory: { status: "redacted" },
@@ -872,12 +656,12 @@ describe("dashboard canonical event reporting", () => {
     });
     const malformedSummary = (
       await readConversationFeedFromSql({
-        verifiedViewerEmail: "foreign-owner@example.com",
+        viewer: foreignViewer!,
       })
     ).conversations.find(
       (conversation) => conversation.conversationId === malformedTopLevel,
     );
-    expect(malformedSummary).toMatchObject({ isParticipant: false });
+    expect(malformedSummary).toBeUndefined();
   });
 
   it("lets requested-row expiry win and stamps both root and child purges", async () => {

@@ -2,6 +2,7 @@ import { z } from "zod";
 import { usageCostSchema, usageSchema } from "@/usage-schema";
 import {
   conversationAnnotationInputSchema,
+  conversationSidebarAnnotationSchema,
   conversationEventPresentationSchema,
 } from "@sentry/junior-plugin-api";
 
@@ -24,6 +25,13 @@ export const conversationUsageSchema = usageSchema;
 
 export const conversationParamsSchema = z
   .object({ conversationId: z.string().min(1) })
+  .strict();
+
+export const conversationAttachmentParamsSchema = z
+  .object({
+    attachmentId: z.string().min(1),
+    conversationId: z.string().min(1),
+  })
   .strict();
 
 export const conversationDetailQuerySchema = z
@@ -58,12 +66,108 @@ export const archiveConversationResponseSchema = z
   .object({ archived: z.boolean() })
   .strict();
 
+export const createConversationBodySchema = z
+  .object({
+    idempotencyKey: z.string().trim().min(1).max(200),
+    message: z.string().trim().min(1).max(32_000),
+    /** New roots default public. Private roots stay participant-only. */
+    visibility: z.enum(["private", "public"]).optional(),
+  })
+  .strict();
+
+export const createConversationMessageBodySchema = z
+  .object({
+    idempotencyKey: z.string().trim().min(1).max(200),
+    message: z.string().trim().min(1).max(32_000),
+  })
+  .strict();
+
+export const acceptedConversationMessageSchema = z
+  .object({
+    conversationId: z.string().min(1),
+    messageId: z.string().min(1),
+    status: z.enum(["accepted", "duplicate"]),
+  })
+  .strict();
+
 export const actorIdentitySchema = z
   .object({
     email: z.string().optional(),
     fullName: z.string().optional(),
     slackUserId: z.string().optional(),
     slackUserName: z.string().optional(),
+  })
+  .strict();
+
+/** Mailbox delivery mode for one accepted inbound message. */
+export const conversationPendingMessageDeliverySchema = z.enum([
+  "defer",
+  "interrupt",
+]);
+
+/** One accepted mailbox message that has not reached durable history yet. */
+export const conversationPendingMessageSchema = z
+  .object({
+    actorIdentity: actorIdentitySchema.optional(),
+    createdAt: z.string().datetime(),
+    delivery: conversationPendingMessageDeliverySchema,
+    inboundMessageId: z.string().min(1),
+    messageId: z.string().min(1),
+    receivedAt: z.string().datetime(),
+    role: z.literal("user"),
+    source: z.enum(["slack", "web"]),
+    text: z.string().optional(),
+    redacted: z.literal(true).optional(),
+  })
+  .strict()
+  .superRefine((data, context) => {
+    if ((data.text === undefined) === (data.redacted !== true)) {
+      context.addIssue({
+        code: "custom",
+        message: "pending message content must be text or explicitly redacted",
+      });
+    }
+    if (data.redacted && data.actorIdentity) {
+      context.addIssue({
+        code: "custom",
+        message: "redacted pending messages must not expose actor identity",
+      });
+    }
+  });
+
+/** Participant-only authorization prompt for a parked web turn. */
+export const conversationPendingAuthorizationSchema = z
+  .object({
+    authorizationUrl: z.string().url(),
+    completionText: z.string().min(1),
+    label: z.string().min(1),
+  })
+  .strict();
+
+/** Bounded mailbox snapshot for one conversation transcript. */
+export const conversationPendingMessagesReportSchema = z
+  .object({
+    authorization: conversationPendingAuthorizationSchema.optional(),
+    conversationId: z.string().min(1),
+    generatedAt: z.string().datetime(),
+    messages: z.array(conversationPendingMessageSchema),
+  })
+  .strict();
+
+/** Optional filters for cancelling accepted mailbox rows. */
+export const cancelConversationPendingMessagesBodySchema = z
+  .object({
+    inboundMessageIds: z.array(z.string().min(1)).min(1).optional(),
+    receivedBefore: z.string().datetime().optional(),
+  })
+  .strict();
+
+/** Result of cancelling accepted human-facing mailbox rows. */
+export const cancelConversationPendingMessagesResponseSchema = z
+  .object({
+    cancelledCount: z.number().int().nonnegative(),
+    cancelledInboundMessageIds: z.array(z.string().min(1)),
+    conversationId: z.string().min(1),
   })
   .strict();
 
@@ -103,6 +207,14 @@ export const conversationSourceTaskSchema = z
     }
   });
 
+const conversationAnnotationReportSchema = conversationAnnotationInputSchema.and(
+  z.object({
+    plugin: z.string().min(1),
+    createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime(),
+  }),
+);
+
 export const conversationSummaryReportSchema = z
   .object({
     displayTitle: z.string(),
@@ -126,6 +238,27 @@ export const conversationSummaryReportSchema = z
     sentryTraceUrl: z.string().optional(),
     sourceUrl: z.string().url().optional(),
     traceId: z.string().optional(),
+    /**
+     * Plugin-owned resource links for this conversation.
+     * Present on the conversation feed when the viewer can see private content.
+     * Clients must not fetch provider state while rendering these links.
+     */
+    annotations: z.array(conversationAnnotationReportSchema).optional(),
+    /** Plugin-selected annotations for the compact conversation row. */
+    sidebarAnnotations: z.array(conversationSidebarAnnotationSchema).optional(),
+    assignedWork: z.boolean().optional(),
+    finishedWorkAt: z.string().datetime().optional(),
+    /**
+     * Dashboard Priority membership for this conversation summary.
+     * Present on the conversation feed. Clients must not recompute it.
+     *
+     * True only when:
+     * - unfinished work was last seen within 48 hours
+     * - finished assigned work has conversation activity after the finish time
+     * - there is no known work and the conversation was last seen within 3 hours
+     */
+    isPriority: z.boolean().optional(),
+    unfinishedWork: z.boolean().optional(),
   })
   .strict();
 
@@ -134,8 +267,10 @@ const conversationReportMessageEventDataSchema = z
     type: z.literal("message"),
     messageId: z.string().min(1),
     role: z.enum(["assistant", "system", "user"]),
+    source: z.enum(["slack", "web"]).optional(),
     actorIdentity: actorIdentitySchema.optional(),
     eventType: z.string().min(1).optional(),
+    explicitMention: z.boolean().optional(),
     text: z.string().optional(),
     redacted: z.literal(true).optional(),
   })
@@ -270,7 +405,15 @@ const conversationReportTurnLifecycleEventDataSchema = z.discriminatedUnion(
       .object({
         type: z.literal("turn_lifecycle"),
         turnId: z.string().min(1),
-        state: z.enum(["started", "succeeded", "no_reply"]),
+        state: z.enum(["succeeded", "no_reply"]),
+      })
+      .strict(),
+    z
+      .object({
+        type: z.literal("turn_lifecycle"),
+        turnId: z.string().min(1),
+        state: z.literal("started"),
+        inputMessageIds: z.array(z.string().min(1)).min(1).optional(),
       })
       .strict(),
     z
@@ -331,6 +474,23 @@ const conversationReportStructuredEventDataSchema = z
   })
   .strict();
 
+/** Public attachment metadata on conversation reports and transcript media. */
+const conversationReportDeliveredAttachmentSchema = z
+  .object({
+    id: z.string().min(1),
+    filename: z.string().min(1),
+    contentType: z.string().min(1),
+    bytes: z.number().int().nonnegative(),
+  })
+  .strict();
+
+const conversationReportAttachmentsDeliveredEventDataSchema = z
+  .object({
+    type: z.literal("attachments_delivered"),
+    attachments: z.array(conversationReportDeliveredAttachmentSchema).min(1),
+  })
+  .strict();
+
 const conversationReportCompactionEventDataSchema = z
   .object({
     type: z.literal("compaction"),
@@ -385,6 +545,7 @@ export const conversationReportEventDataSchema = z.discriminatedUnion("type", [
   conversationReportTurnLifecycleEventDataSchema,
   conversationReportTurnContextEventDataSchema,
   conversationReportStructuredEventDataSchema,
+  conversationReportAttachmentsDeliveredEventDataSchema,
   conversationReportTurnRoutedEventDataSchema,
   conversationReportGuardianActionReviewedEventDataSchema,
   conversationReportCompactionEventDataSchema,
@@ -529,17 +690,6 @@ function validateConversationEvents(
 
 export const conversationDetailReportSchema = conversationSummaryReportSchema
   .extend({
-    annotations: z
-      .array(
-        conversationAnnotationInputSchema.and(
-          z.object({
-            plugin: z.string().min(1),
-            createdAt: z.string().datetime(),
-            updatedAt: z.string().datetime(),
-          }),
-        ),
-      )
-      .optional(),
     modelUsage: z.array(conversationModelUsageSchema).optional(),
     events: z.array(conversationReportEventSchema),
     eventHistory: conversationEventHistorySchema,
@@ -583,10 +733,12 @@ export const conversationStatsItemSchema = z
 
 export const conversationMetricDaySchema = z
   .object({
+    cachedInputTokens: z.number().optional(),
     conversations: z.number(),
     costUsd: z.number().optional(),
     date: z.string(),
     durationMs: z.number(),
+    inputTokens: z.number().optional(),
     tokens: z.number().optional(),
   })
   .strict();
@@ -616,6 +768,7 @@ export const guardianStatsSchema = z
 export const conversationStatsReportSchema = z
   .object({
     active: z.number(),
+    cachedInputTokens: z.number().optional(),
     conversations: z.number(),
     durationMs: z.number(),
     failed: z.number(),
@@ -626,6 +779,7 @@ export const conversationStatsReportSchema = z
     actors: z.array(conversationStatsItemSchema),
     source: z.literal("conversation_index"),
     costUsd: z.number().optional(),
+    inputTokens: z.number().optional(),
     tokens: z.number().optional(),
     windowEnd: z.string(),
     windowStart: z.string(),
@@ -678,4 +832,28 @@ export type ArchiveConversationBody = z.infer<
 >;
 export type ArchiveConversationResponse = z.infer<
   typeof archiveConversationResponseSchema
+>;
+export type CreateConversationBody = z.infer<
+  typeof createConversationBodySchema
+>;
+export type CreateConversationMessageBody = z.infer<
+  typeof createConversationMessageBodySchema
+>;
+export type AcceptedConversationMessage = z.infer<
+  typeof acceptedConversationMessageSchema
+>;
+export type ConversationPendingMessageDelivery = z.infer<
+  typeof conversationPendingMessageDeliverySchema
+>;
+export type ConversationPendingMessage = z.infer<
+  typeof conversationPendingMessageSchema
+>;
+export type ConversationPendingMessagesReport = z.infer<
+  typeof conversationPendingMessagesReportSchema
+>;
+export type CancelConversationPendingMessagesBody = z.infer<
+  typeof cancelConversationPendingMessagesBodySchema
+>;
+export type CancelConversationPendingMessagesResponse = z.infer<
+  typeof cancelConversationPendingMessagesResponseSchema
 >;

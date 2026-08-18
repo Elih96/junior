@@ -5,19 +5,27 @@ import {
   authenticatePersonalToken,
   createJuniorApi,
   jsonResponse,
+  resolveViewerUser,
+  updateViewerDisplayName,
   type JuniorApiVariables,
 } from "@sentry/junior/api";
 import { apiErrorSchema } from "@sentry/junior/api/schema";
 import { initSentry } from "@sentry/junior/instrumentation";
+import { JUNIOR_VERSION } from "@sentry/junior/version";
 import type {
   PluginApiRouteRequestContext,
   PluginRouteApp,
 } from "@sentry/junior-plugin-api";
 import { pluginApiRouteRequestContextSchema } from "@sentry/junior-plugin-api";
-import { dashboardConfigSchema, dashboardIdentitySchema } from "./api/schema";
+import {
+  dashboardConfigSchema,
+  dashboardIdentitySchema,
+  dashboardProfileUpdateSchema,
+} from "./api/schema";
 import {
   dashboardAvatarHeaderAsset,
   dashboardClientAsset,
+  dashboardInstallIconAsset,
   dashboardTailwindAsset,
 } from "./assets";
 import {
@@ -36,7 +44,14 @@ const DEFAULT_AUTH_PATH = "/api/auth";
 const DASHBOARD_CLIENT_VERSION = Date.now().toString(36);
 const DASHBOARD_CLIENT_PATH = "/_junior/dashboard/client.js";
 const DASHBOARD_AVATAR_HEADER_PATH = "/_junior/dashboard/avatar.png";
+const DASHBOARD_INSTALL_ICON_PATH = "/_junior/dashboard/icon-512.png";
+const DASHBOARD_MANIFEST_PATH = "/_junior/dashboard/manifest.webmanifest";
+const DASHBOARD_THEME_COLOR = "#000000";
+const DASHBOARD_BACKGROUND_COLOR = "#000000";
 const LOGIN_NEXT_PARAM = "next";
+const LOCAL_VIEWER_EMAIL = "dev@example.com";
+/** Process-local display names for mock reporting only. */
+const mockDisplayNamesByEmail = new Map<string, string>();
 
 export interface JuniorDashboardOptions {
   agentName?: string;
@@ -326,7 +341,7 @@ function forbidden(request: Request, agentName: string): Response {
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
   <title>${escapeHtml(agentName)} access denied</title>
   <style>
     ${readDashboardTailwind()}
@@ -353,9 +368,7 @@ function forbidden(request: Request, agentName: string): Response {
   return jsonResponse(apiErrorSchema, { error: "forbidden" }, { status: 403 });
 }
 
-function localAuthBypassSession(
-  email = "local-dashboard@localhost.test",
-): DashboardSession {
+function localAuthBypassSession(email = LOCAL_VIEWER_EMAIL): DashboardSession {
   return {
     user: {
       email,
@@ -380,10 +393,26 @@ function bearerSession(email: string): DashboardSession {
   };
 }
 
-function verifiedViewerEmail(session: DashboardSession): string | undefined {
-  return session.user.emailVerified === true
-    ? session.user.email.trim().toLowerCase()
-    : undefined;
+function verifiedSessionEmail(session: DashboardSession): string | undefined {
+  if (session.user.emailVerified !== true) return undefined;
+  const email = session.user.email.trim().toLowerCase();
+  return email || undefined;
+}
+
+/** Build a local mock viewer without creating a durable Junior user. */
+function mockViewerFromSession(session: DashboardSession) {
+  const email = verifiedSessionEmail(session);
+  if (!email) return undefined;
+  const displayName =
+    mockDisplayNamesByEmail.get(email) ??
+    session.user.name?.trim() ??
+    undefined;
+  return {
+    email,
+    id: `mock-user:${email}`,
+    identities: [],
+    ...(displayName ? { displayName } : {}),
+  };
 }
 
 function readAssetUrl(url: URL): string {
@@ -433,17 +462,31 @@ function readDashboardTailwind(): string {
   );
 }
 
-function readDashboardAvatarHeader(): ArrayBuffer {
-  if (dashboardAvatarHeaderAsset) {
-    return Uint8Array.from(Buffer.from(dashboardAvatarHeaderAsset, "base64"))
-      .buffer;
+function readDashboardColorIcon(): ArrayBuffer {
+  const embeddedAsset =
+    dashboardInstallIconAsset || dashboardAvatarHeaderAsset;
+  if (embeddedAsset) {
+    return Uint8Array.from(Buffer.from(embeddedAsset, "base64")).buffer;
   }
 
-  const assetUrl = new URL("./assets/junior-avatar-line.png", import.meta.url);
+  const assetUrl = new URL("./assets/junior-avatar.png", import.meta.url);
   if (!existsSync(assetUrl)) {
-    throw new Error("Junior dashboard avatar asset was not found");
+    throw new Error("Junior dashboard color icon was not found");
   }
   return Uint8Array.from(readFileSync(assetUrl)).buffer;
+}
+
+function readDashboardAvatarHeader(): ArrayBuffer {
+  return readDashboardColorIcon();
+}
+
+function readDashboardInstallIcon(): ArrayBuffer {
+  return readDashboardColorIcon();
+}
+
+/** Use the exact registered dashboard base path so installed launches do not 404. */
+function dashboardStartUrl(basePath: string): string {
+  return basePath;
 }
 
 function dashboardPagePaths(
@@ -477,10 +520,8 @@ function dashboardPagePaths(
       path: basePath === "/" ? "/memories" : `${basePath}/memories`,
     },
     {
-      path:
-        basePath === "/"
-          ? "/settings/api-tokens"
-          : `${basePath}/settings/api-tokens`,
+      nested: true,
+      path: basePath === "/" ? "/settings" : `${basePath}/settings`,
     },
     {
       nested: true,
@@ -496,6 +537,45 @@ function dashboardPagePaths(
   return paths;
 }
 
+function renderManifest(basePath: string, agentName: string): Response {
+  const startUrl = dashboardStartUrl(basePath);
+  return new Response(
+    JSON.stringify({
+      background_color: DASHBOARD_BACKGROUND_COLOR,
+      description: `${agentName} dashboard`,
+      display: "standalone",
+      icons: [
+        {
+          purpose: "any",
+          sizes: "512x512",
+          src: DASHBOARD_INSTALL_ICON_PATH,
+          type: "image/png",
+        },
+      ],
+      name: agentName,
+      scope: startUrl,
+      short_name: agentName,
+      start_url: startUrl,
+      theme_color: DASHBOARD_THEME_COLOR,
+    }),
+    {
+      headers: {
+        "cache-control": "public, max-age=0, must-revalidate",
+        "content-type": "application/manifest+json",
+      },
+    },
+  );
+}
+
+function renderInstallIcon(): Response {
+  return new Response(readDashboardInstallIcon(), {
+    headers: {
+      "cache-control": "public, max-age=0, must-revalidate",
+      "content-type": "image/png",
+    },
+  });
+}
+
 function renderDashboard(basePath: string, agentName: string): Response {
   const encodedAgentName = JSON.stringify(agentName).replace(/</g, "\\u003c");
   return new Response(
@@ -503,7 +583,14 @@ function renderDashboard(basePath: string, agentName: string): Response {
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="${DASHBOARD_THEME_COLOR}" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="${escapeHtml(agentName)}" />
+  <link rel="manifest" href="${DASHBOARD_MANIFEST_PATH}" />
+  <link rel="apple-touch-icon" href="${DASHBOARD_INSTALL_ICON_PATH}" />
   <title>${escapeHtml(agentName)}</title>
   <style>
     ${readDashboardTailwind()}
@@ -691,20 +778,31 @@ export function createDashboardApp(
   }
 
   app.get("/favicon.ico", () => renderFavicon());
+  app.get(DASHBOARD_MANIFEST_PATH, () => renderManifest(basePath, agentName));
+  app.get(DASHBOARD_INSTALL_ICON_PATH, () => renderInstallIcon());
 
   /**
    * Require dashboard auth for every later route; login, Better Auth callbacks,
-   * and favicon are the only registration-order bypasses.
+   * favicon, install manifest, and install icon are the only registration-order
+   * bypasses.
    */
   const requireAuth = async (
     c: Context<{ Variables: Variables }>,
     next: Next,
   ) => {
+    const pathname = new URL(c.req.url).pathname;
     if (!authRequired) {
-      const session = localAuthBypassSession(
-        options.mockConversations ? "morgan@sentry.io" : undefined,
-      );
+      const session = localAuthBypassSession();
       c.set("authSession", session);
+      if (pathname.startsWith("/api/")) {
+        const viewer = options.mockConversations
+          ? mockViewerFromSession(session)
+          : await resolveViewerUser(LOCAL_VIEWER_EMAIL);
+        if (!viewer) {
+          throw new Error("Local dashboard viewer could not be resolved");
+        }
+        c.set("viewer", viewer);
+      }
       await next();
       return;
     }
@@ -720,8 +818,8 @@ export function createDashboardApp(
       !browserSession &&
       token &&
       (c.req.method === "GET" || c.req.method === "HEAD") &&
-      new URL(c.req.url).pathname.startsWith("/api/") &&
-      !new URL(c.req.url).pathname.startsWith("/api/personal-tokens")
+      pathname.startsWith("/api/") &&
+      !pathname.startsWith("/api/personal-tokens")
         ? await authenticatePersonalToken(token)
         : undefined;
     const session =
@@ -736,7 +834,23 @@ export function createDashboardApp(
     }
     const sanitizedSession = sanitizeDashboardSession(session);
     c.set("authSession", sanitizedSession);
-    c.set("verifiedViewerEmail", verifiedViewerEmail(sanitizedSession));
+    // Resolve the canonical user only for authenticated API requests.
+    if (pathname.startsWith("/api/")) {
+      const email = verifiedSessionEmail(sanitizedSession);
+      if (!email) {
+        throw new Error(
+          "Authenticated dashboard session has no verified email",
+        );
+      }
+      // Mock reporting stays local and does not require durable user rows.
+      const viewer = options.mockConversations
+        ? mockViewerFromSession(sanitizedSession)
+        : await resolveViewerUser(email);
+      if (!viewer) {
+        throw new Error("Authenticated dashboard user could not be resolved");
+      }
+      c.set("viewer", viewer);
+    }
     await next();
   };
 
@@ -776,10 +890,77 @@ export function createDashboardApp(
       componentGallery: options.componentGallery === true,
       sentryConversationLinks: hasSentryConversationLinks(),
       timeZone: dashboardTimeZone(),
+      version: JUNIOR_VERSION,
     });
   });
   app.get("/api/me", (c) => {
-    return jsonResponse(dashboardIdentitySchema, c.get("authSession"));
+    const session = c.get("authSession");
+    const viewer = c.get("viewer");
+    return jsonResponse(dashboardIdentitySchema, {
+      user: {
+        email: session.user.email,
+        emailVerified: session.user.emailVerified,
+        name: viewer?.displayName ?? session.user.name,
+      },
+    });
+  });
+  app.patch("/api/me", async (c) => {
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return jsonResponse(
+        apiErrorSchema,
+        { error: "Invalid request body." },
+        { status: 400 },
+      );
+    }
+    const parsed = dashboardProfileUpdateSchema.safeParse(body);
+    if (!parsed.success) {
+      return jsonResponse(
+        apiErrorSchema,
+        { error: "Invalid request body." },
+        { status: 400 },
+      );
+    }
+    const viewer = c.get("viewer");
+    if (!viewer) {
+      return jsonResponse(
+        apiErrorSchema,
+        { error: "Authentication required." },
+        { status: 401 },
+      );
+    }
+    const session = c.get("authSession");
+    // Mock reporting keeps profile edits process-local and out of SQL.
+    if (options.mockConversations) {
+      mockDisplayNamesByEmail.set(viewer.email, parsed.data.displayName);
+      return jsonResponse(dashboardIdentitySchema, {
+        user: {
+          email: session.user.email,
+          emailVerified: session.user.emailVerified,
+          name: parsed.data.displayName,
+        },
+      });
+    }
+    const updated = await updateViewerDisplayName(
+      viewer.id,
+      parsed.data.displayName,
+    );
+    if (!updated) {
+      return jsonResponse(
+        apiErrorSchema,
+        { error: "User not found." },
+        { status: 404 },
+      );
+    }
+    return jsonResponse(dashboardIdentitySchema, {
+      user: {
+        email: session.user.email,
+        emailVerified: session.user.emailVerified,
+        name: updated.displayName,
+      },
+    });
   });
   app.get(DASHBOARD_CLIENT_PATH, () => {
     return new Response(readDashboardClient(), {

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createLocalSource } from "@sentry/junior-plugin-api";
+import { createSlackSource } from "@sentry/junior-plugin-api";
 import {
   getDispatchConversationId,
   getDispatchInputMessageId,
@@ -19,12 +19,10 @@ import {
 } from "@/chat/agent-dispatch/work";
 import { disconnectStateAdapter, getStateAdapter } from "@/chat/state/adapter";
 import { JUNIOR_THREAD_STATE_TTL_MS } from "@/chat/state/ttl";
-import { completedAgentRun } from "@/chat/runtime/agent-run-outcome";
 import { createConversationWorkQueueTestAdapter } from "../fixtures/conversation-work";
 import { processConversationQueueMessage } from "@/chat/task-execution/vercel-callback";
 import { runNextPausedTurn } from "@/chat/task-execution/paused-turn";
 import { wakePausedTurn } from "@/chat/task-execution/turn-wake";
-import { saveTurnCheckpoint } from "@/chat/task-execution/checkpoint";
 import {
   getTurnRecord,
   listTurnSummaries,
@@ -38,8 +36,10 @@ import { coerceThreadConversationState } from "@/chat/state/conversation";
 import { slackApiOutbox } from "../fixtures/slack-api-outbox";
 import { resetSlackApiMockState } from "../msw/handlers/slack-api";
 import { turnCursorKey } from "@/chat/task-execution/turn-cursor-keys";
-import { deliverAssistantMessagesForTest } from "../fixtures/agent-runner";
+import { createModelAgentRunner } from "../fixtures/agent-runner";
+import { createModelStream } from "../fixtures/model-stream";
 import {
+  createAgentDispatchModelHarness as createModelHarness,
   createAgentDispatchTestRecord as createDispatch,
   createAgentDispatchTestRuntime as createDispatchRuntime,
   createAgentDispatchWorkerContext as createContext,
@@ -62,33 +62,14 @@ describe("agent dispatch recovery", () => {
 
   it("projects the diagnostic from a terminal model failure", async () => {
     const dispatch = await createDispatch("model-failure-detail");
-    const runtime = createDispatchRuntime({
-      agentRunner: {
-        run: vi.fn(async (request) => {
-          await request.durability.onInputCommitted?.();
-          return completedAgentRun({
-            text: "",
-            piMessages: [
-              {
-                role: "user",
-                content: [{ type: "text", text: dispatch.input }],
-                timestamp: dispatch.createdAtMs,
-              },
-            ],
-            diagnostics: {
-              assistantMessageCount: 0,
-              errorMessage: "Model provider quota exhausted",
-              modelId: "test-model",
-              outcome: "provider_error",
-              toolCalls: [],
-              toolErrorCount: 0,
-              toolResultCount: 0,
-              usedPrimaryText: false,
-            },
-          });
-        }),
-      },
-    });
+    const { runtime } = createModelHarness(
+      createModelStream([
+        {
+          type: "error",
+          errorMessage: "Model provider quota exhausted",
+        },
+      ]),
+    );
     await expect(
       runtime.runDispatchTurn(dispatch, { ack: vi.fn(async () => {}) }),
     ).resolves.toMatchObject({
@@ -144,84 +125,23 @@ describe("agent dispatch recovery", () => {
           signature: "v1=test",
         },
       },
-      createLocalSource("local:cli:dispatch-origin"),
+      createSlackSource({
+        teamId: "T123",
+        channelId: "C123",
+        visibility: "private",
+      }),
       { label: "Scheduled task", detail: "Weekly" },
     );
     const queue = createConversationWorkQueueTestAdapter();
     const state = getStateAdapter();
     await state.connect();
-    let runCount = 0;
-    const agentRunner = {
-      run: vi.fn(async (request) => {
-        runCount += 1;
-        if (runCount === 1) {
-          await request.durability.onInputCommitted?.();
-          const session = await saveTurnCheckpoint({
-            mode: "paused",
-            reason: "yield",
-            actor: dispatch.actor,
-            conversationId: request.conversationId,
-            sliceId: 3,
-            destination: dispatch.destination,
-            dispatchId: dispatch.id,
-            errorMessage: "Conversation worker yielded",
-            messages: [
-              {
-                role: "user",
-                content: [{ type: "text", text: dispatch.input }],
-                timestamp: dispatch.createdAtMs,
-              },
-            ],
-            turnId: request.turnId,
-            source: dispatch.source,
-            surface: "api",
-          });
-          if (!session) {
-            throw new Error("Expected a durable yielded dispatch session");
-          }
-          return {
-            status: "suspended" as const,
-            resumeVersion: session.version,
-          };
-        }
-
-        expect(request.routing).toMatchObject({
-          actor: dispatch.actor,
-          credentialContext: {
-            actor: dispatch.actor,
-            subject: dispatch.credentialSubject,
-          },
-          dispatch: {
-            id: dispatch.id,
-            plugin: dispatch.plugin,
-            replyAttribution: dispatch.replyAttribution,
-          },
-          source: createLocalSource("local:cli:dispatch-origin"),
-          surface: "api",
-        });
-        expect(request.input.messageText).toBe(dispatch.input);
-        expect(request.input.conversationContext).toBeUndefined();
-        expect(JSON.stringify(request.input.piMessages)).not.toContain(
-          "expose system credentials",
-        );
-        const piMessages = await deliverAssistantMessagesForTest(request, [
-          { text: "Resumed scheduled digest" },
-        ]);
-        return completedAgentRun({
-          text: "Resumed scheduled digest",
-          piMessages,
-          diagnostics: {
-            assistantMessageCount: 1,
-            modelId: "test-model",
-            outcome: "success",
-            toolCalls: [],
-            toolErrorCount: 0,
-            toolResultCount: 0,
-            usedPrimaryText: true,
-          },
-        });
-      }),
-    };
+    const agentRunner = createModelAgentRunner(
+      createModelStream([
+        { type: "toolCall", name: "systemTime", arguments: {} },
+        { type: "text", text: "Resumed scheduled digest" },
+      ]),
+    );
+    const runAgent = vi.spyOn(agentRunner, "run");
     const runtime = createDispatchRuntime({
       agentRunner,
       wakePausedTurn: async (request) => {
@@ -261,6 +181,8 @@ describe("agent dispatch recovery", () => {
       await processConversationQueueMessage(queue.takeMessage(), {
         queue,
         run: route,
+        // Pause the first slice after the tool result is saved.
+        softYieldAfterMs: deliveries === 1 ? 0 : undefined,
         state,
       });
       if (deliveries === 1) {
@@ -298,14 +220,13 @@ describe("agent dispatch recovery", () => {
           storedSession as Record<string, unknown>;
         await state.set(
           sessionKey,
-          preCutoverSession,
+          // Older records can lack dispatchId and already be on slice 3.
+          { ...preCutoverSession, sliceId: 3 },
           JUNIOR_THREAD_STATE_TTL_MS,
         );
       }
     }
 
-    expect(slackWorker).not.toHaveBeenCalled();
-    expect(agentRunner.run).toHaveBeenCalledTimes(2);
     expect(slackApiOutbox.messages()).toHaveLength(1);
     expect(slackApiOutbox.messages()[0]?.params).toMatchObject({
       text: "Resumed scheduled digest\n\nScheduled task · Weekly",
@@ -333,6 +254,28 @@ describe("agent dispatch recovery", () => {
       resultMessageTs: expect.any(String),
       status: "completed",
     });
+    expect(slackWorker).not.toHaveBeenCalled();
+    expect(runAgent).toHaveBeenCalledTimes(2);
+    const resumedRun = runAgent.mock.calls[1]?.[0];
+    expect(resumedRun).toMatchObject({
+      actor: dispatch.actor,
+      credentialContext: {
+        actor: dispatch.actor,
+        subject: dispatch.credentialSubject,
+      },
+      dispatch: {
+        id: dispatch.id,
+        plugin: dispatch.plugin,
+        replyAttribution: dispatch.replyAttribution,
+      },
+      source: dispatch.source,
+      surface: "api",
+    });
+    expect(resumedRun?.instruction.text).toBe(dispatch.input);
+    expect(resumedRun?.instruction.context).toBeUndefined();
+    expect(JSON.stringify(resumedRun?.history)).not.toContain(
+      "expose system credentials",
+    );
   });
 
   it("repairs a pending mailbox append without owning execution recovery", async () => {

@@ -19,8 +19,15 @@ The reliability rules are small:
 
 - The conversation lease is the only owner for queue-driven execution.
 - A turn may run, pause at a committed boundary, complete, or fail.
-- Timeout, retry, and yield may continue only after the boundary advances;
-  parking the same boundary twice fails the turn.
+- Soft yield and retry may continue only after the boundary advances; parking
+  the same boundary twice fails the turn. Hard timeout may re-park without new
+  work so a slow model call can try again on a later wake. The slice limit still
+  stops endless attempts.
+- After a hard timeout park, the worker hands the lease back. The next slice
+  starts from a fresh queue wake and full request deadline, not leftover scraps.
+- A paused turn can continue under the current lease while the host request has
+  time left for soft yield or retry. When that deadline is spent, the worker
+  releases the lease.
 - A process can stop while a turn runs. The next worker stops that turn and
   records the error. The user can start new work. Committed SQL history remains.
 - A paused turn does not take a second lock. OAuth can run outside the queue and
@@ -117,23 +124,34 @@ new turn starts, `interrupt` delivery is handled before queued `defer` delivery.
 ## Integration Contract
 
 `packages/junior/tests/integration/durable-queue.test.ts` uses the same
-`createConversationWork` composition as production. It replaces agent behavior
-and Slack HTTP. It uses the real `StateAdapter` with memory storage. It uses an
-in-memory queue that implements the one-method queue interface. Separate tests
-cover Vercel signing and options. They also cover `StateAdapter` storage, keys,
-queues, and locks. The cases describe the expected product behavior:
+`createConversationWork` composition as production. These tests must not replace
+Junior-owned runtime behavior. They may fake only model generation at the
+`executeAgentRun` stream boundary and Slack I/O at the adapter boundary. The
+agent runtime, resume logic, checkpoint, worker, lease, mailbox, and queue
+routing must run unchanged. The memory `StateAdapter` and in-memory queue
+implement production ports. Separate contract tests cover provider storage,
+Vercel signing, and Vercel options. The cases own these product outcomes (see issue #1398):
 
-- **Success:** accepted input runs once, commits SQL history, delivers once, and
-  drains.
-- **Interrupts:** an explicit instruction received during a run steers the active
-  turn; an authorization request parks the turn without retrying it.
-- **Failures:** failure before input commit retries without duplicate delivery;
-  a timed-out turn that repeats its committed boundary stops; an expired worker
-  lease stops its stranded running turn while preserving committed history; and
-  repeated agent failure stops at the retry limit with at most one visible
-  fallback. Each stopped state must allow a later user request to complete.
+- **Happy path:** one mention runs once, delivers one reply, and leaves the
+  conversation free for the next mention.
+- **Long turn survives host limit:** mid-work under a spent host deadline parks
+  at a safe boundary, leaves the host request, and finishes on a fresh queue wake
+  with one final reply.
+- **Accepted reply is terminal:** after Slack accepts a tool-free reply, the turn
+  completes once with no second post (deadline during accept, or seeded
+  dead-worker residue after accept).
+- **Worker dies mid-run:** an expired lease with no accepted reply fails the turn
+  once, keeps committed history, and leaves the conversation free.
+- **Transient agent failure:** failure before input commit retries without a
+  Slack post; the retry limit stops with at most one fallback.
+- **Mid-turn steer:** a second `@` mention folds into the active turn and still
+  produces one final reply.
+
+Each terminal case must allow a later user mention to complete. Drive live Slack
+ingress when the path can create the state. Seed only dead-worker residue that a
+live process cannot leave behind in-process.
 
 Broader heartbeat scheduling remains in
-`packages/junior/tests/integration/heartbeat.test.ts`. Component tests own
-isolated transition details; they should not duplicate these end-to-end
-contracts.
+`packages/junior/tests/integration/heartbeat.test.ts`. Auth park and OAuth resume
+live in their own suites. Component tests own isolated transition details; they
+should not duplicate these end-to-end contracts.

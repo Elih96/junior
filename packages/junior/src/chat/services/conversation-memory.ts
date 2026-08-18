@@ -11,10 +11,7 @@ import {
   estimateTextTokens,
   getConversationContextCompactionTriggerTokens,
 } from "@/chat/services/context-budget";
-import {
-  fallbackShortTitle,
-  generateShortTitle,
-} from "@/chat/services/short-title";
+
 import {
   parseSlackMessageTs,
   type SlackMessageTs,
@@ -41,7 +38,6 @@ export interface ConversationMemoryService {
       runId?: string;
     },
   ) => Promise<void>;
-  generateThreadTitle: (sourceText: string) => Promise<string>;
 }
 
 export function generateConversationId(
@@ -72,22 +68,24 @@ function buildImageContextSuffix(
     return "";
   }
 
-  return ` [image context: ${summaries.join(" | ")}]`;
+  return ` [image context: ${escapeXml(summaries.join(" | "))}]`;
 }
 
 function renderConversationMessageLine(
   message: ConversationMessage,
   conversation?: ThreadConversationState,
 ): string {
-  const displayName = conversationAuthorDisplayName(message);
-  const text = message.text
-    .replace(/\s+/g, " ")
-    .slice(0, CONTEXT_MAX_MESSAGE_CHARS);
+  const displayName = escapeXml(conversationAuthorDisplayName(message));
+  const text = escapeXml(
+    message.text.replace(/\s+/g, " ").slice(0, CONTEXT_MAX_MESSAGE_CHARS),
+  );
 
   const markers: string[] = [];
   if (message.meta?.replied === false) {
     markers.push(
-      `assistant skipped: ${message.meta?.skippedReason ?? "no-reply route"}`,
+      escapeXml(
+        `assistant skipped: ${message.meta?.skippedReason ?? "no-reply route"}`,
+      ),
     );
   }
   if (message.meta?.explicitMention) {
@@ -154,6 +152,7 @@ export function upsertConversationMessage(
 export function recordDeliveredAssistantMessage(args: {
   conversation: ThreadConversationState;
   sessionId: string;
+  source?: "slack" | "web";
   text: string;
   userMessageId?: string;
 }): string {
@@ -178,6 +177,7 @@ export function recordDeliveredAssistantMessage(args: {
     },
     meta: {
       replied: true,
+      ...(args.source ? { source: args.source } : {}),
     },
   });
   return messageId;
@@ -253,7 +253,7 @@ export function buildConversationContext(
     if (lines.length > 0) {
       lines.push("");
     }
-    lines.push("<thread-transcript>");
+    lines.push('<thread-context authority="evidence-only">');
     for (const [index, message] of messages.entries()) {
       const author = escapeXml(conversationAuthorDisplayName(message));
       const actorIdAttr = message.author?.userId
@@ -269,9 +269,41 @@ export function buildConversationContext(
         "  </message>",
       );
     }
-    lines.push("</thread-transcript>");
+    lines.push("</thread-context>");
   }
   return lines.join("\n");
+}
+
+const THREAD_CONTEXT_OPEN = '<thread-context authority="evidence-only">';
+const THREAD_CONTEXT_CLOSE = "</thread-context>";
+
+/**
+ * Keep ambient history as one evidence-only block.
+ *
+ * When durable context already ends a thread-context envelope, append message
+ * lines inside that envelope. Otherwise wrap the new messages in one envelope.
+ */
+export function appendThreadContextMessages(
+  baseContext: string | undefined,
+  messageLines: string[],
+): string | undefined {
+  const base = baseContext?.trim();
+  if (messageLines.length === 0) {
+    return base || undefined;
+  }
+  const entryBlock = messageLines.join("\n");
+  if (!base) {
+    return [THREAD_CONTEXT_OPEN, entryBlock, THREAD_CONTEXT_CLOSE].join("\n");
+  }
+  const closeIdx = base.lastIndexOf(THREAD_CONTEXT_CLOSE);
+  if (closeIdx >= 0) {
+    const before = base.slice(0, closeIdx).replace(/\s*$/, "");
+    const after = base.slice(closeIdx);
+    return `${before}\n${entryBlock}\n${after}`;
+  }
+  return [base, "", THREAD_CONTEXT_OPEN, entryBlock, THREAD_CONTEXT_CLOSE].join(
+    "\n",
+  );
 }
 
 function pruneCompactions(
@@ -361,19 +393,6 @@ async function summarizeConversationChunk(
   }
 
   return transcript.slice(0, 2800);
-}
-
-async function generateThreadTitleWithDeps(
-  sourceText: string,
-  deps: ConversationMemoryDeps,
-): Promise<string> {
-  const title = await generateShortTitle({
-    completeText: deps.completeText,
-    kind: "conversation",
-    sourceText,
-  });
-  // Keep the historical non-empty contract for conversation title callers.
-  return title ?? fallbackShortTitle(sourceText, "Conversation");
 }
 
 /** Return the earliest human-authored message known for a thread. */
@@ -467,15 +486,13 @@ async function compactConversationIfNeededWithDeps(
   }
 }
 
-/** Build the service that owns durable conversation memory compaction and titles. */
+/** Build the service that owns durable conversation memory compaction. */
 export function createConversationMemoryService(
   deps: ConversationMemoryDeps,
 ): ConversationMemoryService {
   return {
     compactConversationIfNeeded: async (conversation, context) =>
       await compactConversationIfNeededWithDeps(conversation, context, deps),
-    generateThreadTitle: async (sourceText) =>
-      await generateThreadTitleWithDeps(sourceText, deps),
   };
 }
 

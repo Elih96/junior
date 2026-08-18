@@ -64,6 +64,7 @@ import {
 } from "@/chat/services/pending-auth";
 import { escapeXml } from "@/chat/xml";
 import type { WaitUntilFn } from "@/handlers/types";
+import type { ConversationWorkQueue } from "@/chat/task-execution/queue";
 import { wakePausedTurn } from "@/chat/task-execution/turn-wake";
 import {
   resolveTurnSessionRouting,
@@ -77,9 +78,13 @@ import { getSqlExecutor } from "@/chat/db";
 import { upsertIdentity, upsertLinkedIdentity } from "@/chat/identities/sql";
 import { lookupSlackUserProfile } from "@/chat/slack/users";
 import { parseSlackUserId } from "@/chat/slack/ids";
+import { deleteWebAuthorization } from "@/chat/api-turns/authorization";
+import { botConfig } from "@/chat/config";
 
 interface OAuthCallbackOptions {
   agentRunner: AgentRunner;
+  /** Queue used to wake parked web turns after authorization completes. */
+  conversationWorkQueue?: ConversationWorkQueue;
 }
 
 /**
@@ -414,28 +419,27 @@ async function resumeOAuthSessionRecordTurn(
         messageTs: lockedMessageTs,
         inputMessageIds: [lockedUserMessage.id],
         replyContext: {
-          input: {
-            conversationContext: lockedConversationContext,
-            // Pi history is SQL-authoritative: the resumed run reads its
-            // session record first and falls back to the step projection.
-            piMessages: await loadProjection({
-              conversationId: stored.resumeConversationId!,
-            }),
+          instruction: {
+            text: lockedUserMessage.text,
+            context: lockedConversationContext,
             ...getTurnUserReplyAttachmentContext(lockedUserMessage),
           },
-          routing: {
-            credentialContext: {
-              actor: {
-                type: "user",
-                userId: actor.userId,
-              },
+          // Pi history is SQL-authoritative: the resumed run reads its
+          // session record first and falls back to the step projection.
+          history: await loadProjection({
+            conversationId: stored.resumeConversationId!,
+          }),
+          credentialContext: {
+            actor: {
+              type: "user",
+              userId: actor.userId,
             },
-            actor,
-            destination,
-            source: routing.source,
-            toolChannelId: stored.channelId!,
           },
-          policy: {
+          actor,
+          destination,
+          source: routing.source,
+          toolChannelId: stored.channelId!,
+          environment: {
             locationConfiguration: lockedLocationConfiguration,
           },
           state: {
@@ -751,7 +755,10 @@ export async function GET(
     );
   }
 
-  if (stored.destination?.platform !== "local") {
+  if (
+    stored.destination?.platform !== "local" &&
+    stored.source?.platform !== "web"
+  ) {
     waitUntil(async () => {
       try {
         await publishAppHomeView(
@@ -765,12 +772,55 @@ export async function GET(
     });
   }
 
+  const resumesWebTurn = Boolean(
+    stored.source?.platform === "web" &&
+    stored.destination &&
+    stored.resumeConversationId &&
+    stored.resumeSessionId,
+  );
   const resumesAgentTurn = Boolean(
     stored.destination?.platform !== "local" &&
     stored.resumeConversationId &&
     stored.resumeSessionId,
   );
-  if (resumesAgentTurn) {
+  if (resumesWebTurn) {
+    waitUntil(async () => {
+      const turn = await getTurnRecord(
+        stored.resumeConversationId!,
+        stored.resumeSessionId!,
+      );
+      // Always clear the dashboard prompt. A superseded/abandoned turn must
+      // not leave a stale connect banner after OAuth completes late.
+      await deleteWebAuthorization({
+        actorId: stored.userId,
+        conversationId: stored.resumeConversationId!,
+      });
+      if (!turn || turn.state !== "paused" || turn.resumeReason !== "auth") {
+        return;
+      }
+      await recordAuthorizationCompleted({
+        conversationId: stored.resumeConversationId!,
+        kind: "plugin",
+        provider: stored.provider,
+        actorId: stored.userId,
+        authorizationId: pluginAuthorizationId({
+          provider: stored.provider,
+          sessionId: stored.resumeSessionId!,
+        }),
+      });
+      await wakePausedTurn(
+        {
+          conversationId: stored.resumeConversationId!,
+          destination: stored.destination!,
+          turnId: stored.resumeSessionId!,
+          expectedVersion: turn.version,
+        },
+        options.conversationWorkQueue
+          ? { queue: options.conversationWorkQueue }
+          : undefined,
+      );
+    });
+  } else if (resumesAgentTurn) {
     waitUntil(() =>
       withLogContext(
         { conversationId: stored.resumeConversationId },
@@ -806,15 +856,18 @@ export async function GET(
     );
   }
 
+  const botName = botConfig.userName;
   const statusMessage =
-    stored.destination?.platform === "local"
-      ? "Your request is continuing in the local Junior client."
-      : resumesAgentTurn
-        ? "Your request is being processed in Slack."
-        : `Your ${providerLabel} account is connected.`;
+    stored.destination?.platform === "local" && !resumesWebTurn
+      ? `Your request is continuing in the local ${botName} client.`
+      : resumesWebTurn
+        ? `Your request is continuing in ${botName}.`
+        : resumesAgentTurn
+          ? "Your request is being processed in Slack."
+          : `Your ${providerLabel} account is connected.`;
   const footerMessage =
-    stored.destination?.platform === "local"
-      ? "You can close this tab and return to Junior."
+    stored.destination?.platform === "local" || resumesWebTurn
+      ? `You can close this tab and return to ${botName}.`
       : "You can close this tab and return to Slack.";
   return htmlCallbackResponse(
     escapeXml(`${providerLabel} account connected`),

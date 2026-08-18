@@ -7,6 +7,7 @@ import {
   resourceEventInputSchema,
 } from "@sentry/junior-plugin-api";
 import type {
+  InvocationContext,
   PluginMcp,
   PluginReadState,
   PluginRoute,
@@ -21,6 +22,7 @@ import type {
   PluginRegistration,
   SlackToolRegistrationHookContext,
   ToolRegistrationHookContext,
+  User,
   UserPromptContext,
 } from "@sentry/junior-plugin-api";
 import { getDb } from "@/chat/db";
@@ -33,10 +35,11 @@ import { createPluginEmbedder, createPluginModel } from "@/chat/plugins/model";
 import type { PluginPromptContributionContext } from "@/chat/plugins/prompt";
 import { createPluginState } from "@/chat/plugins/state";
 import { SANDBOX_WORKSPACE_ROOT } from "@/chat/sandbox/paths";
+import { runNonInteractiveCommand } from "@/chat/sandbox/noninteractive-command";
 import type { AnyToolDefinition } from "@/chat/tools/definition";
 import { getDashboardConversationLink } from "@/chat/slack/dashboard-link";
 import { canRouteResourceEvents } from "@/chat/resource-events/workspace";
-import { getSlackToolContext } from "@/chat/slack/tools/context";
+import { getSlackToolContext } from "@/chat/slack/tool-support/context";
 import { resolveViewerUser } from "@/chat/plugins/viewer";
 import type { ToolRuntimeContext } from "@/chat/tools/types";
 import type {
@@ -44,9 +47,11 @@ import type {
   SandboxWorkspace,
 } from "@/chat/sandbox/workspace";
 import { createSlackDirectCredentialSubject } from "@/chat/credentials/subject";
-import { resolveChannelCapabilities } from "@/chat/slack/tools/channel-capabilities";
+import { resolveChannelCapabilities } from "@/chat/slack/tool-support/channel-capabilities";
 import type { Actor } from "@/chat/actor";
 import { z } from "zod";
+import { workspaceRepoCheckoutPath } from "@/chat/workspaces/checkout-path";
+import { listWorkspaceNamesByRepository } from "@/chat/workspaces/store";
 
 /** Signal that a plugin intentionally denied a tool execution. */
 export class PluginHookDeniedError extends Error {
@@ -89,6 +94,14 @@ export interface PluginHookRunner {
   afterMcpTool(input: AfterMcpToolHookInput): Promise<void>;
   beforeToolExecute(input: ToolHookInput): Promise<ToolHookResult>;
   prepareSandbox(workspace: SandboxWorkspace): Promise<void>;
+  prepareWorkspace(
+    workspace: SandboxWorkspace,
+    repos: Array<{
+      provider: string;
+      repo: string;
+    }>,
+    signal?: AbortSignal,
+  ): Promise<void>;
 }
 
 let registeredPlugins: PluginRegistration[] = [];
@@ -146,6 +159,47 @@ function systemPromptPluginContext(plugin: PluginRegistration) {
   };
 }
 
+/** Bind Source, Destination, and Actor for one plugin invocation. */
+function pluginInvocationContext(
+  context: Pick<
+    ToolRuntimeContext,
+    "conversationId" | "destination" | "actor" | "source"
+  >,
+): InvocationContext {
+  const common = { conversationId: context.conversationId };
+  switch (context.source.platform) {
+    case "slack": {
+      if (context.destination.platform !== "slack") {
+        throw new TypeError("Slack plugin context requires Slack destination");
+      }
+      return {
+        ...common,
+        actor: context.actor?.platform === "slack" ? context.actor : undefined,
+        destination: context.destination,
+        source: context.source,
+      };
+    }
+    case "local": {
+      if (context.destination.platform !== "local") {
+        throw new TypeError("Local plugin context requires local destination");
+      }
+      return {
+        ...common,
+        actor: context.actor?.platform === "local" ? context.actor : undefined,
+        destination: context.destination,
+        source: context.source,
+      };
+    }
+    case "web":
+      return {
+        ...common,
+        actor: context.actor?.platform === "web" ? context.actor : undefined,
+        destination: context.destination,
+        source: context.source,
+      };
+  }
+}
+
 function invocationPluginContext(
   plugin: PluginRegistration,
   context: Pick<
@@ -174,27 +228,9 @@ function invocationPluginContext(
     text: context.userText ?? "",
     state: createPluginState(plugin.manifest.name),
   };
-  if (context.source.platform === "slack") {
-    if (context.destination.platform !== "slack") {
-      throw new TypeError(
-        "Slack plugin prompt context requires Slack destination",
-      );
-    }
-    return {
-      ...common,
-      destination: context.destination,
-      actor: context.actor?.platform === "slack" ? context.actor : undefined,
-    };
-  }
-  if (context.destination.platform !== "local") {
-    throw new TypeError(
-      "Local plugin prompt context requires local destination",
-    );
-  }
   return {
     ...common,
-    destination: context.destination,
-    actor: context.actor?.platform === "local" ? context.actor : undefined,
+    ...pluginInvocationContext(context),
   };
 }
 
@@ -366,6 +402,30 @@ export function getPlugins(): PluginRegistration[] {
   return [...registeredPlugins];
 }
 
+/** Apply plugin Markdown rewrites before destination delivery formatting. */
+export function applyPluginFormatMarkdown(text: string): string {
+  let transformed = text;
+  for (const plugin of getPlugins()) {
+    const hook = plugin.hooks?.formatMarkdown;
+    if (!hook) {
+      continue;
+    }
+    try {
+      const next = hook({ text: transformed });
+      if (typeof next === "string") {
+        transformed = next;
+      }
+    } catch (error) {
+      // Fail open: reply delivery must not depend on optional provider formatting.
+      logWarn("plugin.format_markdown.hook.failed", {
+        "app.plugin.name": plugin.manifest.name,
+        "exception.message": safeErrorMessage(error),
+      });
+    }
+  }
+  return transformed;
+}
+
 /** Collect stable plugin prompt contributions for the static system prompt. */
 export async function getPluginSystemPromptContributions(
   source: ToolRuntimeContext["source"],
@@ -381,7 +441,8 @@ export async function getPluginSystemPromptContributions(
     try {
       const pluginContributions = await hook({
         ...systemPromptPluginContext(plugin),
-        platform: source.platform,
+        // Plugin system prompts only distinguish Slack vs non-Slack surfaces.
+        platform: source.platform === "slack" ? "slack" : "local",
       });
       const result =
         systemPromptMessageArraySchema.safeParse(pluginContributions);
@@ -559,54 +620,64 @@ export function getPluginTools(
     };
     const resolveActor =
       context.resolveActorIdentity ?? (async () => undefined);
+    const common = {
+      ...basePluginContext(plugin),
+      ...(annotations ? { annotations } : {}),
+      conversationId: context.conversationId,
+      userText: context.userText,
+      embedder: createPluginEmbedder(pluginName),
+      egress: context.egress,
+      ...(mcp ? { mcp } : {}),
+      model: createPluginModel(pluginName, plugin.model),
+      resourceEvents,
+      sandbox,
+      state: createPluginState(pluginName),
+      users: { resolveActor },
+      workspaces: {
+        async findByRepository(input: { provider: string; repo: string }) {
+          return await listWorkspaceNamesByRepository(getDb(), input);
+        },
+      },
+    };
     let pluginContext: ToolRegistrationHookContext;
-    if (context.source.platform === "slack") {
-      if (context.destination.platform !== "slack") {
-        throw new TypeError(
-          "Slack plugin tool context requires Slack destination",
-        );
-      }
-      pluginContext = {
-        ...basePluginContext(plugin),
-        actor: context.actor?.platform === "slack" ? context.actor : undefined,
-        conversationId: context.conversationId,
-        ...(annotations ? { annotations } : {}),
-        destination: context.destination,
-        slack: slackContext!,
-        source: context.source,
-        userText: context.userText,
-        embedder: createPluginEmbedder(pluginName),
-        egress: context.egress,
-        ...(mcp ? { mcp } : {}),
-        model: createPluginModel(pluginName, plugin.model),
-        resourceEvents,
-        sandbox,
-        state: createPluginState(pluginName),
-        users: { resolveActor },
-      };
-    } else {
-      if (context.destination.platform !== "local") {
-        throw new TypeError(
-          "Local plugin tool context requires local destination",
-        );
-      }
-      pluginContext = {
-        ...basePluginContext(plugin),
-        actor: context.actor?.platform === "local" ? context.actor : undefined,
-        conversationId: context.conversationId,
-        ...(annotations ? { annotations } : {}),
-        destination: context.destination,
-        source: context.source,
-        userText: context.userText,
-        embedder: createPluginEmbedder(pluginName),
-        egress: context.egress,
-        ...(mcp ? { mcp } : {}),
-        model: createPluginModel(pluginName, plugin.model),
-        resourceEvents,
-        sandbox,
-        state: createPluginState(pluginName),
-        users: { resolveActor },
-      };
+    switch (context.source.platform) {
+      case "slack":
+        if (context.destination.platform !== "slack") {
+          throw new TypeError(
+            "Slack plugin context requires Slack destination",
+          );
+        }
+        pluginContext = {
+          ...common,
+          actor:
+            context.actor?.platform === "slack" ? context.actor : undefined,
+          destination: context.destination,
+          slack: slackContext!,
+          source: context.source,
+        };
+        break;
+      case "local":
+        if (context.destination.platform !== "local") {
+          throw new TypeError(
+            "Local plugin context requires local destination",
+          );
+        }
+        pluginContext = {
+          ...common,
+          actor:
+            context.actor?.platform === "local" ? context.actor : undefined,
+          destination: context.destination,
+          source: context.source,
+        };
+        break;
+      case "web":
+        pluginContext = {
+          ...common,
+          actor: context.actor?.platform === "web" ? context.actor : undefined,
+          destination: context.destination,
+          source: context.source,
+        };
+        break;
     }
     const pluginTools = hook(pluginContext);
     const namespace = pluginToolNamespace(pluginName);
@@ -1190,6 +1261,48 @@ export async function getPluginOperationalReports(
   return reports;
 }
 
+/** Collect person-scoped plugin reports for one profile subject. */
+export async function getPluginProfileReports(args: {
+  nowMs: number;
+  subject: User;
+  viewer: User;
+}): Promise<PluginOperationalReport[]> {
+  const reports: PluginOperationalReport[] = [];
+  for (const plugin of getPlugins()) {
+    const pluginName = plugin.manifest.name;
+    const hook = plugin.hooks?.profileReport;
+    if (!hook) {
+      continue;
+    }
+    try {
+      const state = createPluginState(pluginName);
+      const report = await hook({
+        ...basePluginContext(plugin),
+        nowMs: args.nowMs,
+        state: pluginReadState(state),
+        subject: args.subject,
+        viewer: args.viewer,
+      });
+      if (!report) {
+        continue;
+      }
+      reports.push(
+        sanitizeOperationalReport({
+          pluginName,
+          report,
+        }),
+      );
+    } catch (error) {
+      const log = createPluginLogger(pluginName);
+      log.error("Plugin profile report failed", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      // Keep profile usable when one plugin fails; skip the failed card.
+    }
+  }
+  return reports;
+}
+
 function normalizeEnv(value: unknown): Record<string, string> {
   if (!isRecord(value)) {
     return {};
@@ -1203,7 +1316,19 @@ function normalizeEnv(value: unknown): Record<string, string> {
   return env;
 }
 
-function createSandboxCapability(workspace: SandboxWorkspace): PluginSandbox {
+function preparationSignal(
+  inputSignal?: AbortSignal,
+  ownerSignal?: AbortSignal,
+): AbortSignal | undefined {
+  if (!inputSignal) return ownerSignal;
+  if (!ownerSignal) return inputSignal;
+  return AbortSignal.any([inputSignal, ownerSignal]);
+}
+
+function createSandboxCapability(
+  workspace: SandboxWorkspace,
+  ownerSignal?: AbortSignal,
+): PluginSandbox {
   return {
     root: SANDBOX_WORKSPACE_ROOT,
     juniorRoot: `${SANDBOX_WORKSPACE_ROOT}/.junior`,
@@ -1211,7 +1336,11 @@ function createSandboxCapability(workspace: SandboxWorkspace): PluginSandbox {
       return (await workspace.readFileToBuffer({ path: filePath })) ?? null;
     },
     async run(input: SandboxCommandInput) {
-      const result = await workspace.runCommand(input);
+      const signal = preparationSignal(input.signal, ownerSignal);
+      const result = await runNonInteractiveCommand(workspace, {
+        ...input,
+        ...(signal ? { signal } : {}),
+      });
       return {
         exitCode: result.exitCode,
         stdout: result.stdout,
@@ -1281,6 +1410,57 @@ export function createPluginHookRunner(
               error instanceof Error ? error.message : String(error),
           });
         }
+      }
+    },
+    async prepareWorkspace(sandbox, repos, signal) {
+      const preparers = new Set(
+        loaded
+          .filter((plugin) => plugin.hooks?.workspacePrepare)
+          .map((plugin) => plugin.manifest.name),
+      );
+      const unhandledProviders = [
+        ...new Set(
+          repos
+            .map((repo) => repo.provider)
+            .filter((provider) => !preparers.has(provider)),
+        ),
+      ].sort();
+      if (unhandledProviders.length > 0) {
+        throw new Error(
+          `Workspace repository providers have no preparation hook: ${unhandledProviders.join(", ")}`,
+        );
+      }
+
+      const selectedRepos = repos.map((repo) => ({
+        provider: repo.provider,
+        repo: repo.repo,
+        path: workspaceRepoCheckoutPath(repo.repo),
+      }));
+      const paths = new Set<string>();
+      for (const entry of selectedRepos) {
+        const key = entry.path.toLowerCase();
+        if (paths.has(key)) {
+          throw new Error(`Workspace checkout path collision: ${entry.path}`);
+        }
+        paths.add(key);
+      }
+
+      const sandboxCapability = createSandboxCapability(sandbox, signal);
+      for (const plugin of loaded) {
+        const hook = plugin.hooks?.workspacePrepare;
+        if (!hook) continue;
+        const selected = selectedRepos
+          .filter((repo) => repo.provider === plugin.manifest.name)
+          .map((repo) => ({
+            path: repo.path,
+            repo: repo.repo,
+          }));
+        if (selected.length === 0) continue;
+        await hook({
+          ...basePluginContext(plugin),
+          repos: selected,
+          sandbox: sandboxCapability,
+        });
       }
     },
     async prepareSandbox(sandbox) {

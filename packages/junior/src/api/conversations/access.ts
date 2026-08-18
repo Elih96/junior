@@ -1,3 +1,4 @@
+import type { User } from "@sentry/junior-plugin-api";
 import { eq, inArray } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { canExposeConversationPayload } from "@/chat/conversation-privacy";
@@ -8,6 +9,7 @@ import {
   juniorIdentities,
 } from "@/db/schema";
 import type { JuniorDestinationVisibility } from "@/db/schema/destinations";
+import { conversationIdsWithParticipantUser } from "./membership";
 
 const rootConversation = alias(juniorConversations, "access_root_conversation");
 const rootDestination = alias(juniorDestinations, "access_root_destination");
@@ -23,11 +25,10 @@ export interface ConversationAccess {
 export async function readConversationAccessFromSql(
   db: JuniorDatabase,
   conversationIds: readonly string[],
-  verifiedViewerEmail?: string,
+  viewer?: User,
 ): Promise<Map<string, ConversationAccess>> {
   if (conversationIds.length === 0) return new Map();
-  const normalizedViewerEmail =
-    verifiedViewerEmail?.trim().toLowerCase() || undefined;
+  const normalizedViewerEmail = viewer?.email.trim().toLowerCase() || undefined;
 
   const rows = await db
     .select({
@@ -40,6 +41,7 @@ export async function readConversationAccessFromSql(
       visibility: rootDestination.visibility,
       rootEmailNormalized: rootIdentity.emailNormalized,
       rootEmailVerified: rootIdentity.emailVerified,
+      rootUserId: rootIdentity.userId,
     })
     .from(juniorConversations)
     .leftJoin(
@@ -59,6 +61,22 @@ export async function readConversationAccessFromSql(
     )
     .where(inArray(juniorConversations.conversationId, [...conversationIds]));
 
+  const membershipConversationIds = new Set<string>();
+  for (const row of rows) {
+    membershipConversationIds.add(row.conversationId);
+    if (row.storedRootConversationId) {
+      membershipConversationIds.add(row.storedRootConversationId);
+    }
+  }
+  const participantRootIds =
+    viewer !== undefined
+      ? await conversationIdsWithParticipantUser(
+          db,
+          [...membershipConversationIds],
+          viewer.id,
+        )
+      : new Set<string>();
+
   return new Map(
     rows.map((row) => {
       const hasValidRoot =
@@ -73,11 +91,18 @@ export async function readConversationAccessFromSql(
         : undefined;
       const visibility =
         validRootConversationId === undefined ? null : row.visibility;
-      const isParticipant =
+      const isRootActor =
         validRootConversationId !== undefined &&
-        normalizedViewerEmail !== undefined &&
-        row.rootEmailVerified === true &&
-        row.rootEmailNormalized === normalizedViewerEmail;
+        viewer !== undefined &&
+        (row.rootUserId === viewer.id ||
+          (normalizedViewerEmail !== undefined &&
+            row.rootEmailVerified === true &&
+            row.rootEmailNormalized === normalizedViewerEmail));
+      const isMaterializedParticipant =
+        participantRootIds.has(row.conversationId) ||
+        (validRootConversationId !== undefined &&
+          participantRootIds.has(validRootConversationId));
+      const isParticipant = isRootActor || isMaterializedParticipant;
       const canViewPrivateContent =
         isParticipant ||
         (validRootConversationId !== undefined &&

@@ -40,8 +40,8 @@ import {
 import { buildSteeringPiMessage } from "@/chat/agent/prompt";
 import {
   RetryableDeliveryError,
-  type AgentRunSteeringMessage,
-} from "@/chat/agent/request";
+  type AgentSteeringMessage,
+} from "@/chat/agent/types";
 import type { AgentRunner } from "@/chat/runtime/agent-runner";
 import {
   credentialContextForActor,
@@ -77,7 +77,7 @@ import {
   type TurnToolInvocation,
 } from "@/chat/runtime/turn-input";
 import {
-  type ConversationMemoryService,
+  appendThreadContextMessages,
   markConversationMessage,
   normalizeConversationText,
   recordDeliveredAssistantMessage,
@@ -93,7 +93,8 @@ import {
   createSlackAdapterAssistantStatusSession,
   type AssistantStatusSpec,
 } from "@/chat/slack/assistant-thread/status";
-import { maybeUpdateAssistantTitle } from "@/chat/slack/assistant-thread/title";
+import { resolveConversationTitle } from "@/chat/services/conversation-title";
+import { maybeSyncAssistantTitle } from "@/chat/slack/assistant-thread/title";
 import {
   conversationVisibilityFromSlackChannelType,
   resolveSlackChannelTypeFromMessage,
@@ -139,7 +140,6 @@ import {
   saveTurnCheckpoint,
 } from "@/chat/task-execution/checkpoint";
 import { resolveDestinationVisibility } from "@/chat/conversations/destination-visibility";
-import { getConversationStore } from "@/chat/db";
 import {
   contextProvenance,
   instructionProvenanceFor,
@@ -195,10 +195,10 @@ function parkedInputKey(message: PiMessage): string | undefined {
   return `${message.timestamp}:${text}`;
 }
 
-function renderRecentThreadMessages(
+function renderRecentThreadMessageLines(
   conversationContext: string | undefined,
   messages: QueuedTurnMessage[],
-): string | undefined {
+): string[] {
   const passiveMessages = messages.filter((queued) => {
     if (queued.explicitMention) {
       return false;
@@ -207,28 +207,28 @@ function renderRecentThreadMessages(
     return !slackTs || !conversationContext?.includes(`slack_ts="${slackTs}"`);
   });
   if (passiveMessages.length === 0) {
-    return undefined;
+    return [];
   }
-  const lines = ["<recent-thread-messages>"];
+  const lines: string[] = [];
   for (const queued of passiveMessages) {
     const actor = queuedInstructionActor(queued);
+    const author = escapeXml(actor?.authorName ?? "user");
     const attrs = [
-      actor?.authorId ? `author_id="${escapeXml(actor.authorId)}"` : undefined,
-      actor?.authorName
-        ? `author_name="${escapeXml(actor.authorName)}"`
-        : undefined,
+      `role="user"`,
+      `author="${author}"`,
+      actor?.authorId ? `actor_id="${escapeXml(actor.authorId)}"` : undefined,
       actor?.slackTs ? `slack_ts="${escapeXml(actor.slackTs)}"` : undefined,
     ]
       .filter((attr): attr is string => Boolean(attr))
       .join(" ");
+    const text = escapeXml(queued.userText.replace(/\s+/g, " "));
     lines.push(
-      attrs ? `  <message ${attrs}>` : "  <message>",
-      escapeXml(queued.userText),
+      `  <message ${attrs}>`,
+      `[user] ${author}: ${text}`,
       "  </message>",
     );
   }
-  lines.push("</recent-thread-messages>");
-  return lines.join("\n");
+  return lines;
 }
 
 function appendRecentThreadMessagesToContext(
@@ -236,22 +236,19 @@ function appendRecentThreadMessagesToContext(
   messages: QueuedTurnMessage[],
   options?: { includeConversationContext?: boolean },
 ): string | undefined {
-  const recentThreadMessages = renderRecentThreadMessages(
-    conversationContext,
-    messages,
-  );
-  const contextParts = [
+  const baseContext =
     options?.includeConversationContext === false
       ? undefined
-      : conversationContext?.trim(),
-    recentThreadMessages,
-  ].filter((part): part is string => Boolean(part));
-  return contextParts.length > 0 ? contextParts.join("\n\n") : undefined;
+      : conversationContext;
+  return appendThreadContextMessages(
+    baseContext,
+    renderRecentThreadMessageLines(conversationContext, messages),
+  );
 }
 
 function queuedInstructionActor(
   queued: QueuedTurnMessage,
-): AgentRunSteeringMessage["actor"] {
+): AgentSteeringMessage["actor"] {
   const actor = getMessageActorIdentity(queued.message);
   const authorId =
     actor?.userId ?? parseActorUserId(queued.message.author.userId);
@@ -365,7 +362,6 @@ async function loadPiMessagesForTurn(args: {
 export interface ReplyExecutorServices {
   agentRunner: AgentRunner;
   contextCompactor: ContextCompactor;
-  generateThreadTitle: ConversationMemoryService["generateThreadTitle"];
   getPausedTurnRequest: (args: {
     conversationId: string;
     turnId: string;
@@ -618,7 +614,7 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
         let activeTurnId = preparedState.conversation.processing.activeTurnId;
         const resolveSteeringMessages = async (
           queuedMessages: QueuedTurnMessage[],
-        ): Promise<AgentRunSteeringMessage[]> => {
+        ): Promise<AgentSteeringMessage[]> => {
           return await Promise.all(
             queuedMessages.map(async (queued) => {
               const attachments = queued.message.attachments;
@@ -631,19 +627,16 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
                   !isVisionEnabled() && hasPotentialImageAttachment(attachments)
                     ? countPotentialImageAttachments(attachments)
                     : 0,
-                userAttachments: await deps.resolveUserAttachments(
-                  attachments,
-                  {
-                    threadId,
-                    actorId: isResourceEventSlackMessage(queued.message)
-                      ? undefined
-                      : queued.message.author.userId,
-                    channelId,
-                    runId,
-                    conversation: preparedState.conversation,
-                    messageTs: getMessageTimestamp(queued.message),
-                  },
-                ),
+                attachments: await deps.resolveUserAttachments(attachments, {
+                  threadId,
+                  actorId: isResourceEventSlackMessage(queued.message)
+                    ? undefined
+                    : queued.message.author.userId,
+                  channelId,
+                  runId,
+                  conversation: preparedState.conversation,
+                  messageTs: getMessageTimestamp(queued.message),
+                }),
               };
             }),
           );
@@ -880,6 +873,7 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
             },
             meta: {
               replied: true,
+              source: "slack",
             },
           });
           await persistThreadState(thread, {
@@ -1054,7 +1048,8 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
                 slackMessageTs = await sendSlackReply({
                   channelId,
                   conversationId,
-                  replyAttribution: options.execution?.dispatch?.replyAttribution,
+                  replyAttribution:
+                    options.execution?.dispatch?.replyAttribution,
                   text,
                   ...(threadTs ? { threadTs } : {}),
                 });
@@ -1091,6 +1086,7 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
           const recordedMessageId = recordDeliveredAssistantMessage({
             conversation: preparedState.conversation,
             sessionId: turnId,
+            source: "slack",
             text,
             userMessageId: preparedState.userMessageId,
           });
@@ -1251,47 +1247,22 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
           }
 
           status.update();
-          const assistantTitleTask = (async () => {
-            if (conversationId) {
-              const storedConversation = await getConversationStore().get({
-                conversationId,
+          // Title generation is automatic on transcript persist. DM threads only
+          // project the stored/in-flight title to Slack once it settles.
+          void resolveConversationTitle({ conversationId })
+            .then(async (title) => {
+              if (!title) {
+                return;
+              }
+              await maybeSyncAssistantTitle({
+                channelId: assistantThreadContext?.channelId,
+                getSlackAdapter: deps.getSlackAdapter,
+                threadTs: assistantThreadContext?.threadTs,
+                title,
               });
-              if (storedConversation?.title) {
-                return undefined;
-              }
-            }
-            return maybeUpdateAssistantTitle({
-              assistantThreadContext,
-              assistantUserName: botConfig.userName,
-              channelId,
-              conversation: preparedState.conversation,
-              generateThreadTitle: deps.services.generateThreadTitle,
-              getSlackAdapter: deps.getSlackAdapter,
-              modelId: botConfig.fastModelId,
-              actorId: slackActorId,
-              runId,
-              threadId,
-            });
-          })();
-          void assistantTitleTask
-            .then(async (titleUpdateResult) => {
-              if (!titleUpdateResult) return;
-
-              if (conversationId && titleUpdateResult.title) {
-                try {
-                  await getConversationStore().recordActivity({
-                    activityAtMs: message.metadata.dateSent.getTime(),
-                    conversationId,
-                    nowMs: Date.now(),
-                    title: titleUpdateResult.title,
-                  });
-                } catch (error) {
-                  logException(error, "conversation.title.persist.failed");
-                }
-              }
             })
             .catch((error) => {
-              logException(error, "assistant.title.task.failed");
+              logException(error, "conversation.title.task.failed");
             });
           const toolChannelId = channelId;
           const activeInstructionAuthorId =
@@ -1304,9 +1275,9 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
           );
           const drainSteeringMessages = options.drainSteeringMessages
             ? async (
-                accept: (messages: AgentRunSteeringMessage[]) => Promise<void>,
-              ): Promise<AgentRunSteeringMessage[]> => {
-                let acceptedMessages: AgentRunSteeringMessage[] | undefined;
+                accept: (messages: AgentSteeringMessage[]) => Promise<void>,
+              ): Promise<AgentSteeringMessage[]> => {
+                let acceptedMessages: AgentSteeringMessage[] | undefined;
                 const drained = await options.drainSteeringMessages!(
                   async (queuedMessages) => {
                     acceptedMessages =
@@ -1324,7 +1295,7 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
             conversationId,
             turnId,
             ...(runId ? { runId } : {}),
-            input: {
+            instruction: {
               actor: {
                 ...(activeInstructionAuthorId
                   ? { authorId: activeInstructionAuthorId }
@@ -1334,46 +1305,54 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
                   : {}),
                 ...(slackMessageTs ? { slackTs: slackMessageTs } : {}),
               },
-              includeConversationContextWithPiMessages: hasDurablePromptHistory,
-              messageText: effectiveUserText,
-              conversationContext: promptConversationContext,
-              piMessages,
+              includeConversationContextWithHistory: hasDurablePromptHistory,
+              text: effectiveUserText,
+              context: promptConversationContext,
               inboundAttachmentCount: turnAttachments.length,
               omittedImageAttachmentCount,
-              userAttachments,
+              attachments: userAttachments,
             },
-            routing: {
-              credentialContext,
-              // Always set the execution actor when known. Resource-event turns
-              // carry the system principal; interactive turns carry the Slack user.
-              actor: executionActor,
-              slackConversation,
-              source,
-              destination,
-              publishExternally: shouldPublishExternally(options.publishExternally),
-              ...(destinationVisibility ? { destinationVisibility } : {}),
-              surface: options.execution?.surface ?? "slack",
-              dispatch: options.execution?.dispatch,
-              toolChannelId,
-              slackActionToken,
-            },
-            policy: {
+            history: piMessages,
+            credentialContext,
+            // Always set the execution actor when known. Resource-event turns
+            // carry the system principal; interactive turns carry the Slack user.
+            actor: executionActor,
+            slackConversation,
+            source,
+            destination,
+            publishExternally: shouldPublishExternally(
+              options.publishExternally,
+            ),
+            ...(destinationVisibility ? { destinationVisibility } : {}),
+            surface: options.execution?.surface ?? "slack",
+            dispatch: options.execution?.dispatch,
+            toolChannelId,
+            slackActionToken,
+            environment: {
               configuration: preparedState.configuration,
               locationConfiguration: preparedState.locationConfiguration,
-              disabledFeatures:
-                options.execution?.disabledFeatures ??
-                (message.author.isBot === true
-                  ? (["interactive-auth"] as const)
-                  : undefined),
-              turnDeadlineAtMs: getTurnRequestDeadline()?.deadlineAtMs,
             },
+            disabledFeatures:
+              options.execution?.disabledFeatures ??
+              (message.author.isBot === true
+                ? (["interactive-auth"] as const)
+                : undefined),
+            deadlineAtMs: getTurnRequestDeadline()?.deadlineAtMs,
             state: {
               pendingAuth: preparedState.conversation.processing.pendingAuth,
               sandboxRef: preparedState.sandboxRef,
             },
-            observers: {
-              onStatus: (nextStatus) => status.update(nextStatus),
-              onToolInvocation: options.onToolInvocation,
+            onEvent: async (event) => {
+              if (event.type === "status") {
+                status.update({ text: event.text });
+                return;
+              }
+              if (event.type === "tool_started") {
+                await options.onToolInvocation?.({
+                  params: event.params,
+                  toolName: event.toolName,
+                });
+              }
             },
             delivery: deliverAssistantMessage,
             durability: {
@@ -1447,11 +1426,14 @@ export function createReplyToThread(deps: ReplyExecutorDeps) {
           }
           if (outcome.status === "suspended") {
             options.onTurnOutcome?.({ outcome: "awaiting_resume" });
-            // A cooperative yield only occurs when this caller's own
-            // shouldYield() fired, so the predicate — not the outcome —
-            // decides the resume route: hand the lease back to the queue
-            // worker, or schedule a direct continuation.
-            if (options.shouldYield?.()) {
+            // Soft yield follows shouldYield(). Hard timeout under a worker that
+            // can hand the lease back also yields so the next wake gets a full
+            // host budget. Live webhook paths have no shouldYield and schedule a
+            // wake instead.
+            if (
+              options.shouldYield &&
+              (options.shouldYield() || outcome.reason === "timeout")
+            ) {
               shouldPersistFailureState = false;
               throw new CooperativeTurnYieldError();
             }

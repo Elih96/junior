@@ -65,6 +65,30 @@ describe("Vercel deployment", () => {
     });
   });
 
+  it("rejects whitespace-only project IDs from Vercel", async () => {
+    const { tool } = toolFixture(Response.json({ id: " " }));
+
+    await expect(
+      tool.execute?.(
+        { project: "sentry-docs" },
+        { toolCallId: "deployment-blank-project" },
+      ),
+    ).rejects.toThrow("Too small");
+  });
+
+  it("accepts an opaque project ID returned by Vercel", async () => {
+    const { tool } = toolFixture(Response.json({ id: "QmLegacyProject123" }));
+
+    await expect(
+      tool.execute?.(
+        { project: "sentry-docs" },
+        { toolCallId: "deployment-legacy-project" },
+      ),
+    ).resolves.toMatchObject({
+      projectId: "QmLegacyProject123",
+    });
+  });
+
   it("returns a project-wide subscribable resource when commit and target are omitted", async () => {
     vi.stubEnv("VERCEL_WEBHOOK_SECRET", "webhook-secret");
     const { tool } = toolFixture();
@@ -173,7 +197,7 @@ describe("Vercel deployment", () => {
     expect(result).not.toHaveProperty("data.subscribable");
   });
 
-  it("reports project lookup failures", async () => {
+  it("reports a missing project as a repairable tool error", async () => {
     const { tool } = toolFixture(new Response("missing", { status: 404 }));
 
     await expect(
@@ -181,7 +205,24 @@ describe("Vercel deployment", () => {
         { project: "missing", target: "production" },
         { toolCallId: "deployment-missing-project" },
       ),
-    ).rejects.toThrow("Vercel project lookup failed with HTTP 404");
+    ).rejects.toMatchObject({
+      message: "Vercel project lookup failed with HTTP 404",
+      name: "PluginToolInputError",
+    });
+  });
+
+  it("reports non-404 project lookup failures as runtime errors", async () => {
+    const { tool } = toolFixture(new Response("boom", { status: 500 }));
+
+    await expect(
+      tool.execute?.(
+        { project: "junior", target: "production" },
+        { toolCallId: "deployment-project-500" },
+      ),
+    ).rejects.toMatchObject({
+      message: "Vercel project lookup failed with HTTP 500",
+      name: "Error",
+    });
   });
 
   it("registers runtime hooks and the canonical inline manifest", () => {

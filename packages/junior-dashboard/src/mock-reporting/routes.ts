@@ -11,25 +11,30 @@ import {
   conversationFeedQuerySchema,
   conversationFeedSchema,
   conversationParamsSchema,
+  conversationPendingMessagesReportSchema,
   conversationStatsReportSchema,
   locationDetailReportSchema,
   locationDirectoryReportSchema,
   locationParamsSchema,
   personalSpendReportSchema,
   personParamsSchema,
+  pluginOperationalReportFeedSchema,
   taskExecutionListSchema,
   taskListSchema,
   taskParamsSchema,
   taskRunListSchema,
 } from "@sentry/junior/api/schema";
+import { mockChartPng } from "./chart-png";
 import {
   readMockConversationDetail,
   readMockConversationEvents,
   readMockConversationFeed,
+  readMockConversationPendingMessages,
   readMockConversationStats,
   readMockLocationDetail,
   readMockLocationDirectory,
   readMockPeopleDirectory,
+  readMockPeoplePluginReports,
   readMockPeopleProfile,
   readMockPersonalSpend,
   readMockTaskExecutions,
@@ -50,11 +55,21 @@ export function createMockReportingApi(): Hono<{
     jsonResponse(actorDirectoryReportSchema, readMockPeopleDirectory()),
   );
   app.get("/people/me/spend", (context) => {
-    const email = context.get("verifiedViewerEmail");
+    const email = context.get("viewer")?.email;
     const report = email ? readMockPersonalSpend(email) : undefined;
     return report
       ? jsonResponse(personalSpendReportSchema, report)
       : errorResponse("Person not found.", 404);
+  });
+  app.get("/people/:email/plugin-reports", (c) => {
+    const params = personParamsSchema.safeParse(c.req.param());
+    if (!params.success) {
+      return errorResponse("Invalid route parameters.", 400);
+    }
+    return jsonResponse(
+      pluginOperationalReportFeedSchema,
+      readMockPeoplePluginReports(params.data.email),
+    );
   });
   app.get("/people/:email", (c) => {
     const params = personParamsSchema.safeParse(c.req.param());
@@ -115,6 +130,18 @@ export function createMockReportingApi(): Hono<{
       ? jsonResponse(conversationEventPageSchema, report)
       : errorResponse("Invalid conversation cursor.", 400);
   });
+  app.get("/conversations/:conversationId/pending-messages", (c) => {
+    const params = conversationParamsSchema.safeParse(c.req.param());
+    if (!params.success) {
+      return errorResponse("Invalid route parameters.", 400);
+    }
+    const report = readMockConversationPendingMessages(
+      params.data.conversationId,
+    );
+    return report
+      ? jsonResponse(conversationPendingMessagesReportSchema, report)
+      : errorResponse("Conversation not found.", 404);
+  });
   app.get("/conversations/:conversationId", (c) => {
     const params = conversationParamsSchema.safeParse(c.req.param());
     const query = conversationDetailQuerySchema.safeParse(c.req.query());
@@ -129,6 +156,39 @@ export function createMockReportingApi(): Hono<{
     return report
       ? jsonResponse(conversationDetailReportSchema, report)
       : errorResponse("Conversation not found.", 404);
+  });
+  // Fixed bodies so dashboard mock can exercise image/file attachment cards.
+  app.get("/conversations/:conversationId/attachments/:attachmentId", (c) => {
+    const conversationId = c.req.param("conversationId");
+    const attachmentId = c.req.param("attachmentId");
+    if (!conversationId || !attachmentId) {
+      return errorResponse("Invalid route parameters.", 400);
+    }
+    if (!readMockConversationDetail(conversationId)) {
+      return errorResponse("Conversation not found.", 404);
+    }
+    if (attachmentId === "qa-chart-png") {
+      return new Response(mockChartPng, {
+        headers: {
+          "cache-control": "private, no-store",
+          "content-disposition": 'inline; filename="chart.png"',
+          "content-type": "image/png",
+          "content-length": String(mockChartPng.byteLength),
+        },
+      });
+    }
+    if (attachmentId === "qa-notes-txt") {
+      const body = "mock attachment notes\n";
+      return new Response(body, {
+        headers: {
+          "cache-control": "private, no-store",
+          "content-disposition": 'attachment; filename="notes.txt"',
+          "content-type": "text/plain",
+          "content-length": String(Buffer.byteLength(body)),
+        },
+      });
+    }
+    return errorResponse("Attachment not found.", 404);
   });
   app.get("/tasks", () => jsonResponse(taskListSchema, readMockTaskList()));
   app.get("/tasks/runs", () => {

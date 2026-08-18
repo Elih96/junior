@@ -4,6 +4,8 @@ import {
   EgressAuthRequired,
   type PluginStoredTokens,
   type SandboxPrepareHookContext,
+  type ToolRegistrationHookContext,
+  type WorkspacePrepareHookContext,
 } from "@sentry/junior-plugin-api";
 import { http, HttpResponse } from "msw";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -299,6 +301,7 @@ function githubToolsContext(input?: {
     provider: string;
     request: Request;
   }) => Promise<Response>;
+  resolveActor?: ToolRegistrationHookContext["users"]["resolveActor"];
   stateSet?: (input: { key: string; value: unknown }) => Promise<void> | void;
 }) {
   const conversationId = input?.conversationId ?? "local:test:github-tool";
@@ -352,6 +355,9 @@ function githubToolsContext(input?: {
     },
     model: {},
     resourceEvents: { canSubscribe: true },
+    users: {
+      resolveActor: input?.resolveActor ?? (async () => undefined),
+    },
     state: {
       async delete(key: string) {
         state.delete(key);
@@ -588,9 +594,33 @@ describe("github plugin", () => {
     });
     expect(
       await grantForEgress({
+        method: "PATCH",
+        operation: "github.issue.update",
+        url: "https://api.github.com/repos/getsentry/junior/issues/780",
+      }),
+    ).toMatchObject({
+      name: "installation-write",
+      access: "write",
+      leaseScope: "repository:getsentry/junior",
+      reason: "github.installation-write",
+    });
+    expect(
+      await grantForEgress({
         method: "POST",
         operation: "github.pull.create",
         url: "https://api.github.com/repos/getsentry/junior/pulls",
+      }),
+    ).toMatchObject({
+      name: "installation-write",
+      access: "write",
+      leaseScope: "repository:getsentry/junior",
+      reason: "github.installation-write",
+    });
+    expect(
+      await grantForEgress({
+        method: "PATCH",
+        operation: "github.pull.update",
+        url: "https://api.github.com/repos/getsentry/junior/pulls/780",
       }),
     ).toMatchObject({
       name: "installation-write",
@@ -1211,6 +1241,145 @@ Conversation: \`local:test:old-conversation\`
     ]);
   });
 
+  it("prefers stored identity names for requester attribution", async () => {
+    const ctx = githubToolsContext({
+      actor: {
+        platform: "slack",
+        teamId: "T1",
+        userId: "U039RR91S",
+      },
+      resolveActor: async () => ({
+        identity: {
+          displayName: "Slack Profile Name",
+          handle: "david",
+          id: "identity-1",
+          provider: "slack",
+          providerSubjectId: "U039RR91S",
+          providerTenantId: "T1",
+        },
+        user: {
+          displayName: "David Cramer",
+          email: "david@example.com",
+          id: "user-1",
+          identities: [],
+        },
+      }),
+      egressFetch: async () =>
+        new Response(
+          JSON.stringify({
+            number: 692,
+            html_url: "https://github.com/getsentry/junior/pull/692",
+          }),
+          { status: 201 },
+        ),
+    });
+    const tool = githubPlugin().hooks?.tools?.(ctx as any)?.createPullRequest;
+
+    await tool?.execute?.(
+      {
+        repo: "getsentry/junior",
+        title: "Typed PR",
+        head: "dcramer/gh-660-pr-create",
+        base: "main",
+        body: "PR body",
+        draft: true,
+      },
+      { toolCallId: "call-create-identity-pull-request" },
+    );
+
+    const request = ctx.egressRequests()[0];
+    await expect(request?.request.json()).resolves.toMatchObject({
+      body: "PR body\n\n<!-- junior-request-attribution:start -->\nRequested by **David Cramer**.\n<!-- junior-request-attribution:end -->",
+    });
+  });
+
+  it("omits requester attribution when identity and actor names are unresolved", async () => {
+    const ctx = githubToolsContext({
+      actor: {
+        fullName: "U039RR91S",
+        platform: "slack",
+        teamId: "T1",
+        userId: "U039RR91S",
+        userName: "U039RR91S",
+      },
+      resolveActor: async () => ({
+        identity: {
+          id: "identity-1",
+          provider: "slack",
+          providerSubjectId: "U039RR91S",
+          providerTenantId: "T1",
+        },
+      }),
+      egressFetch: async () =>
+        new Response(
+          JSON.stringify({
+            number: 693,
+            html_url: "https://github.com/getsentry/junior/pull/693",
+          }),
+          { status: 201 },
+        ),
+    });
+    const tool = githubPlugin().hooks?.tools?.(ctx as any)?.createPullRequest;
+
+    await tool?.execute?.(
+      {
+        repo: "getsentry/junior",
+        title: "Typed PR",
+        head: "dcramer/gh-660-pr-create",
+        base: "main",
+        body: "PR body",
+        draft: true,
+      },
+      { toolCallId: "call-create-unresolved-pull-request" },
+    );
+
+    const request = ctx.egressRequests()[0];
+    await expect(request?.request.json()).resolves.toMatchObject({
+      body: "PR body",
+    });
+  });
+
+  it("keeps GitHub writes when identity lookup fails", async () => {
+    const ctx = githubToolsContext({
+      actor: {
+        fullName: "David Cramer",
+        platform: "slack",
+        teamId: "T1",
+        userId: "U039RR91S",
+        userName: "david",
+      },
+      resolveActor: async () => {
+        throw new Error("identity storage unavailable");
+      },
+      egressFetch: async () =>
+        new Response(
+          JSON.stringify({
+            number: 694,
+            html_url: "https://github.com/getsentry/junior/pull/694",
+          }),
+          { status: 201 },
+        ),
+    });
+    const tool = githubPlugin().hooks?.tools?.(ctx as any)?.createPullRequest;
+
+    await tool?.execute?.(
+      {
+        repo: "getsentry/junior",
+        title: "Typed PR",
+        head: "dcramer/gh-660-pr-create",
+        base: "main",
+        body: "PR body",
+        draft: true,
+      },
+      { toolCallId: "call-create-identity-lookup-failed" },
+    );
+
+    const request = ctx.egressRequests()[0];
+    await expect(request?.request.json()).resolves.toMatchObject({
+      body: "PR body\n\n<!-- junior-request-attribution:start -->\nRequested by **David Cramer**.\n<!-- junior-request-attribution:end -->",
+    });
+  });
+
   it("keeps pull request annotation labels compact for long titles", async () => {
     const ctx = githubToolsContext({
       egressFetch: async () =>
@@ -1632,6 +1801,47 @@ Conversation: \`local:test:old-conversation\`
     });
   });
 
+  it("allows only the typed resolveReviewThread mutation with repository scope", async () => {
+    const bodyText = JSON.stringify({
+      operationName: "ResolveReviewThread",
+      query:
+        "mutation ResolveReviewThread($threadId: ID!) { resolveReviewThread(input: {threadId: $threadId}) { thread { id isResolved } } }",
+      variables: { threadId: "PRRT_kwDOthread" },
+    });
+    await expect(
+      grantForEgress({
+        method: "POST",
+        operation: "github.pull.review-thread.resolve:getsentry/junior",
+        url: "https://api.github.com/graphql",
+        bodyText,
+      }),
+    ).resolves.toMatchObject({
+      name: "installation-write",
+      access: "write",
+      leaseScope: "repository:getsentry/junior",
+      reason: "github.installation-write",
+    });
+    await expect(
+      grantForEgress({
+        method: "POST",
+        url: "https://api.github.com/graphql",
+        bodyText,
+      }),
+    ).rejects.toThrow("GraphQL mutations are not enabled");
+    await expect(
+      grantForEgress({
+        method: "POST",
+        operation: "github.pull.review-thread.resolve:getsentry/junior",
+        url: "https://api.github.com/graphql",
+        bodyText: JSON.stringify({
+          operationName: "AddIssueComment",
+          query:
+            "mutation AddIssueComment { addComment(input: {subjectId: \"I_kwDO\", body: \"test\"}) { clientMutationId } }",
+        }),
+      }),
+    ).rejects.toThrow("GraphQL mutations are not enabled");
+  });
+
   it("denies GitHub GraphQL mutations and unparseable bodies", async () => {
     await expect(
       grantForEgress({
@@ -1655,7 +1865,7 @@ Conversation: \`local:test:old-conversation\`
             "fragment prFields on PullRequest { number } mutation UpdatePullRequest($input: UpdatePullRequestInput!) { updatePullRequest(input: $input) { pullRequest { ...prFields } } }",
         }),
       }),
-    ).rejects.toThrow("GraphQL mutations are not enabled");
+    ).rejects.toThrow("must use the github_updatePullRequest tool");
     await expect(
       grantForEgress({
         method: "POST",
@@ -1715,18 +1925,29 @@ Conversation: \`local:test:old-conversation\`
     ).rejects.toThrow("must use the github_createPullRequest tool");
   });
 
-  it("keeps unsupported repository writes outside the allowlist", async () => {
+  it("denies raw issue and pull request metadata updates", async () => {
     await expect(
       grantForEgress({
         method: "PATCH",
         url: "https://api.github.com/repos/getsentry/junior/issues/780",
       }),
-    ).resolves.toMatchObject({
-      name: "installation-write",
-      access: "write",
-      leaseScope: "repository:getsentry/junior",
-      reason: "github.installation-write",
-    });
+    ).rejects.toThrow("must use the github_updateIssue tool");
+    await expect(
+      grantForEgress({
+        method: "PATCH",
+        operation: "github.pull.update",
+        url: "https://api.github.com/repos/getsentry/junior/issues/780",
+      }),
+    ).rejects.toThrow("must use the github_updateIssue tool");
+    await expect(
+      grantForEgress({
+        method: "PATCH",
+        url: "https://api.github.com/repos/getsentry/junior/pulls/780",
+      }),
+    ).rejects.toThrow("must use the github_updatePullRequest tool");
+  });
+
+  it("keeps unsupported repository writes outside the allowlist", async () => {
     await expect(
       grantForEgress({
         method: "POST",
@@ -1740,17 +1961,6 @@ Conversation: \`local:test:old-conversation\`
   it("treats pull request review writes as bot-owned installation identity", async () => {
     await expect(
       grantForEgress({
-        method: "PATCH",
-        url: "https://api.github.com/repos/getsentry/junior/pulls/780",
-      }),
-    ).resolves.toMatchObject({
-      name: "installation-write",
-      access: "write",
-      leaseScope: "repository:getsentry/junior",
-      reason: "github.installation-write",
-    });
-    await expect(
-      grantForEgress({
         method: "POST",
         url: "https://api.github.com/repos/getsentry/junior/pulls/780/reviews",
       }),
@@ -1762,6 +1972,19 @@ Conversation: \`local:test:old-conversation\`
     });
     await expect(
       grantForEgress({
+        bodyText: JSON.stringify({ event: "REQUEST_CHANGES", body: "nits" }),
+        method: "POST",
+        url: "https://api.github.com/repos/getsentry/junior/pulls/780/reviews",
+      }),
+    ).resolves.toMatchObject({
+      name: "installation-write",
+      access: "write",
+      leaseScope: "repository:getsentry/junior",
+      reason: "github.installation-write",
+    });
+    await expect(
+      grantForEgress({
+        bodyText: JSON.stringify({ event: "COMMENT", body: "looks fine" }),
         method: "POST",
         url: "https://api.github.com/repos/getsentry/junior/pulls/780/reviews/99/events",
       }),
@@ -1833,6 +2056,47 @@ Conversation: \`local:test:old-conversation\`
       }),
     ).rejects.toThrow(
       "GitHub write request is not an explicitly allowed Junior operation.",
+    );
+  });
+
+  it("denies GitHub pull request approvals while allowing non-approve reviews", async () => {
+    await expect(
+      grantForEgress({
+        bodyText: JSON.stringify({ event: "APPROVE", body: "lgtm" }),
+        method: "POST",
+        url: "https://api.github.com/repos/getsentry/junior/pulls/780/reviews",
+      }),
+    ).rejects.toThrow("Junior cannot approve GitHub pull requests");
+    await expect(
+      grantForEgress({
+        bodyText: JSON.stringify({ event: "approve" }),
+        method: "POST",
+        url: "https://api.github.com/repos/getsentry/junior/pulls/780/reviews/99/events",
+      }),
+    ).rejects.toThrow("Junior cannot approve GitHub pull requests");
+    await expect(
+      grantForEgress({
+        method: "POST",
+        url: "https://api.github.com/repos/getsentry/junior/pulls/780/reviews/99/events",
+      }),
+    ).rejects.toThrow(
+      "review submissions must include a parseable non-APPROVE event",
+    );
+    await expect(
+      grantForEgress({
+        bodyText: "event=APPROVE",
+        method: "POST",
+        url: "https://api.github.com/repos/getsentry/junior/pulls/780/reviews",
+      }),
+    ).rejects.toThrow("must use JSON bodies");
+    await expect(
+      grantForEgress({
+        bodyText: JSON.stringify({ event: 1 }),
+        method: "POST",
+        url: "https://api.github.com/repos/getsentry/junior/pulls/780/reviews",
+      }),
+    ).rejects.toThrow(
+      "review submissions must include a parseable non-APPROVE event",
     );
   });
 
@@ -2602,6 +2866,147 @@ Conversation: \`local:test:old-conversation\`
       "credential.helper",
       "http.emptyAuth",
     ]);
+  });
+
+  it("preloads workspace repositories through sandbox egress", async () => {
+    const runs: Array<{ args?: string[]; env?: Record<string, string> }> = [];
+    const ctx = {
+      db,
+      log: pluginLog,
+      plugin: { name: "github" },
+      repos: [
+        { repo: "getsentry/sentry", path: "repos/sentry" },
+        { repo: "getsentry/junior", path: "repos/junior" },
+      ],
+      sandbox: {
+        juniorRoot: "/vercel/sandbox/.junior",
+        root: "/vercel/sandbox",
+        async readFile() {
+          return null;
+        },
+        async run(input: { args?: string[]; env?: Record<string, string> }) {
+          runs.push(input);
+          return { exitCode: 0, stderr: "", stdout: "" };
+        },
+        async writeFile() {},
+      },
+    } as WorkspacePrepareHookContext;
+
+    await githubPlugin().hooks?.workspacePrepare?.(ctx);
+
+    expect(runs.map((run) => run.args)).toEqual([
+      ["-p", "--", "repos"],
+      [
+        "clone",
+        "--quiet",
+        "--depth=1",
+        "--",
+        "https://github.com/getsentry/sentry.git",
+        "repos/sentry",
+      ],
+      ["-p", "--", "repos"],
+      [
+        "clone",
+        "--quiet",
+        "--depth=1",
+        "--",
+        "https://github.com/getsentry/junior.git",
+        "repos/junior",
+      ],
+    ]);
+    expect(runs.every((run) => run.env === undefined)).toBe(true);
+  });
+
+  it("rejects reserved workspace checkout paths", async () => {
+    const ctx = {
+      db,
+      log: pluginLog,
+      plugin: { name: "github" },
+      repos: [{ repo: "getsentry/skills", path: "skills" }],
+      sandbox: {
+        juniorRoot: "/vercel/sandbox/.junior",
+        root: "/vercel/sandbox",
+        async readFile() {
+          return null;
+        },
+        async run() {
+          throw new Error("workspace clone should not start");
+        },
+        async writeFile() {},
+      },
+    } as WorkspacePrepareHookContext;
+
+    await expect(githubPlugin().hooks?.workspacePrepare?.(ctx)).rejects.toThrow(
+      "Invalid workspace checkout path: skills",
+    );
+  });
+
+  it("rejects reserved workspace checkout paths case-insensitively", async () => {
+    const ctx = {
+      db,
+      log: pluginLog,
+      plugin: { name: "github" },
+      repos: [{ repo: "getsentry/skills", path: "Skills" }],
+      sandbox: {
+        juniorRoot: "/vercel/sandbox/.junior",
+        root: "/vercel/sandbox",
+        async readFile() {
+          return null;
+        },
+        async run() {
+          throw new Error("workspace clone should not start");
+        },
+        async writeFile() {},
+      },
+    } as WorkspacePrepareHookContext;
+
+    await expect(githubPlugin().hooks?.workspacePrepare?.(ctx)).rejects.toThrow(
+      "Invalid workspace checkout path: Skills",
+    );
+  });
+
+  it("rejects colliding workspace checkout paths case-insensitively", async () => {
+    const ctx = {
+      db,
+      log: pluginLog,
+      plugin: { name: "github" },
+      repos: [
+        { repo: "getsentry/sentry", path: "repos/sentry" },
+        { repo: "acme/sentry", path: "repos/Sentry" },
+      ],
+      sandbox: {
+        juniorRoot: "/vercel/sandbox/.junior",
+        root: "/vercel/sandbox",
+        async readFile() {
+          return null;
+        },
+        async run() {
+          throw new Error("workspace clone should not start");
+        },
+        async writeFile() {},
+      },
+    } as WorkspacePrepareHookContext;
+
+    await expect(githubPlugin().hooks?.workspacePrepare?.(ctx)).rejects.toThrow(
+      "Workspace checkout path collision: repos/Sentry",
+    );
+  });
+
+  it("throws GitHubPluginSetupError when bot identity environment variables are missing", () => {
+    delete process.env.GITHUB_APP_BOT_NAME;
+    delete process.env.GITHUB_APP_BOT_EMAIL;
+
+    const plugin = githubPlugin();
+    const before = beforeToolContext({
+      email: "david@example.com",
+      fullName: "David Cramer",
+      userId: "U039RR91S",
+      userName: "dcramer",
+    });
+
+    expect(() => {
+      plugin.hooks?.beforeToolExecute?.(before.ctx as never);
+    }).toThrow("Missing GITHUB_APP_BOT_NAME");
   });
 
   it("injects Junior author and committer identity", () => {

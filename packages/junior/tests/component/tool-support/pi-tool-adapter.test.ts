@@ -5,7 +5,6 @@ import { SkillSandbox } from "@/chat/sandbox/skill-sandbox";
 import { createPiAgentTools } from "@/chat/tool-support/pi-tool-adapter";
 import {
   createToolActionReview,
-  ToolActionReviewLimitError,
   type ToolActionReview,
   type ToolActionReviewer,
 } from "@/chat/tool-support/action-review";
@@ -337,7 +336,7 @@ describe("Pi tool adapter", () => {
     );
   });
 
-  it("reviews the MCP dispatcher before activating the requested provider", async () => {
+  it("reviews an active MCP tool before execution", async () => {
     const sandbox = new SkillSandbox([], []);
     const execute = vi.fn(async () => ({
       content: [{ type: "text" as const, text: "deleted" }],
@@ -355,11 +354,7 @@ describe("Pi tool adapter", () => {
       },
       execute,
     };
-    let activeTools = [] as (typeof managedTool)[];
-    const activateProvider = vi.fn(async () => {
-      activeTools = [managedTool];
-      return true;
-    });
+    const activeTools = [managedTool];
     const review = vi.fn<ToolActionReviewer["review"]>(async () => ({
       decision: "allow" as const,
       reason: "The user explicitly requested this deletion.",
@@ -367,7 +362,6 @@ describe("Pi tool adapter", () => {
       userAuthorization: "high" as const,
     }));
     const callMcpTool = createCallMcpToolTool({
-      activateProvider,
       getResolvedActiveTools: () => activeTools,
     });
     const tools = createPiAgentTools(
@@ -402,22 +396,14 @@ describe("Pi tool adapter", () => {
           arguments: { workspace: "preview-42" },
         },
         tool: expect.objectContaining({
-          annotations: {
-            destructiveHint: true,
-            idempotentHint: false,
-            openWorldHint: true,
-            readOnlyHint: false,
-          },
-          name: "callMcpTool",
+          annotations: managedTool.annotations,
+          dispatcherName: "callMcpTool",
+          name: managedTool.name,
         }),
       }),
       {},
     );
-    expect(activateProvider).toHaveBeenCalledWith("demo");
     expect(review.mock.invocationCallOrder[0]).toBeLessThan(
-      activateProvider.mock.invocationCallOrder[0]!,
-    );
-    expect(activateProvider.mock.invocationCallOrder[0]).toBeLessThan(
       execute.mock.invocationCallOrder[0]!,
     );
     expect(execute).toHaveBeenCalledWith(
@@ -448,6 +434,7 @@ describe("Pi tool adapter", () => {
         env: { SECRET_TOKEN: "must-not-reach-guardian" },
       })),
       prepareSandbox: vi.fn(),
+      prepareWorkspace: vi.fn(),
     } as PluginHookRunner;
     const [demoTool] = createPiAgentTools(
       {
@@ -584,11 +571,20 @@ describe("Pi tool adapter", () => {
 
     await expect(
       demoTool!.execute("tool-limit", { cadence: "weekly" }),
-    ).rejects.toBeInstanceOf(ToolActionReviewLimitError);
+    ).rejects.toThrow("Do not retry this action or an equivalent write this turn.");
     expect(review).toHaveBeenCalledTimes(3);
-    expect(onFatal).toHaveBeenCalledWith(
-      expect.any(ToolActionReviewLimitError),
-    );
+    expect(onFatal).not.toHaveBeenCalled();
+    expect(
+      reviewState.projectToolResult("tool-limit", { isError: true }),
+    ).toMatchObject({
+      details: {
+        guardianActionRejection: {
+          decision: "ask",
+          reason: "Recurring work should be confirmed.",
+        },
+      },
+      isError: true,
+    });
     expect(execute).not.toHaveBeenCalled();
   });
 

@@ -25,6 +25,13 @@ unsafe requests.
 - Prefer schema and executor alignment over prompt wording when a provider or
   model may serialize absent optional values differently. Do not restate the
   same tool-selection rule in the system prompt; see `agent-steering.md`.
+- Prefer provider identifiers that the product already emits (ids, native
+  mentions, permalinks, or internal references) over free-text labels that need
+  a workspace scan to resolve. A plain name may resolve only against local known
+  state the product already stored. When that local match is missing or
+  ambiguous, reject with a repairable tool error that steers the model to an
+  id-bearing form or a discovery tool. Do not paginate provider inventory APIs
+  to invent completeness for name lookup.
 - Author first-party model-facing tools through the local Zod tool helper for
   their runtime edge: `zodTool(...)` for host-owned Junior tools and the plugin
   API's Zod helper for first-party plugin package tools. Do not add new raw
@@ -59,6 +66,22 @@ unsafe requests.
   `packages/junior/src/chat/tool-support`. Plugin packages should follow the same
   split locally. Files under any `tools` directory must be concrete tool
   definitions or tool executors, not shared helper modules.
+- Keep one first-party tool definition per file under any `tools` directory.
+- Write short tool descriptions in plain language. State what the tool does and
+  what it returns. Do not name the bot product (the display name is
+  configurable). Do not narrate when to call the tool, how it implements the
+  work, or other tools to prefer unless that contrast is the contract.
+- Put field meaning on the parameter schema with concise `describe()` text. Do
+  not repeat parameter shape or value formats in the tool description when the
+  shared param already owns that text. Reuse shared param schemas across tools
+  that accept the same value kind.
+- Define shared param schemas as the required value shape. Mark a field
+  optional at the tool input use site with `.optional()` (or
+  `.nullable().optional()` when null means omit). Do not ship a separate
+  `optional*` export of the same param.
+- Prefer direct module imports and real dependencies over optional injected
+  ports on tool factories. Add dependency injection only when production code
+  needs more than one implementation.
 - Keep runtime authority, destination, actor, credential, and durable context
   out of model-facing arguments unless the owning module explicitly allows them.
   See `policies/runtime-boundary-schemas.md`.
@@ -66,6 +89,17 @@ unsafe requests.
   agent receives a failed tool result and can correct its call. Throw
   `ToolInputError` or another expected tool error for invalid arguments, missing
   active context, unsupported values, or absent target state.
+- Plugin packages use `PluginToolInputError` for the same model-repairable cases.
+  A plain `Error` is a system failure. The tool error handler reports plain
+  `Error` throws to Sentry.
+- Do not throw a plain `Error` for ownership denials, missing targets chosen by
+  the model, invalid values the model can correct, or provider lookup misses
+  that mean "try another input". Those cases must use `ToolInputError` or
+  `PluginToolInputError`.
+- Repo lint keeps a baseline of remaining plain `Error` throws under tool
+  source paths. New plain `Error` throws fail
+  `tool-error-classification:check` unless the baseline is updated for a true
+  system, config, or integrity failure.
 - Do not return sentinel success payloads such as `{ ok: false, error }` for a
   failed model-facing tool execution. Structured result unions remain valid in
   private helpers and non-agent HTTP handlers.
