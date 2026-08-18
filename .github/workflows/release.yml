@@ -26,7 +26,7 @@ permissions:
 
 jobs:
   release:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'getsentry/junior' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     name: Release a new version
     env:
       RELEASE_APP_ID: ${{ vars.SENTRY_RELEASE_BOT_CLIENT_ID }}
