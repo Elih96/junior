@@ -1,4 +1,22 @@
 # Changelog
+
+## 0.191.0
+
+### Bug Fixes 🐛
+
+- (mcp) Reset dead sign-in state after auth errors by @sentry-junior in [#1740](https://github.com/getsentry/junior/pull/1740)
+
+### Internal Changes 🔧
+
+#### Chat
+
+- Remove per-Turn delivery choice by @dcramer in [#1736](https://github.com/getsentry/junior/pull/1736)
+
+#### Other
+
+- (deps) Bump zod to 4.5.4 by @sentry-junior in [#1738](https://github.com/getsentry/junior/pull/1738)
+- (deps) Update Pi to 0.84.4 and use `spacexai/grok-4.6` by @Elih96 in [2b1ce5f17](https://github.com/Elih96/junior/commit/2b1ce5f178830ee3a3c26598164ca7a530bc8afd)
+
 ## 0.190.0
 
 ### Breaking Changes 🛠
@@ -1934,4 +1952,3 @@
 - Organize and shard end-to-end suites by @sentry-junior in [#968](https://github.com/getsentry/junior/pull/968)
 - Accept explicit Slack URL links by @dcramer in [#967](https://github.com/getsentry/junior/pull/967)
 - Add isolated global sandbox egress by @dcramer in [#943](https://github.com/getsentry/junior/pull/943)
-
