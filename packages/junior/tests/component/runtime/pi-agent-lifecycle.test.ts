@@ -6,7 +6,6 @@ import { decideReply } from "@/chat/services/assistant-reply";
 import { ACTIVE_TURN_COMPACTION_SUMMARY_PREFIX } from "@/chat/services/context-compaction-marker";
 import { nextEmptyOutputContinuation } from "@/chat/services/empty-output-continuation";
 
-
 type StreamResponse = Awaited<ReturnType<StreamFn>>;
 
 const usage = {
@@ -36,17 +35,17 @@ function assistantResponse(text = "done"): StreamResponse {
     timestamp: Date.now(),
   };
 
-    // @ts-expect-error non-overlapping boundary cast; rule forbids as-unknown-as chains
-    return ({
+  // @ts-expect-error non-overlapping boundary cast; rule forbids as-unknown-as chains
+  return {
     async *[Symbol.asyncIterator]() {
       yield { type: "done" as const };
     },
     result: async () => message,
-  }) as StreamResponse;
+  } as StreamResponse;
 }
 
 describe("Pi Agent lifecycle", () => {
-  it("converts prepareNextTurn exceptions into error turns", async () => {
+  it("converts next-turn hook exceptions into error turns", async () => {
     const prepareError = new Error("prepare hook failed");
     const prepareNextTurn = vi.fn(async () => {
       throw prepareError;
@@ -73,6 +72,11 @@ describe("Pi Agent lifecycle", () => {
       streamFn: async () => assistantResponse(),
     });
 
+    agent.followUp({
+      role: "user",
+      content: "next",
+      timestamp: Date.now(),
+    });
     await expect(agent.prompt("hello")).resolves.toBeUndefined();
 
     expect(prepareNextTurn).toHaveBeenCalledOnce();

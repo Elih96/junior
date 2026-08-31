@@ -29,7 +29,7 @@ describe("chat config", () => {
   });
 
   it("warns for deprecated profile environment variables", async () => {
-    process.env.AI_MODEL = "xai/grok-4.5";
+    process.env.AI_MODEL = "spacexai/grok-4.6";
     process.env.AI_HANDOFF_MODEL = "openai/gpt-5.6-sol";
     process.env.AI_MODEL_PROFILES = JSON.stringify({
       coding: "openai/gpt-5.4",
@@ -97,7 +97,7 @@ describe("chat config", () => {
 
     const { botConfig } = await loadConfig();
     expect(botConfig.profiles.standard).toEqual({
-      modelId: "xai/grok-4.5",
+      modelId: "spacexai/grok-4.6",
     });
   });
 
@@ -134,7 +134,7 @@ describe("chat config", () => {
 
     const { botConfig } = await loadConfig();
     expect(botConfig.profiles).toEqual({
-      standard: { modelId: "xai/grok-4.5" },
+      standard: { modelId: "spacexai/grok-4.6" },
       handoff: {
         modelId: "openai/gpt-5.6-sol",
         reasoningLevel: "high",
@@ -160,7 +160,7 @@ describe("chat config", () => {
 
     const { botConfig } = await loadConfig();
     expect(botConfig.profiles).toEqual({
-      standard: { modelId: "xai/grok-4.5" },
+      standard: { modelId: "spacexai/grok-4.6" },
       handoff: {
         modelId: "openai/gpt-5.6-sol",
         reasoningLevel: "high",

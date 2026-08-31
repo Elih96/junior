@@ -1854,7 +1854,7 @@ function buildRuntimeServices(
               stopReason: "toolUse",
               api: "eval-timeout-resume",
               provider: "eval-timeout-resume",
-              model: "xai/grok-4.5",
+              model: "spacexai/grok-4.6",
               timestamp: nowMs,
               usage: { input: 0, output: 0, totalTokens: 0 },
             },

@@ -64,7 +64,7 @@ describe("eval AI Gateway dispatcher", () => {
 
     try {
       const stream = streamAnthropic(
-        getModel("vercel-ai-gateway", "xai/grok-4.5"),
+        getModel("vercel-ai-gateway", "spacexai/grok-4.6"),
         { messages: [userMessage] },
         {
           client: {
